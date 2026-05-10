@@ -376,6 +376,45 @@ pub const ExecuteRequest = struct {
     }
 };
 
+pub const ActionResult = struct {
+    exit_code: i32 = 0,
+    stdout_digest: ?Digest = null,
+    stderr_digest: ?Digest = null,
+
+    pub fn encode(self: ActionResult, writer: *protobuf.Writer) !void {
+        if (self.exit_code != 0) try writer.writeInt32Field(4, self.exit_code);
+        if (self.stdout_digest) |digest| try writer.writeMessageField(6, digest);
+        if (self.stderr_digest) |digest| try writer.writeMessageField(8, digest);
+    }
+
+    pub fn encodedLen(self: ActionResult) usize {
+        var len: usize = 0;
+        if (self.exit_code != 0) len += protobuf.int32FieldLen(4, self.exit_code);
+        if (self.stdout_digest) |digest| len += protobuf.messageFieldLen(6, digest.encodedLen());
+        if (self.stderr_digest) |digest| len += protobuf.messageFieldLen(8, digest.encodedLen());
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !ActionResult {
+        var out: ActionResult = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                4 => out.exit_code = try reader.readInt32(),
+                6 => {
+                    var nested = try reader.readMessage();
+                    out.stdout_digest = try Digest.decode(&nested);
+                },
+                8 => {
+                    var nested = try reader.readMessage();
+                    out.stderr_digest = try Digest.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
 pub const FindMissingBlobsRequest = struct {
     instance_name: []const u8 = "",
     blob_digests: []const Digest = &.{},
@@ -817,4 +856,29 @@ test "CAS batch messages decode repeated request and response fields" {
     try std.testing.expectEqualStrings("data", decoded_read_response.responses[0].data);
     try std.testing.expectEqual(StatusCode.not_found, decoded_read_response.responses[1].status.code);
     try std.testing.expectEqualStrings("missing", decoded_read_response.responses[1].status.message);
+}
+
+test "ActionResult round-trips exit code and stream digests" {
+    const stdout_digest: Digest = .{
+        .hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        .size_bytes = 3,
+    };
+    const stderr_digest: Digest = .{
+        .hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        .size_bytes = 4,
+    };
+    const result: ActionResult = .{
+        .exit_code = 7,
+        .stdout_digest = stdout_digest,
+        .stderr_digest = stderr_digest,
+    };
+
+    const encoded = try encodeAlloc(std.testing.allocator, result);
+    defer std.testing.allocator.free(encoded);
+
+    var reader = protobuf.Reader.init(encoded);
+    const decoded = try ActionResult.decode(&reader);
+    try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
+    try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
+    try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));
 }
