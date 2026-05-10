@@ -236,6 +236,7 @@ pub const Command = struct {
     environment_variables: []const EnvironmentVariable = &.{},
     output_files: []const []const u8 = &.{},
     output_directories: []const []const u8 = &.{},
+    output_paths: []const []const u8 = &.{},
     output_directory_format: ?OutputDirectoryFormat = null,
 
     pub const OutputDirectoryFormat = enum(u32) {
@@ -249,6 +250,7 @@ pub const Command = struct {
         allocator.free(self.environment_variables);
         allocator.free(self.output_files);
         allocator.free(self.output_directories);
+        allocator.free(self.output_paths);
         self.* = .{};
     }
 
@@ -257,6 +259,7 @@ pub const Command = struct {
         for (self.environment_variables) |variable| try writer.writeMessageField(2, variable);
         for (self.output_files) |path| try writer.writeStringField(3, path);
         for (self.output_directories) |path| try writer.writeStringField(4, path);
+        for (self.output_paths) |path| try writer.writeStringField(7, path);
         if (self.output_directory_format) |format| try writer.writeEnumField(9, format);
     }
 
@@ -266,6 +269,7 @@ pub const Command = struct {
         for (self.environment_variables) |variable| len += protobuf.messageFieldLen(2, variable.encodedLen());
         for (self.output_files) |path| len += protobuf.stringFieldLen(3, path.len);
         for (self.output_directories) |path| len += protobuf.stringFieldLen(4, path.len);
+        for (self.output_paths) |path| len += protobuf.stringFieldLen(7, path.len);
         if (self.output_directory_format) |format| len += protobuf.enumFieldLen(9, format);
         return len;
     }
@@ -279,6 +283,8 @@ pub const Command = struct {
         errdefer output_files.deinit(allocator);
         var output_directories: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer output_directories.deinit(allocator);
+        var output_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer output_paths.deinit(allocator);
 
         var out: Command = .{};
         while (try reader.next()) |tag| {
@@ -290,6 +296,7 @@ pub const Command = struct {
                 },
                 3 => try output_files.append(allocator, try reader.readString()),
                 4 => try output_directories.append(allocator, try reader.readString()),
+                7 => try output_paths.append(allocator, try reader.readString()),
                 9 => out.output_directory_format = try reader.readEnum(OutputDirectoryFormat),
                 else => try reader.skipField(tag.wire_type),
             }
@@ -299,6 +306,7 @@ pub const Command = struct {
         out.environment_variables = try environment_variables.toOwnedSlice(allocator);
         out.output_files = try output_files.toOwnedSlice(allocator);
         out.output_directories = try output_directories.toOwnedSlice(allocator);
+        out.output_paths = try output_paths.toOwnedSlice(allocator);
         return out;
     }
 };
@@ -496,11 +504,18 @@ pub const ExecuteRequest = struct {
 };
 
 pub const ActionResult = struct {
+    output_files: []const OutputFile = &.{},
     exit_code: i32 = 0,
     stdout_digest: ?Digest = null,
     stderr_digest: ?Digest = null,
 
+    pub fn deinit(self: *ActionResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.output_files);
+        self.* = .{};
+    }
+
     pub fn encode(self: ActionResult, writer: *protobuf.Writer) !void {
+        for (self.output_files) |output_file| try writer.writeMessageField(2, output_file);
         if (self.exit_code != 0) try writer.writeInt32Field(4, self.exit_code);
         if (self.stdout_digest) |digest| try writer.writeMessageField(6, digest);
         if (self.stderr_digest) |digest| try writer.writeMessageField(8, digest);
@@ -508,6 +523,7 @@ pub const ActionResult = struct {
 
     pub fn encodedLen(self: ActionResult) usize {
         var len: usize = 0;
+        for (self.output_files) |output_file| len += protobuf.messageFieldLen(2, output_file.encodedLen());
         if (self.exit_code != 0) len += protobuf.int32FieldLen(4, self.exit_code);
         if (self.stdout_digest) |digest| len += protobuf.messageFieldLen(6, digest.encodedLen());
         if (self.stderr_digest) |digest| len += protobuf.messageFieldLen(8, digest.encodedLen());
@@ -518,6 +534,7 @@ pub const ActionResult = struct {
         var out: ActionResult = .{};
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
+                2 => try reader.skipField(tag.wire_type),
                 4 => out.exit_code = try reader.readInt32(),
                 6 => {
                     var nested = try reader.readMessage();
@@ -527,6 +544,70 @@ pub const ActionResult = struct {
                     var nested = try reader.readMessage();
                     out.stderr_digest = try Digest.decode(&nested);
                 },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !ActionResult {
+        var output_files: std.ArrayListUnmanaged(OutputFile) = .empty;
+        errdefer output_files.deinit(allocator);
+        var out: ActionResult = .{};
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                2 => {
+                    var nested = try reader.readMessage();
+                    try output_files.append(allocator, try OutputFile.decode(&nested));
+                },
+                4 => out.exit_code = try reader.readInt32(),
+                6 => {
+                    var nested = try reader.readMessage();
+                    out.stdout_digest = try Digest.decode(&nested);
+                },
+                8 => {
+                    var nested = try reader.readMessage();
+                    out.stderr_digest = try Digest.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        out.output_files = try output_files.toOwnedSlice(allocator);
+        return out;
+    }
+};
+
+pub const OutputFile = struct {
+    path: []const u8 = "",
+    digest: ?Digest = null,
+    is_executable: bool = false,
+
+    pub fn encode(self: OutputFile, writer: *protobuf.Writer) !void {
+        if (self.path.len != 0) try writer.writeStringField(1, self.path);
+        if (self.digest) |digest| try writer.writeMessageField(2, digest);
+        if (self.is_executable) try writer.writeBoolField(4, true);
+    }
+
+    pub fn encodedLen(self: OutputFile) usize {
+        var len: usize = 0;
+        if (self.path.len != 0) len += protobuf.stringFieldLen(1, self.path.len);
+        if (self.digest) |digest| len += protobuf.messageFieldLen(2, digest.encodedLen());
+        if (self.is_executable) len += protobuf.boolFieldLen(4);
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !OutputFile {
+        var out: OutputFile = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.path = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.digest = try Digest.decode(&nested);
+                },
+                4 => out.is_executable = try reader.readBool(),
                 else => try reader.skipField(tag.wire_type),
             }
         }
@@ -1039,6 +1120,7 @@ test "Command decode preserves repeated fields" {
         },
         .output_files = &.{"out.txt"},
         .output_directories = &.{"logs"},
+        .output_paths = &.{ "dist/app", "dist/app.dSYM" },
         .output_directory_format = .tree_and_directory,
     };
 
@@ -1055,6 +1137,7 @@ test "Command decode preserves repeated fields" {
     try std.testing.expectEqualStrings("B", decoded.environment_variables[1].name);
     try std.testing.expectEqualStrings("out.txt", decoded.output_files[0]);
     try std.testing.expectEqualStrings("logs", decoded.output_directories[0]);
+    try std.testing.expectEqualStrings("dist/app.dSYM", decoded.output_paths[1]);
     try std.testing.expectEqual(Command.OutputDirectoryFormat.tree_and_directory, decoded.output_directory_format.?);
 }
 
@@ -1174,6 +1257,9 @@ test "ActionResult round-trips exit code and stream digests" {
         .size_bytes = 4,
     };
     const result: ActionResult = .{
+        .output_files = &.{
+            .{ .path = "out/app", .digest = stdout_digest, .is_executable = true },
+        },
         .exit_code = 7,
         .stdout_digest = stdout_digest,
         .stderr_digest = stderr_digest,
@@ -1183,7 +1269,12 @@ test "ActionResult round-trips exit code and stream digests" {
     defer std.testing.allocator.free(encoded);
 
     var reader = protobuf.Reader.init(encoded);
-    const decoded = try ActionResult.decode(&reader);
+    var decoded = try ActionResult.decodeOwned(std.testing.allocator, &reader);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_files.len);
+    try std.testing.expectEqualStrings("out/app", decoded.output_files[0].path);
+    try std.testing.expect(decoded.output_files[0].is_executable);
+    try std.testing.expect(decoded.output_files[0].digest.?.eql(stdout_digest));
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));

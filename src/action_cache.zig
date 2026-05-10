@@ -50,7 +50,7 @@ pub const Store = struct {
         var reader = protobuf.Reader.init(bytes);
         return .{
             .bytes = bytes,
-            .result = try reapi.ActionResult.decode(&reader),
+            .result = try reapi.ActionResult.decodeOwned(allocator, &reader),
         };
     }
 };
@@ -60,6 +60,7 @@ pub const Entry = struct {
     result: reapi.ActionResult,
 
     pub fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
+        self.result.deinit(allocator);
         allocator.free(self.bytes);
         self.* = undefined;
     }
