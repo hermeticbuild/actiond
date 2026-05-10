@@ -6,6 +6,85 @@ const grpc_record = @import("grpc_record.zig");
 const reapi = @import("reapi.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
 
+pub const Dispatcher = struct {
+    ctx: *anyopaque,
+    handle_unary: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
+    handle_server_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
+    handle_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
+
+    pub fn fromReapiServer(server: *reapi_dispatch.Server) Dispatcher {
+        return .{
+            .ctx = server,
+            .handle_unary = reapiUnary,
+            .handle_server_streaming = reapiServerStreaming,
+            .handle_client_streaming = reapiClientStreaming,
+        };
+    }
+
+    pub fn handleUnary(
+        self: Dispatcher,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+    ) ![]u8 {
+        return self.handle_unary(self.ctx, io, allocator, method, body);
+    }
+
+    pub fn handleServerStreaming(
+        self: Dispatcher,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+    ) ![]u8 {
+        return self.handle_server_streaming(self.ctx, io, allocator, method, body);
+    }
+
+    pub fn handleClientStreaming(
+        self: Dispatcher,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+    ) ![]u8 {
+        return self.handle_client_streaming(self.ctx, io, allocator, method, body);
+    }
+
+    fn reapiUnary(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+    ) ![]u8 {
+        const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
+        return server.*.handleUnary(io, allocator, method, body);
+    }
+
+    fn reapiServerStreaming(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+    ) ![]u8 {
+        const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
+        return server.*.handleServerStreaming(io, allocator, method, body);
+    }
+
+    fn reapiClientStreaming(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+    ) ![]u8 {
+        const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
+        return server.*.handleClientStreaming(io, allocator, method, body);
+    }
+};
+
 pub const Error = error{
     InvalidClientPreface,
     InvalidDataPadding,
@@ -63,6 +142,16 @@ pub fn serve(
     config: Config,
     server: reapi_dispatch.Server,
 ) !void {
+    var owned_server = server;
+    return serveDispatcher(io, allocator, config, Dispatcher.fromReapiServer(&owned_server));
+}
+
+pub fn serveDispatcher(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    config: Config,
+    dispatcher: Dispatcher,
+) !void {
     const address = try std.Io.net.IpAddress.parseLiteral(config.listen);
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
@@ -78,7 +167,7 @@ pub fn serve(
         const thread = try std.Thread.spawn(.{}, connectionThread, .{
             io,
             allocator,
-            server,
+            dispatcher,
             stream,
         });
         thread.detach();
@@ -88,13 +177,13 @@ pub fn serve(
 fn connectionThread(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: reapi_dispatch.Server,
+    dispatcher: Dispatcher,
     stream: std.Io.net.Stream,
 ) void {
     var owned_stream = stream;
     defer owned_stream.close(io);
 
-    handleConnection(io, allocator, server, owned_stream) catch |err| {
+    handleConnection(io, allocator, dispatcher, owned_stream) catch |err| {
         var stderr_buffer: [256]u8 = undefined;
         var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
         const stderr = &stderr_writer.interface;
@@ -106,7 +195,7 @@ fn connectionThread(
 pub fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: reapi_dispatch.Server,
+    dispatcher: Dispatcher,
     stream: std.Io.net.Stream,
 ) !void {
     var read_buffer: [64 * 1024]u8 = undefined;
@@ -116,7 +205,7 @@ pub fn handleConnection(
     try handleConnectionStreams(
         io,
         allocator,
-        server,
+        dispatcher,
         &stream_reader.interface,
         &stream_writer.interface,
     );
@@ -125,7 +214,7 @@ pub fn handleConnection(
 pub fn handleConnectionStreams(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: reapi_dispatch.Server,
+    dispatcher: Dispatcher,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
 ) !void {
@@ -197,7 +286,7 @@ pub fn handleConnectionStreams(
                 }
 
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_stream)) {
-                    try respondAndRemove(io, allocator, server, writer, &streams, incoming.header.stream_id);
+                    try respondAndRemove(io, allocator, dispatcher, writer, &streams, incoming.header.stream_id);
                 }
             },
             .continuation => {
@@ -219,7 +308,7 @@ pub fn handleConnectionStreams(
                     try writer.flush();
                 }
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_stream)) {
-                    try respondAndRemove(io, allocator, server, writer, &streams, incoming.header.stream_id);
+                    try respondAndRemove(io, allocator, dispatcher, writer, &streams, incoming.header.stream_id);
                 }
             },
             .rst_stream => removeStream(allocator, &streams, incoming.header.stream_id),
@@ -354,7 +443,7 @@ fn finishHeaders(
 fn respondAndRemove(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: reapi_dispatch.Server,
+    dispatcher: Dispatcher,
     writer: *std.Io.Writer,
     streams: *std.ArrayListUnmanaged(StreamState),
     id: u31,
@@ -365,19 +454,19 @@ fn respondAndRemove(
             state.deinit(allocator);
             _ = streams.orderedRemove(i);
         }
-        return respondStream(io, allocator, server, writer, state);
+        return respondStream(io, allocator, dispatcher, writer, state);
     }
 }
 
 fn respondStream(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: reapi_dispatch.Server,
+    dispatcher: Dispatcher,
     writer: *std.Io.Writer,
     state: *const StreamState,
 ) !void {
     const method = state.method orelse return sendGrpcError(writer, state.id, "13", "MissingPathHeader");
-    const response_body = dispatchGrpc(io, allocator, server, method, state.body.items) catch |err| {
+    const response_body = dispatchGrpc(io, allocator, dispatcher, method, state.body.items) catch |err| {
         const status = if (err == error.UnsupportedMethod) "12" else "13";
         return sendGrpcError(writer, state.id, status, @errorName(err));
     };
@@ -388,15 +477,15 @@ fn respondStream(
 fn dispatchGrpc(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: reapi_dispatch.Server,
+    dispatcher: Dispatcher,
     method: []const u8,
     body: []const u8,
 ) ![]u8 {
     const kind = methodKind(method) orelse return error.UnsupportedMethod;
     return switch (kind) {
-        .unary => try server.handleUnary(io, allocator, method, body),
-        .server_streaming => try server.handleServerStreaming(io, allocator, method, body),
-        .client_streaming => try server.handleClientStreaming(io, allocator, method, body),
+        .unary => try dispatcher.handleUnary(io, allocator, method, body),
+        .server_streaming => try dispatcher.handleServerStreaming(io, allocator, method, body),
+        .client_streaming => try dispatcher.handleClientStreaming(io, allocator, method, body),
     };
 }
 
@@ -555,10 +644,11 @@ test "HTTP/2 connection dispatches a capabilities unary request" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
 
+    var server = reapi_dispatch.Server.init(cas.Store.init(tmp.dir));
     try handleConnectionStreams(
         std.testing.io,
         std.testing.allocator,
-        reapi_dispatch.Server.init(cas.Store.init(tmp.dir)),
+        Dispatcher.fromReapiServer(&server),
         &reader,
         &output.writer,
     );
