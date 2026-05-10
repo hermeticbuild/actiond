@@ -51,6 +51,11 @@ pub fn int64FieldLen(field_number: u32, value: i64) usize {
     return tagLen(field_number, .varint) + varintLen(bits);
 }
 
+pub fn int32FieldLen(field_number: u32, value: i32) usize {
+    const bits: u64 = @bitCast(@as(i64, value));
+    return tagLen(field_number, .varint) + varintLen(bits);
+}
+
 pub fn bytesFieldLen(field_number: u32, value_len: usize) usize {
     return tagLen(field_number, .length_delimited) + varintLen(value_len) + value_len;
 }
@@ -141,6 +146,12 @@ pub const Writer = struct {
         try self.writeVarint(bits);
     }
 
+    pub fn writeInt32Field(self: *Writer, field_number: u32, value: i32) !void {
+        try self.writeTag(field_number, .varint);
+        const bits: u64 = @bitCast(@as(i64, value));
+        try self.writeVarint(bits);
+    }
+
     pub fn writeBytesField(self: *Writer, field_number: u32, value: []const u8) !void {
         try self.writeTag(field_number, .length_delimited);
         try self.writeVarint(value.len);
@@ -208,6 +219,11 @@ pub const Reader = struct {
 
     pub fn readInt64(self: *Reader) !i64 {
         return @bitCast(try self.readVarint());
+    }
+
+    pub fn readInt32(self: *Reader) !i32 {
+        const signed: i64 = @bitCast(try self.readVarint());
+        return std.math.cast(i32, signed) orelse error.InvalidLength;
     }
 
     pub fn readBytes(self: *Reader) ![]const u8 {

@@ -34,6 +34,55 @@ pub const Digest = struct {
     }
 };
 
+pub const StatusCode = enum(i32) {
+    ok = 0,
+    cancelled = 1,
+    unknown = 2,
+    invalid_argument = 3,
+    deadline_exceeded = 4,
+    not_found = 5,
+    already_exists = 6,
+    permission_denied = 7,
+    resource_exhausted = 8,
+    failed_precondition = 9,
+    aborted = 10,
+    out_of_range = 11,
+    unimplemented = 12,
+    internal = 13,
+    unavailable = 14,
+    data_loss = 15,
+    unauthenticated = 16,
+};
+
+pub const Status = struct {
+    code: StatusCode = .ok,
+    message: []const u8 = "",
+
+    pub fn encode(self: Status, writer: *protobuf.Writer) !void {
+        if (self.code != .ok) try writer.writeInt32Field(1, @intFromEnum(self.code));
+        if (self.message.len != 0) try writer.writeStringField(2, self.message);
+    }
+
+    pub fn encodedLen(self: Status) usize {
+        var len: usize = 0;
+        if (self.code != .ok) len += protobuf.int32FieldLen(1, @intFromEnum(self.code));
+        if (self.message.len != 0) len += protobuf.stringFieldLen(2, self.message.len);
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !Status {
+        var out: Status = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.code = @enumFromInt(try reader.readInt32()),
+                2 => out.message = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
 pub const EnvironmentVariable = struct {
     name: []const u8 = "",
     value: []const u8 = "",
@@ -327,6 +376,292 @@ pub const ExecuteRequest = struct {
     }
 };
 
+pub const FindMissingBlobsRequest = struct {
+    instance_name: []const u8 = "",
+    blob_digests: []const Digest = &.{},
+
+    pub fn deinit(self: *FindMissingBlobsRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.blob_digests);
+        self.* = .{};
+    }
+
+    pub fn encode(self: FindMissingBlobsRequest, writer: *protobuf.Writer) !void {
+        if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
+        for (self.blob_digests) |digest| try writer.writeMessageField(2, digest);
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !FindMissingBlobsRequest {
+        var digests: std.ArrayListUnmanaged(Digest) = .empty;
+        errdefer digests.deinit(allocator);
+        var out: FindMissingBlobsRequest = .{};
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    try digests.append(allocator, try Digest.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        out.blob_digests = try digests.toOwnedSlice(allocator);
+        return out;
+    }
+};
+
+pub const FindMissingBlobsResponse = struct {
+    missing_blob_digests: []const Digest = &.{},
+
+    pub fn deinit(self: *FindMissingBlobsResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.missing_blob_digests);
+        self.* = .{};
+    }
+
+    pub fn encode(self: FindMissingBlobsResponse, writer: *protobuf.Writer) !void {
+        for (self.missing_blob_digests) |digest| try writer.writeMessageField(2, digest);
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !FindMissingBlobsResponse {
+        var digests: std.ArrayListUnmanaged(Digest) = .empty;
+        errdefer digests.deinit(allocator);
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                2 => {
+                    var nested = try reader.readMessage();
+                    try digests.append(allocator, try Digest.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        return .{ .missing_blob_digests = try digests.toOwnedSlice(allocator) };
+    }
+};
+
+pub const BatchUpdateBlobsRequest = struct {
+    instance_name: []const u8 = "",
+    requests: []const Item = &.{},
+
+    pub const Item = struct {
+        digest: Digest = .{},
+        data: []const u8 = "",
+
+        pub fn encode(self: Item, writer: *protobuf.Writer) !void {
+            if (self.digest.hash.len != 0) try writer.writeMessageField(1, self.digest);
+            if (self.data.len != 0) try writer.writeBytesField(2, self.data);
+        }
+
+        pub fn encodedLen(self: Item) usize {
+            var len: usize = 0;
+            if (self.digest.hash.len != 0) len += protobuf.messageFieldLen(1, self.digest.encodedLen());
+            if (self.data.len != 0) len += protobuf.bytesFieldLen(2, self.data.len);
+            return len;
+        }
+
+        pub fn decode(reader: *protobuf.Reader) !Item {
+            var out: Item = .{};
+            while (try reader.next()) |tag| {
+                switch (tag.field_number) {
+                    1 => {
+                        var nested = try reader.readMessage();
+                        out.digest = try Digest.decode(&nested);
+                    },
+                    2 => out.data = try reader.readBytes(),
+                    else => try reader.skipField(tag.wire_type),
+                }
+            }
+            return out;
+        }
+    };
+
+    pub fn deinit(self: *BatchUpdateBlobsRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.requests);
+        self.* = .{};
+    }
+
+    pub fn encode(self: BatchUpdateBlobsRequest, writer: *protobuf.Writer) !void {
+        if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
+        for (self.requests) |request| try writer.writeMessageField(2, request);
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !BatchUpdateBlobsRequest {
+        var requests: std.ArrayListUnmanaged(Item) = .empty;
+        errdefer requests.deinit(allocator);
+        var out: BatchUpdateBlobsRequest = .{};
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    try requests.append(allocator, try Item.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        out.requests = try requests.toOwnedSlice(allocator);
+        return out;
+    }
+};
+
+pub const BatchUpdateBlobsResponse = struct {
+    responses: []const Item = &.{},
+
+    pub const Item = struct {
+        digest: Digest = .{},
+        status: Status = .{},
+
+        pub fn encode(self: Item, writer: *protobuf.Writer) !void {
+            if (self.digest.hash.len != 0) try writer.writeMessageField(1, self.digest);
+            try writer.writeMessageField(2, self.status);
+        }
+
+        pub fn decode(reader: *protobuf.Reader) !Item {
+            var out: Item = .{};
+            while (try reader.next()) |tag| {
+                switch (tag.field_number) {
+                    1 => {
+                        var nested = try reader.readMessage();
+                        out.digest = try Digest.decode(&nested);
+                    },
+                    2 => {
+                        var nested = try reader.readMessage();
+                        out.status = try Status.decode(&nested);
+                    },
+                    else => try reader.skipField(tag.wire_type),
+                }
+            }
+            return out;
+        }
+    };
+
+    pub fn deinit(self: *BatchUpdateBlobsResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.responses);
+        self.* = .{};
+    }
+
+    pub fn encode(self: BatchUpdateBlobsResponse, writer: *protobuf.Writer) !void {
+        for (self.responses) |response| try writer.writeMessageField(1, response);
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !BatchUpdateBlobsResponse {
+        var responses: std.ArrayListUnmanaged(Item) = .empty;
+        errdefer responses.deinit(allocator);
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => {
+                    var nested = try reader.readMessage();
+                    try responses.append(allocator, try Item.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        return .{ .responses = try responses.toOwnedSlice(allocator) };
+    }
+};
+
+pub const BatchReadBlobsRequest = struct {
+    instance_name: []const u8 = "",
+    digests: []const Digest = &.{},
+
+    pub fn deinit(self: *BatchReadBlobsRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.digests);
+        self.* = .{};
+    }
+
+    pub fn encode(self: BatchReadBlobsRequest, writer: *protobuf.Writer) !void {
+        if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
+        for (self.digests) |digest| try writer.writeMessageField(2, digest);
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !BatchReadBlobsRequest {
+        var digests: std.ArrayListUnmanaged(Digest) = .empty;
+        errdefer digests.deinit(allocator);
+        var out: BatchReadBlobsRequest = .{};
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    try digests.append(allocator, try Digest.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        out.digests = try digests.toOwnedSlice(allocator);
+        return out;
+    }
+};
+
+pub const BatchReadBlobsResponse = struct {
+    responses: []const Item = &.{},
+
+    pub const Item = struct {
+        digest: Digest = .{},
+        data: []const u8 = "",
+        status: Status = .{},
+
+        pub fn encode(self: Item, writer: *protobuf.Writer) !void {
+            if (self.digest.hash.len != 0) try writer.writeMessageField(1, self.digest);
+            if (self.data.len != 0) try writer.writeBytesField(2, self.data);
+            try writer.writeMessageField(3, self.status);
+        }
+
+        pub fn decode(reader: *protobuf.Reader) !Item {
+            var out: Item = .{};
+            while (try reader.next()) |tag| {
+                switch (tag.field_number) {
+                    1 => {
+                        var nested = try reader.readMessage();
+                        out.digest = try Digest.decode(&nested);
+                    },
+                    2 => out.data = try reader.readBytes(),
+                    3 => {
+                        var nested = try reader.readMessage();
+                        out.status = try Status.decode(&nested);
+                    },
+                    else => try reader.skipField(tag.wire_type),
+                }
+            }
+            return out;
+        }
+    };
+
+    pub fn deinit(self: *BatchReadBlobsResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.responses);
+        self.* = .{};
+    }
+
+    pub fn encode(self: BatchReadBlobsResponse, writer: *protobuf.Writer) !void {
+        for (self.responses) |response| try writer.writeMessageField(1, response);
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !BatchReadBlobsResponse {
+        var responses: std.ArrayListUnmanaged(Item) = .empty;
+        errdefer responses.deinit(allocator);
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => {
+                    var nested = try reader.readMessage();
+                    try responses.append(allocator, try Item.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        return .{ .responses = try responses.toOwnedSlice(allocator) };
+    }
+};
+
 pub fn encodeAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     return protobuf.encodeAlloc(allocator, value);
 }
@@ -443,4 +778,43 @@ test "Directory decodes files and child directories" {
     try std.testing.expectEqual(@as(usize, 1), decoded.directories.len);
     try std.testing.expectEqualStrings("src", decoded.directories[0].name);
     try std.testing.expect(decoded.directories[0].digest.?.eql(child_digest));
+}
+
+test "CAS batch messages decode repeated request and response fields" {
+    const digest: Digest = .{
+        .hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        .size_bytes = 4,
+    };
+
+    const update_request: BatchUpdateBlobsRequest = .{
+        .instance_name = "local",
+        .requests = &.{
+            .{ .digest = digest, .data = "data" },
+        },
+    };
+    const update_request_bytes = try encodeAlloc(std.testing.allocator, update_request);
+    defer std.testing.allocator.free(update_request_bytes);
+    var update_request_reader = protobuf.Reader.init(update_request_bytes);
+    var decoded_update_request = try BatchUpdateBlobsRequest.decodeOwned(std.testing.allocator, &update_request_reader);
+    defer decoded_update_request.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("local", decoded_update_request.instance_name);
+    try std.testing.expectEqual(@as(usize, 1), decoded_update_request.requests.len);
+    try std.testing.expect(decoded_update_request.requests[0].digest.eql(digest));
+    try std.testing.expectEqualStrings("data", decoded_update_request.requests[0].data);
+
+    const read_response: BatchReadBlobsResponse = .{
+        .responses = &.{
+            .{ .digest = digest, .data = "data", .status = .{} },
+            .{ .digest = digest, .status = .{ .code = .not_found, .message = "missing" } },
+        },
+    };
+    const read_response_bytes = try encodeAlloc(std.testing.allocator, read_response);
+    defer std.testing.allocator.free(read_response_bytes);
+    var read_response_reader = protobuf.Reader.init(read_response_bytes);
+    var decoded_read_response = try BatchReadBlobsResponse.decodeOwned(std.testing.allocator, &read_response_reader);
+    defer decoded_read_response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), decoded_read_response.responses.len);
+    try std.testing.expectEqualStrings("data", decoded_read_response.responses[0].data);
+    try std.testing.expectEqual(StatusCode.not_found, decoded_read_response.responses[1].status.code);
+    try std.testing.expectEqualStrings("missing", decoded_read_response.responses[1].status.message);
 }
