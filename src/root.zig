@@ -1,6 +1,7 @@
 pub const action_executor = @import("action_executor.zig");
 pub const action_runner = @import("action_runner.zig");
 pub const cas = @import("cas.zig");
+pub const cache_service = @import("cache_service.zig");
 pub const execroot = @import("execroot.zig");
 pub const protobuf_wire = @import("protobuf_wire.zig");
 pub const reapi = @import("reapi.zig");
@@ -10,6 +11,7 @@ test {
     _ = action_executor;
     _ = action_runner;
     _ = cas;
+    _ = cache_service;
     _ = execroot;
     _ = protobuf_wire;
     _ = reapi;
