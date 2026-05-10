@@ -14,6 +14,8 @@ pub const Error = error{
     InvalidDirectoryEntryName,
 };
 
+const max_output_file_bytes = 1024 * 1024 * 1024;
+
 pub fn executeAndCacheAction(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -25,13 +27,13 @@ pub fn executeAndCacheAction(
     var outcome = try executeAction(io, allocator, blob_store, work_root, action_digest);
     errdefer outcome.deinit(allocator);
 
-    var stdout_hash: [64]u8 = undefined;
-    var stderr_hash: [64]u8 = undefined;
+    var result = try actionResultFromOutcomeOwned(allocator, outcome);
+    defer result.deinit(allocator);
     try result_store.put(
         io,
         allocator,
         action_digest,
-        actionResultFromOutcome(outcome, &stdout_hash, &stderr_hash),
+        result.result,
     );
     return outcome;
 }
@@ -66,7 +68,10 @@ pub fn executeAction(
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
-    return try action_runner.runCommand(io, allocator, store, command, cwd_buffer[0..cwd_len]);
+    var outcome = try action_runner.runCommand(io, allocator, store, command, cwd_buffer[0..cwd_len]);
+    errdefer outcome.deinit(allocator);
+    try collectOutputFiles(io, allocator, store, work_root, command, &outcome);
+    return outcome;
 }
 
 pub fn actionResultFromOutcome(
@@ -83,6 +88,122 @@ pub fn actionResultFromOutcome(
         .stdout_digest = if (outcome.stdout_digest) |digest| digest.toReapi(stdout_hash) else null,
         .stderr_digest = if (outcome.stderr_digest) |digest| digest.toReapi(stderr_hash) else null,
     };
+}
+
+pub const OwnedActionResult = struct {
+    result: reapi.ActionResult,
+    output_files: []reapi.OutputFile,
+    hash_strings: []const []u8,
+
+    pub fn deinit(self: *OwnedActionResult, allocator: std.mem.Allocator) void {
+        for (self.hash_strings) |hash| allocator.free(hash);
+        allocator.free(self.hash_strings);
+        allocator.free(self.output_files);
+        self.* = undefined;
+    }
+};
+
+pub fn actionResultFromOutcomeOwned(
+    allocator: std.mem.Allocator,
+    outcome: action_runner.Outcome,
+) !OwnedActionResult {
+    var hash_strings: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (hash_strings.items) |hash| allocator.free(hash);
+        hash_strings.deinit(allocator);
+    }
+
+    var output_files = try allocator.alloc(reapi.OutputFile, outcome.output_files.len);
+    errdefer allocator.free(output_files);
+
+    for (outcome.output_files, 0..) |output_file, i| {
+        output_files[i] = .{
+            .path = output_file.path,
+            .digest = try appendDigest(allocator, &hash_strings, output_file.digest),
+            .is_executable = output_file.is_executable,
+        };
+    }
+
+    return .{
+        .result = .{
+            .output_files = output_files,
+            .exit_code = switch (outcome.status) {
+                .exited => |code| code,
+                .signaled => |signal| 128 + @as(i32, signal),
+                .stopped, .unknown => 1,
+            },
+            .stdout_digest = if (outcome.stdout_digest) |digest| try appendDigest(allocator, &hash_strings, digest) else null,
+            .stderr_digest = if (outcome.stderr_digest) |digest| try appendDigest(allocator, &hash_strings, digest) else null,
+        },
+        .output_files = output_files,
+        .hash_strings = try hash_strings.toOwnedSlice(allocator),
+    };
+}
+
+fn appendDigest(
+    allocator: std.mem.Allocator,
+    hash_strings: *std.ArrayListUnmanaged([]u8),
+    digest: cas.Digest,
+) !reapi.Digest {
+    var buffer: [64]u8 = undefined;
+    const owned_hash = try allocator.dupe(u8, digest.formatHex(&buffer));
+    errdefer allocator.free(owned_hash);
+    try hash_strings.append(allocator, owned_hash);
+    return .{
+        .hash = owned_hash,
+        .size_bytes = @intCast(digest.size_bytes),
+    };
+}
+
+fn collectOutputFiles(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    command: reapi.Command,
+    outcome: *action_runner.Outcome,
+) !void {
+    const paths = if (command.output_paths.len != 0) command.output_paths else command.output_files;
+    var output_files: std.ArrayListUnmanaged(action_runner.Outcome.OutputFile) = .empty;
+    errdefer {
+        for (output_files.items) |output_file| allocator.free(output_file.path);
+        output_files.deinit(allocator);
+    }
+
+    for (paths) |path| {
+        try execroot.validatePath(path);
+        const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        if (stat.kind != .file) return error.FailedPrecondition;
+
+        const bytes = work_root.readFileAlloc(
+            io,
+            path,
+            allocator,
+            .limited(max_output_file_bytes),
+        ) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        defer allocator.free(bytes);
+
+        const path_copy = try allocator.dupe(u8, path);
+        errdefer allocator.free(path_copy);
+        try output_files.append(allocator, .{
+            .path = path_copy,
+            .digest = try store.putBytes(io, bytes),
+            .is_executable = isExecutable(stat),
+        });
+    }
+
+    outcome.output_files = try output_files.toOwnedSlice(allocator);
+}
+
+fn isExecutable(stat: std.Io.Dir.Stat) bool {
+    if (comptime !std.Io.File.Permissions.has_executable_bit) return false;
+    return stat.permissions.toMode() & 0o111 != 0;
 }
 
 fn collectInputs(
@@ -245,6 +366,47 @@ test "executeAction walks nested REAPI directories" {
     try std.testing.expectEqualStrings("nested", outcome.stdout);
 }
 
+test "executeAction uploads requested output files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
+    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
+        .arguments = &.{ "/bin/sh", "-c", "mkdir -p out && printf artifact > out/file.txt && chmod +x out/file.txt" },
+        .output_paths = &.{"out/file.txt"},
+    });
+
+    var command_hash: [64]u8 = undefined;
+    var root_hash: [64]u8 = undefined;
+    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
+        .command_digest = command_digest.toReapi(&command_hash),
+        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    });
+
+    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
+    defer outcome.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
+    try std.testing.expectEqualStrings("out/file.txt", outcome.output_files[0].path);
+    try std.testing.expect(outcome.output_files[0].is_executable);
+
+    const output = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_files[0].digest);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualStrings("artifact", output);
+
+    var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.result.output_files.len);
+    try std.testing.expectEqualStrings("out/file.txt", result.result.output_files[0].path);
+    try std.testing.expect(result.result.output_files[0].digest.?.eql(outcome.output_files[0].digest.toReapi(&command_hash)));
+}
+
 test "executeAndCacheAction stores ActionResult under action digest" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -261,7 +423,8 @@ test "executeAndCacheAction stores ActionResult under action digest" {
 
     const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Directory{});
     const command_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "printf cached" },
+        .arguments = &.{ "/bin/sh", "-c", "printf cached; printf artifact > artifact.txt" },
+        .output_files = &.{"artifact.txt"},
     });
 
     var command_hash: [64]u8 = undefined;
@@ -286,4 +449,6 @@ test "executeAndCacheAction stores ActionResult under action digest" {
 
     try std.testing.expectEqual(@as(i32, 0), entry.result.exit_code);
     try std.testing.expect(entry.result.stdout_digest != null);
+    try std.testing.expectEqual(@as(usize, 1), entry.result.output_files.len);
+    try std.testing.expectEqualStrings("artifact.txt", entry.result.output_files[0].path);
 }

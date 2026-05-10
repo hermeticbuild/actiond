@@ -17,13 +17,22 @@ pub const Status = union(enum) {
 };
 
 pub const Outcome = struct {
+    pub const OutputFile = struct {
+        path: []u8,
+        digest: cas.Digest,
+        is_executable: bool = false,
+    };
+
     status: Status,
     stdout: []u8,
     stderr: []u8,
     stdout_digest: ?cas.Digest = null,
     stderr_digest: ?cas.Digest = null,
+    output_files: []OutputFile = &.{},
 
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
+        for (self.output_files) |output_file| allocator.free(output_file.path);
+        allocator.free(self.output_files);
         allocator.free(self.stdout);
         allocator.free(self.stderr);
         self.* = undefined;

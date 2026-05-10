@@ -53,14 +53,13 @@ pub fn execute(
     var outcome = try action_executor.executeAction(io, allocator, blob_store, work_dir, action_digest);
     defer outcome.deinit(allocator);
 
-    var stdout_hash: [64]u8 = undefined;
-    var stderr_hash: [64]u8 = undefined;
-    const result = action_executor.actionResultFromOutcome(outcome, &stdout_hash, &stderr_hash);
+    var result = try action_executor.actionResultFromOutcomeOwned(allocator, outcome);
+    defer result.deinit(allocator);
     if (!do_not_cache) {
-        if (result_store) |store| try store.put(io, allocator, action_digest, result);
+        if (result_store) |store| try store.put(io, allocator, action_digest, result.result);
     }
 
-    return try completedOperation(allocator, action_digest, result, false);
+    return try completedOperation(allocator, action_digest, result.result, false);
 }
 
 fn readDoNotCache(
