@@ -65,6 +65,7 @@ pub fn executeAction(
 
     const materializer = execroot.Materializer.init(store, work_root);
     try materializer.copyInputs(io, allocator, inputs.items);
+    try prepareOutputParents(io, work_root, command);
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
@@ -214,6 +215,28 @@ fn collectOutputFiles(
     }
 
     outcome.output_files = try output_files.toOwnedSlice(allocator);
+}
+
+fn prepareOutputParents(
+    io: std.Io,
+    work_root: std.Io.Dir,
+    command: reapi.Command,
+) !void {
+    if (command.output_paths.len != 0) {
+        for (command.output_paths) |path| try createOutputParent(io, work_root, path);
+        return;
+    }
+
+    for (command.output_files) |path| try createOutputParent(io, work_root, path);
+    for (command.output_directories) |path| try createOutputParent(io, work_root, path);
+}
+
+fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void {
+    if (path.len == 0) return;
+    try execroot.validatePath(path);
+    const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
+    if (last_slash == 0) return;
+    try work_root.createDirPath(io, path[0..last_slash]);
 }
 
 fn isExecutable(stat: std.Io.Dir.Stat) bool {
@@ -470,6 +493,38 @@ test "executeAction uploads requested output files" {
     try std.testing.expectEqual(@as(usize, 1), result.result.output_files.len);
     try std.testing.expectEqualStrings("out/file.txt", result.result.output_files[0].path);
     try std.testing.expect(result.result.output_files[0].digest.?.eql(outcome.output_files[0].digest.toReapi(&command_hash)));
+}
+
+test "executeAction creates parent directories for declared outputs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
+    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
+        .arguments = &.{ "/bin/sh", "-c", "printf generated > gen/out.txt" },
+        .output_files = &.{"gen/out.txt"},
+    });
+
+    var command_hash: [64]u8 = undefined;
+    var root_hash: [64]u8 = undefined;
+    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
+        .command_digest = command_digest.toReapi(&command_hash),
+        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    });
+
+    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
+    defer outcome.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
+    const output = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_files[0].digest);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualStrings("generated", output);
 }
 
 test "executeAndCacheAction stores ActionResult under action digest" {
