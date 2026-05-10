@@ -11,8 +11,11 @@ pub const Error = error{
     AcceptFailed,
     BindFailed,
     ListenFailed,
+    ReadFailed,
     SocketFailed,
     UnsupportedHost,
+    UnexpectedEof,
+    WriteFailed,
 };
 
 pub const Listener = struct {
@@ -38,6 +41,40 @@ pub const Connection = struct {
 
     pub fn close(self: Connection) void {
         _ = linux.close(self.fd);
+    }
+
+    pub fn readExact(self: Connection, buffer: []u8) !void {
+        if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+
+        var offset: usize = 0;
+        while (offset < buffer.len) {
+            const rc = linux.read(self.fd, buffer[offset..].ptr, buffer.len - offset);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    const n: usize = @intCast(rc);
+                    if (n == 0) return error.UnexpectedEof;
+                    offset += n;
+                },
+                else => return error.ReadFailed,
+            }
+        }
+    }
+
+    pub fn writeAll(self: Connection, bytes: []const u8) !void {
+        if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const rc = linux.write(self.fd, bytes[offset..].ptr, bytes.len - offset);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    const n: usize = @intCast(rc);
+                    if (n == 0) return error.WriteFailed;
+                    offset += n;
+                },
+                else => return error.WriteFailed,
+            }
+        }
     }
 };
 
