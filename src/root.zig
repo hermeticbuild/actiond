@@ -1,6 +1,7 @@
 pub const action_executor = @import("action_executor.zig");
 pub const action_runner = @import("action_runner.zig");
 pub const bytestream = @import("bytestream.zig");
+pub const bytestream_service = @import("bytestream_service.zig");
 pub const cas = @import("cas.zig");
 pub const cache_service = @import("cache_service.zig");
 pub const execroot = @import("execroot.zig");
@@ -15,6 +16,7 @@ test {
     _ = action_executor;
     _ = action_runner;
     _ = bytestream;
+    _ = bytestream_service;
     _ = cas;
     _ = cache_service;
     _ = execroot;
