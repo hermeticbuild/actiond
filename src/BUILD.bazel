@@ -6,6 +6,7 @@ zig_library(
     srcs = [
         "action_executor.zig",
         "action_runner.zig",
+        "bytestream.zig",
         "cas.zig",
         "cache_service.zig",
         "execroot.zig",
@@ -26,6 +27,7 @@ zig_test(
     srcs = [
         "action_executor.zig",
         "action_runner.zig",
+        "bytestream.zig",
         "cas.zig",
         "cache_service.zig",
         "execroot.zig",
