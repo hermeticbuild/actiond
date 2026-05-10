@@ -8,6 +8,7 @@ pub const cas = @import("cas.zig");
 pub const cache_service = @import("cache_service.zig");
 pub const capabilities_service = @import("capabilities_service.zig");
 pub const execroot = @import("execroot.zig");
+pub const execution_service = @import("execution_service.zig");
 pub const guest_init = @import("guest_init.zig");
 pub const grpc_record = @import("grpc_record.zig");
 pub const protobuf_wire = @import("protobuf_wire.zig");
@@ -26,6 +27,7 @@ test {
     _ = cache_service;
     _ = capabilities_service;
     _ = execroot;
+    _ = execution_service;
     _ = guest_init;
     _ = grpc_record;
     _ = protobuf_wire;
