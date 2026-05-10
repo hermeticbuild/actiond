@@ -4,6 +4,7 @@ zig_library(
     name = "actiond",
     main = "root.zig",
     srcs = [
+        "action_executor.zig",
         "action_runner.zig",
         "cas.zig",
         "execroot.zig",
@@ -19,6 +20,7 @@ zig_test(
     name = "unit_tests",
     main = "root.zig",
     srcs = [
+        "action_executor.zig",
         "action_runner.zig",
         "cas.zig",
         "execroot.zig",

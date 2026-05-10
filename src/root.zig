@@ -1,3 +1,4 @@
+pub const action_executor = @import("action_executor.zig");
 pub const action_runner = @import("action_runner.zig");
 pub const cas = @import("cas.zig");
 pub const execroot = @import("execroot.zig");
@@ -6,6 +7,7 @@ pub const reapi = @import("reapi.zig");
 pub const version = @import("version.zig");
 
 test {
+    _ = action_executor;
     _ = action_runner;
     _ = cas;
     _ = execroot;
