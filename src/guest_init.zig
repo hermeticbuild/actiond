@@ -11,6 +11,7 @@ pub const Mount = struct {
     source: [:0]const u8,
     target: [:0]const u8,
     fstype: [:0]const u8,
+    flags: usize = 0,
 };
 
 pub const mounts = [_]Mount{
@@ -28,7 +29,7 @@ pub const module_paths = [_][:0]const u8{
     "/modules/virtiofs.ko",
 };
 
-pub const cas_mount: Mount = .{ .source = "cas", .target = "/cas", .fstype = "virtiofs" };
+pub const cas_mount: Mount = .{ .source = "cas", .target = "/cas", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
 pub const worker_argv = [_][]const u8{ "/actiond", "--guest-worker" };
 
 pub fn run(io: std.Io) !void {
@@ -58,7 +59,7 @@ fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {
         mount_spec.source.ptr,
         mount_spec.target.ptr,
         mount_spec.fstype.ptr,
-        0,
+        mount_spec.flags,
         0,
     );
     switch (std.posix.errno(rc)) {
@@ -109,6 +110,7 @@ test "guest init mount plan stays minimal" {
     try std.testing.expectEqual(@as(usize, 5), mounts.len);
     try std.testing.expectEqualStrings("virtiofs", cas_mount.fstype);
     try std.testing.expectEqualStrings("/cas", cas_mount.target);
+    try std.testing.expectEqual(std.os.linux.MS.RDONLY, cas_mount.flags);
     try std.testing.expectEqual(@as(usize, 4), module_paths.len);
     try std.testing.expectEqualStrings("/actiond", worker_argv[0]);
     try std.testing.expectEqualStrings("--guest-worker", worker_argv[1]);

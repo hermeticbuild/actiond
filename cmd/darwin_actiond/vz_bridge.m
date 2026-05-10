@@ -63,7 +63,7 @@ void *actiond_vm_start(
         bootLoader.initialRamdiskURL = initramfsURL;
         bootLoader.commandLine = @"console=hvc0 init=/init panic=-1 quiet";
 
-        VZSharedDirectory *casDirectory = [[VZSharedDirectory alloc] initWithURL:casURL readOnly:NO];
+        VZSharedDirectory *casDirectory = [[VZSharedDirectory alloc] initWithURL:casURL readOnly:YES];
         VZSingleDirectoryShare *casShare = [[VZSingleDirectoryShare alloc] initWithDirectory:casDirectory];
         VZVirtioFileSystemDeviceConfiguration *casFs = [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"cas"];
         casFs.share = casShare;
