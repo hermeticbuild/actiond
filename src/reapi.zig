@@ -236,6 +236,7 @@ pub const Command = struct {
     environment_variables: []const EnvironmentVariable = &.{},
     output_files: []const []const u8 = &.{},
     output_directories: []const []const u8 = &.{},
+    working_directory: []const u8 = "",
     output_paths: []const []const u8 = &.{},
     output_directory_format: ?OutputDirectoryFormat = null,
 
@@ -259,6 +260,7 @@ pub const Command = struct {
         for (self.environment_variables) |variable| try writer.writeMessageField(2, variable);
         for (self.output_files) |path| try writer.writeStringField(3, path);
         for (self.output_directories) |path| try writer.writeStringField(4, path);
+        if (self.working_directory.len != 0) try writer.writeStringField(6, self.working_directory);
         for (self.output_paths) |path| try writer.writeStringField(7, path);
         if (self.output_directory_format) |format| try writer.writeEnumField(9, format);
     }
@@ -269,6 +271,7 @@ pub const Command = struct {
         for (self.environment_variables) |variable| len += protobuf.messageFieldLen(2, variable.encodedLen());
         for (self.output_files) |path| len += protobuf.stringFieldLen(3, path.len);
         for (self.output_directories) |path| len += protobuf.stringFieldLen(4, path.len);
+        if (self.working_directory.len != 0) len += protobuf.stringFieldLen(6, self.working_directory.len);
         for (self.output_paths) |path| len += protobuf.stringFieldLen(7, path.len);
         if (self.output_directory_format) |format| len += protobuf.enumFieldLen(9, format);
         return len;
@@ -296,6 +299,7 @@ pub const Command = struct {
                 },
                 3 => try output_files.append(allocator, try reader.readString()),
                 4 => try output_directories.append(allocator, try reader.readString()),
+                6 => out.working_directory = try reader.readString(),
                 7 => try output_paths.append(allocator, try reader.readString()),
                 9 => out.output_directory_format = try reader.readEnum(OutputDirectoryFormat),
                 else => try reader.skipField(tag.wire_type),
@@ -1193,6 +1197,7 @@ test "Command decode preserves repeated fields" {
         },
         .output_files = &.{"out.txt"},
         .output_directories = &.{"logs"},
+        .working_directory = "src",
         .output_paths = &.{ "dist/app", "dist/app.dSYM" },
         .output_directory_format = .tree_and_directory,
     };
@@ -1210,6 +1215,7 @@ test "Command decode preserves repeated fields" {
     try std.testing.expectEqualStrings("B", decoded.environment_variables[1].name);
     try std.testing.expectEqualStrings("out.txt", decoded.output_files[0]);
     try std.testing.expectEqualStrings("logs", decoded.output_directories[0]);
+    try std.testing.expectEqualStrings("src", decoded.working_directory);
     try std.testing.expectEqualStrings("dist/app.dSYM", decoded.output_paths[1]);
     try std.testing.expectEqual(Command.OutputDirectoryFormat.tree_and_directory, decoded.output_directory_format.?);
 }

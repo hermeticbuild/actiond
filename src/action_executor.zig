@@ -68,7 +68,22 @@ pub fn executeAction(
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
-    var outcome = try action_runner.runCommand(io, allocator, store, command, cwd_buffer[0..cwd_len]);
+    var cwd_alloc: ?[]u8 = null;
+    defer if (cwd_alloc) |cwd| allocator.free(cwd);
+    const cwd = if (command.working_directory.len == 0)
+        cwd_buffer[0..cwd_len]
+    else cwd: {
+        try execroot.validatePath(command.working_directory);
+        const resolved = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}",
+            .{ cwd_buffer[0..cwd_len], command.working_directory },
+        );
+        cwd_alloc = resolved;
+        break :cwd resolved;
+    };
+
+    var outcome = try action_runner.runCommand(io, allocator, store, command, cwd);
     errdefer outcome.deinit(allocator);
     try collectOutputFiles(io, allocator, store, work_root, command, &outcome);
     return outcome;
@@ -364,6 +379,56 @@ test "executeAction walks nested REAPI directories" {
     defer outcome.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("nested", outcome.stdout);
+}
+
+test "executeAction honors command working directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    const marker_digest = try store.putBytes(std.testing.io, "from-subdir");
+
+    var marker_hash: [64]u8 = undefined;
+    const child_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{
+            .{
+                .name = "marker.txt",
+                .digest = marker_digest.toReapi(&marker_hash),
+            },
+        },
+    });
+
+    var child_hash: [64]u8 = undefined;
+    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{
+            .{
+                .name = "pkg",
+                .digest = child_directory_digest.toReapi(&child_hash),
+            },
+        },
+    });
+
+    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
+        .arguments = &.{ "/bin/sh", "-c", "cat marker.txt" },
+        .working_directory = "pkg",
+    });
+
+    var command_hash: [64]u8 = undefined;
+    var root_hash: [64]u8 = undefined;
+    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
+        .command_digest = command_digest.toReapi(&command_hash),
+        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    });
+
+    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
+    defer outcome.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("from-subdir", outcome.stdout);
 }
 
 test "executeAction uploads requested output files" {
