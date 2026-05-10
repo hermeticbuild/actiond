@@ -174,6 +174,123 @@ pub const Action = struct {
     }
 };
 
+pub const FileNode = struct {
+    name: []const u8 = "",
+    digest: ?Digest = null,
+    is_executable: bool = false,
+
+    pub fn encode(self: FileNode, writer: *protobuf.Writer) !void {
+        if (self.name.len != 0) try writer.writeStringField(1, self.name);
+        if (self.digest) |digest| try writer.writeMessageField(2, digest);
+        if (self.is_executable) try writer.writeBoolField(4, true);
+    }
+
+    pub fn encodedLen(self: FileNode) usize {
+        var len: usize = 0;
+        if (self.name.len != 0) len += protobuf.stringFieldLen(1, self.name.len);
+        if (self.digest) |digest| len += protobuf.messageFieldLen(2, digest.encodedLen());
+        if (self.is_executable) len += protobuf.boolFieldLen(4);
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !FileNode {
+        var out: FileNode = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.digest = try Digest.decode(&nested);
+                },
+                4 => out.is_executable = try reader.readBool(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
+pub const DirectoryNode = struct {
+    name: []const u8 = "",
+    digest: ?Digest = null,
+
+    pub fn encode(self: DirectoryNode, writer: *protobuf.Writer) !void {
+        if (self.name.len != 0) try writer.writeStringField(1, self.name);
+        if (self.digest) |digest| try writer.writeMessageField(2, digest);
+    }
+
+    pub fn encodedLen(self: DirectoryNode) usize {
+        var len: usize = 0;
+        if (self.name.len != 0) len += protobuf.stringFieldLen(1, self.name.len);
+        if (self.digest) |digest| len += protobuf.messageFieldLen(2, digest.encodedLen());
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !DirectoryNode {
+        var out: DirectoryNode = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.digest = try Digest.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
+pub const Directory = struct {
+    files: []const FileNode = &.{},
+    directories: []const DirectoryNode = &.{},
+
+    pub fn deinit(self: *Directory, allocator: std.mem.Allocator) void {
+        allocator.free(self.files);
+        allocator.free(self.directories);
+        self.* = .{};
+    }
+
+    pub fn encode(self: Directory, writer: *protobuf.Writer) !void {
+        for (self.files) |file| try writer.writeMessageField(1, file);
+        for (self.directories) |directory| try writer.writeMessageField(2, directory);
+    }
+
+    pub fn encodedLen(self: Directory) usize {
+        var len: usize = 0;
+        for (self.files) |file| len += protobuf.messageFieldLen(1, file.encodedLen());
+        for (self.directories) |directory| len += protobuf.messageFieldLen(2, directory.encodedLen());
+        return len;
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !Directory {
+        var files: std.ArrayListUnmanaged(FileNode) = .empty;
+        errdefer files.deinit(allocator);
+        var directories: std.ArrayListUnmanaged(DirectoryNode) = .empty;
+        errdefer directories.deinit(allocator);
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => {
+                    var nested = try reader.readMessage();
+                    try files.append(allocator, try FileNode.decode(&nested));
+                },
+                2 => {
+                    var nested = try reader.readMessage();
+                    try directories.append(allocator, try DirectoryNode.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        return .{
+            .files = try files.toOwnedSlice(allocator),
+            .directories = try directories.toOwnedSlice(allocator),
+        };
+    }
+};
+
 pub const ExecuteRequest = struct {
     instance_name: []const u8 = "",
     skip_cache_lookup: bool = false,
@@ -292,4 +409,38 @@ test "Action and ExecuteRequest round-trip borrowed views" {
     try std.testing.expectEqualStrings("local", decoded_request.instance_name);
     try std.testing.expect(decoded_request.skip_cache_lookup);
     try std.testing.expect(decoded_request.action_digest.?.eql(digest));
+}
+
+test "Directory decodes files and child directories" {
+    const file_digest: Digest = .{
+        .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .size_bytes = 5,
+    };
+    const child_digest: Digest = .{
+        .hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        .size_bytes = 9,
+    };
+    const directory: Directory = .{
+        .files = &.{
+            .{ .name = "hello.txt", .digest = file_digest, .is_executable = true },
+        },
+        .directories = &.{
+            .{ .name = "src", .digest = child_digest },
+        },
+    };
+
+    const encoded = try encodeAlloc(std.testing.allocator, directory);
+    defer std.testing.allocator.free(encoded);
+
+    var reader = protobuf.Reader.init(encoded);
+    var decoded = try Directory.decodeOwned(std.testing.allocator, &reader);
+    defer decoded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.files.len);
+    try std.testing.expectEqualStrings("hello.txt", decoded.files[0].name);
+    try std.testing.expect(decoded.files[0].digest.?.eql(file_digest));
+    try std.testing.expect(decoded.files[0].is_executable);
+    try std.testing.expectEqual(@as(usize, 1), decoded.directories.len);
+    try std.testing.expectEqualStrings("src", decoded.directories[0].name);
+    try std.testing.expect(decoded.directories[0].digest.?.eql(child_digest));
 }
