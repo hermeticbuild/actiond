@@ -1,4 +1,5 @@
 const std = @import("std");
+const action_cache = @import("action_cache.zig");
 const action_runner = @import("action_runner.zig");
 const cas = @import("cas.zig");
 const execroot = @import("execroot.zig");
@@ -12,6 +13,28 @@ pub const Error = error{
     MissingInputRootDigest,
     InvalidDirectoryEntryName,
 };
+
+pub fn executeAndCacheAction(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    blob_store: cas.Store,
+    result_store: action_cache.Store,
+    work_root: std.Io.Dir,
+    action_digest: cas.Digest,
+) !action_runner.Outcome {
+    var outcome = try executeAction(io, allocator, blob_store, work_root, action_digest);
+    errdefer outcome.deinit(allocator);
+
+    var stdout_hash: [64]u8 = undefined;
+    var stderr_hash: [64]u8 = undefined;
+    try result_store.put(
+        io,
+        allocator,
+        action_digest,
+        actionResultFromOutcome(outcome, &stdout_hash, &stderr_hash),
+    );
+    return outcome;
+}
 
 pub fn executeAction(
     io: std.Io,
@@ -44,6 +67,22 @@ pub fn executeAction(
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
     return try action_runner.runCommand(io, allocator, store, command, cwd_buffer[0..cwd_len]);
+}
+
+pub fn actionResultFromOutcome(
+    outcome: action_runner.Outcome,
+    stdout_hash: *[64]u8,
+    stderr_hash: *[64]u8,
+) reapi.ActionResult {
+    return .{
+        .exit_code = switch (outcome.status) {
+            .exited => |code| code,
+            .signaled => |signal| 128 + @as(i32, signal),
+            .stopped, .unknown => 1,
+        },
+        .stdout_digest = if (outcome.stdout_digest) |digest| digest.toReapi(stdout_hash) else null,
+        .stderr_digest = if (outcome.stderr_digest) |digest| digest.toReapi(stderr_hash) else null,
+    };
 }
 
 fn collectInputs(
@@ -204,4 +243,47 @@ test "executeAction walks nested REAPI directories" {
     defer outcome.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("nested", outcome.stdout);
+}
+
+test "executeAndCacheAction stores ActionResult under action digest" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var ac_dir = try tmp.dir.createDirPathOpen(std.testing.io, "ac", .{});
+    defer ac_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const blob_store = cas.Store.init(cas_dir);
+    const result_store = action_cache.Store.init(ac_dir);
+
+    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Directory{});
+    const command_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Command{
+        .arguments = &.{ "/bin/sh", "-c", "printf cached" },
+    });
+
+    var command_hash: [64]u8 = undefined;
+    var root_hash: [64]u8 = undefined;
+    const action_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Action{
+        .command_digest = command_digest.toReapi(&command_hash),
+        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    });
+
+    var outcome = try executeAndCacheAction(
+        std.testing.io,
+        std.testing.allocator,
+        blob_store,
+        result_store,
+        work_dir,
+        action_digest,
+    );
+    defer outcome.deinit(std.testing.allocator);
+
+    var entry = try result_store.get(std.testing.io, std.testing.allocator, action_digest);
+    defer entry.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(i32, 0), entry.result.exit_code);
+    try std.testing.expect(entry.result.stdout_digest != null);
 }
