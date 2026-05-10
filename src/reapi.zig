@@ -319,11 +319,18 @@ pub const Action = struct {
     command_digest: ?Digest = null,
     input_root_digest: ?Digest = null,
     do_not_cache: bool = false,
+    platform: ?Platform = null,
+
+    pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
+        if (self.platform) |*platform| platform.deinit(allocator);
+        self.* = .{};
+    }
 
     pub fn encode(self: Action, writer: *protobuf.Writer) !void {
         if (self.command_digest) |digest| try writer.writeMessageField(1, digest);
         if (self.input_root_digest) |digest| try writer.writeMessageField(2, digest);
         if (self.do_not_cache) try writer.writeBoolField(7, true);
+        if (self.platform) |platform| try writer.writeMessageField(10, platform);
     }
 
     pub fn encodedLen(self: Action) usize {
@@ -331,6 +338,7 @@ pub const Action = struct {
         if (self.command_digest) |digest| len += protobuf.messageFieldLen(1, digest.encodedLen());
         if (self.input_root_digest) |digest| len += protobuf.messageFieldLen(2, digest.encodedLen());
         if (self.do_not_cache) len += protobuf.boolFieldLen(7);
+        if (self.platform) |platform| len += protobuf.messageFieldLen(10, platform.encodedLen());
         return len;
     }
 
@@ -347,10 +355,102 @@ pub const Action = struct {
                     out.input_root_digest = try Digest.decode(&nested);
                 },
                 7 => out.do_not_cache = try reader.readBool(),
+                10 => try reader.skipField(tag.wire_type),
                 else => try reader.skipField(tag.wire_type),
             }
         }
         return out;
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !Action {
+        var out: Action = .{};
+        errdefer out.deinit(allocator);
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => {
+                    var nested = try reader.readMessage();
+                    out.command_digest = try Digest.decode(&nested);
+                },
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.input_root_digest = try Digest.decode(&nested);
+                },
+                7 => out.do_not_cache = try reader.readBool(),
+                10 => {
+                    var nested = try reader.readMessage();
+                    out.platform = try Platform.decodeOwned(allocator, &nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        return out;
+    }
+};
+
+pub const Platform = struct {
+    properties: []const Property = &.{},
+
+    pub const Property = struct {
+        name: []const u8 = "",
+        value: []const u8 = "",
+
+        pub fn encode(self: Property, writer: *protobuf.Writer) !void {
+            if (self.name.len != 0) try writer.writeStringField(1, self.name);
+            if (self.value.len != 0) try writer.writeStringField(2, self.value);
+        }
+
+        pub fn encodedLen(self: Property) usize {
+            var len: usize = 0;
+            if (self.name.len != 0) len += protobuf.stringFieldLen(1, self.name.len);
+            if (self.value.len != 0) len += protobuf.stringFieldLen(2, self.value.len);
+            return len;
+        }
+
+        pub fn decode(reader: *protobuf.Reader) !Property {
+            var out: Property = .{};
+            while (try reader.next()) |tag| {
+                switch (tag.field_number) {
+                    1 => out.name = try reader.readString(),
+                    2 => out.value = try reader.readString(),
+                    else => try reader.skipField(tag.wire_type),
+                }
+            }
+            return out;
+        }
+    };
+
+    pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {
+        allocator.free(self.properties);
+        self.* = .{};
+    }
+
+    pub fn encode(self: Platform, writer: *protobuf.Writer) !void {
+        for (self.properties) |property| try writer.writeMessageField(1, property);
+    }
+
+    pub fn encodedLen(self: Platform) usize {
+        var len: usize = 0;
+        for (self.properties) |property| len += protobuf.messageFieldLen(1, property.encodedLen());
+        return len;
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !Platform {
+        var properties: std.ArrayListUnmanaged(Property) = .empty;
+        errdefer properties.deinit(allocator);
+
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => {
+                    var nested = try reader.readMessage();
+                    try properties.append(allocator, try Property.decode(&nested));
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        return .{ .properties = try properties.toOwnedSlice(allocator) };
     }
 };
 
@@ -509,17 +609,20 @@ pub const ExecuteRequest = struct {
 
 pub const ActionResult = struct {
     output_files: []const OutputFile = &.{},
+    output_directories: []const OutputDirectory = &.{},
     exit_code: i32 = 0,
     stdout_digest: ?Digest = null,
     stderr_digest: ?Digest = null,
 
     pub fn deinit(self: *ActionResult, allocator: std.mem.Allocator) void {
         allocator.free(self.output_files);
+        allocator.free(self.output_directories);
         self.* = .{};
     }
 
     pub fn encode(self: ActionResult, writer: *protobuf.Writer) !void {
         for (self.output_files) |output_file| try writer.writeMessageField(2, output_file);
+        for (self.output_directories) |output_directory| try writer.writeMessageField(3, output_directory);
         if (self.exit_code != 0) try writer.writeInt32Field(4, self.exit_code);
         if (self.stdout_digest) |digest| try writer.writeMessageField(6, digest);
         if (self.stderr_digest) |digest| try writer.writeMessageField(8, digest);
@@ -528,6 +631,7 @@ pub const ActionResult = struct {
     pub fn encodedLen(self: ActionResult) usize {
         var len: usize = 0;
         for (self.output_files) |output_file| len += protobuf.messageFieldLen(2, output_file.encodedLen());
+        for (self.output_directories) |output_directory| len += protobuf.messageFieldLen(3, output_directory.encodedLen());
         if (self.exit_code != 0) len += protobuf.int32FieldLen(4, self.exit_code);
         if (self.stdout_digest) |digest| len += protobuf.messageFieldLen(6, digest.encodedLen());
         if (self.stderr_digest) |digest| len += protobuf.messageFieldLen(8, digest.encodedLen());
@@ -539,6 +643,7 @@ pub const ActionResult = struct {
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 2 => try reader.skipField(tag.wire_type),
+                3 => try reader.skipField(tag.wire_type),
                 4 => out.exit_code = try reader.readInt32(),
                 6 => {
                     var nested = try reader.readMessage();
@@ -557,6 +662,8 @@ pub const ActionResult = struct {
     pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !ActionResult {
         var output_files: std.ArrayListUnmanaged(OutputFile) = .empty;
         errdefer output_files.deinit(allocator);
+        var output_directories: std.ArrayListUnmanaged(OutputDirectory) = .empty;
+        errdefer output_directories.deinit(allocator);
         var out: ActionResult = .{};
 
         while (try reader.next()) |tag| {
@@ -564,6 +671,10 @@ pub const ActionResult = struct {
                 2 => {
                     var nested = try reader.readMessage();
                     try output_files.append(allocator, try OutputFile.decode(&nested));
+                },
+                3 => {
+                    var nested = try reader.readMessage();
+                    try output_directories.append(allocator, try OutputDirectory.decode(&nested));
                 },
                 4 => out.exit_code = try reader.readInt32(),
                 6 => {
@@ -579,6 +690,7 @@ pub const ActionResult = struct {
         }
 
         out.output_files = try output_files.toOwnedSlice(allocator);
+        out.output_directories = try output_directories.toOwnedSlice(allocator);
         return out;
     }
 };
@@ -612,6 +724,42 @@ pub const OutputFile = struct {
                     out.digest = try Digest.decode(&nested);
                 },
                 4 => out.is_executable = try reader.readBool(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
+pub const OutputDirectory = struct {
+    path: []const u8 = "",
+    root_directory_digest: ?Digest = null,
+    is_topologically_sorted: bool = false,
+
+    pub fn encode(self: OutputDirectory, writer: *protobuf.Writer) !void {
+        if (self.path.len != 0) try writer.writeStringField(1, self.path);
+        if (self.root_directory_digest) |digest| try writer.writeMessageField(5, digest);
+        if (self.is_topologically_sorted) try writer.writeBoolField(4, true);
+    }
+
+    pub fn encodedLen(self: OutputDirectory) usize {
+        var len: usize = 0;
+        if (self.path.len != 0) len += protobuf.stringFieldLen(1, self.path.len);
+        if (self.is_topologically_sorted) len += protobuf.boolFieldLen(4);
+        if (self.root_directory_digest) |digest| len += protobuf.messageFieldLen(5, digest.encodedLen());
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !OutputDirectory {
+        var out: OutputDirectory = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.path = try reader.readString(),
+                4 => out.is_topologically_sorted = try reader.readBool(),
+                5 => {
+                    var nested = try reader.readMessage();
+                    out.root_directory_digest = try Digest.decode(&nested);
+                },
                 else => try reader.skipField(tag.wire_type),
             }
         }
