@@ -192,19 +192,6 @@ pub const Store = struct {
         try std.Io.Dir.hardLink(self.root, src_path, dest_dir, dest_path, io, .{});
     }
 
-    pub fn blobRealPathAllocSentinel(
-        self: Store,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        digest: Digest,
-    ) ![:0]u8 {
-        var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const root_len = try self.root.realPath(io, &root_buffer);
-        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
-        const sub_path = blobSubPath(digest, &path_buffer);
-        return try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_buffer[0..root_len], sub_path }, 0);
-    }
-
     pub fn putFile(
         self: Store,
         io: std.Io,

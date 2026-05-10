@@ -66,6 +66,13 @@ pub const Materializer = struct {
             }
             bind_mounts.deinit(allocator);
         }
+        var cas_root_path: ?[]u8 = null;
+        defer if (cas_root_path) |path| allocator.free(path);
+        if (options.chroot_root_path != null) {
+            var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const cas_root_len = try self.store.root.realPath(io, &cas_root_buffer);
+            cas_root_path = try allocator.dupe(u8, cas_root_buffer[0..cas_root_len]);
+        }
 
         var last_parent: ?[]const u8 = null;
         for (inputs) |input| {
@@ -78,7 +85,7 @@ pub const Materializer = struct {
             }
 
             if (options.chroot_root_path) |root_path| {
-                try self.materializeChrootInput(io, allocator, input, root_path, &bind_mounts);
+                try self.materializeChrootInput(io, allocator, input, root_path, cas_root_path.?, &bind_mounts);
             } else {
                 try self.store.copyToFile(
                     io,
@@ -101,6 +108,7 @@ pub const Materializer = struct {
         allocator: std.mem.Allocator,
         input: Input,
         root_path: []const u8,
+        cas_root_path: []const u8,
         bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
     ) !void {
         const permissions: std.Io.File.Permissions = if (input.is_executable) .executable_file else .default_file;
@@ -121,7 +129,9 @@ pub const Materializer = struct {
                     .data = "",
                     .flags = .{ .read = true, .permissions = .default_file },
                 });
-                const source = try self.store.blobRealPathAllocSentinel(io, allocator, input.digest);
+                var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+                const blob_path = cas.blobSubPath(input.digest, &blob_path_buffer);
+                const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path, blob_path }, 0);
                 errdefer allocator.free(source);
                 const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_path, input.path }, 0);
                 errdefer allocator.free(target);
