@@ -4,6 +4,7 @@ const bytestream_service = @import("bytestream_service.zig");
 const action_cache = @import("action_cache.zig");
 const action_cache_service = @import("action_cache_service.zig");
 const cache_service = @import("cache_service.zig");
+const capabilities_service = @import("capabilities_service.zig");
 const cas = @import("cas.zig");
 const grpc_record = @import("grpc_record.zig");
 const protobuf = @import("protobuf_wire.zig");
@@ -22,6 +23,7 @@ pub const ac_get_action_result = "/build.bazel.remote.execution.v2.ActionCache/G
 pub const ac_update_action_result = "/build.bazel.remote.execution.v2.ActionCache/UpdateActionResult";
 pub const bytestream_read = "/google.bytestream.ByteStream/Read";
 pub const bytestream_write = "/google.bytestream.ByteStream/Write";
+pub const capabilities_get = "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities";
 
 pub const Server = struct {
     store: cas.Store,
@@ -39,6 +41,12 @@ pub const Server = struct {
         request_record: []const u8,
     ) ![]u8 {
         const payload = try singlePayload(request_record);
+
+        if (std.mem.eql(u8, method, capabilities_get)) {
+            var reader = protobuf.Reader.init(payload);
+            const request = try reapi.GetCapabilitiesRequest.decode(&reader);
+            return try encodeResponse(allocator, capabilities_service.getCapabilities(request));
+        }
 
         if (std.mem.eql(u8, method, cas_find_missing_blobs)) {
             var reader = protobuf.Reader.init(payload);
@@ -352,4 +360,26 @@ test "Server dispatches ActionCache update and get" {
     const result = try reapi.ActionResult.decode(&reader);
     try std.testing.expectEqual(@as(i32, 2), result.exit_code);
     try std.testing.expect(result.stdout_digest.?.eql(stdout_digest.toReapi(&stdout_hash)));
+}
+
+test "Server dispatches GetCapabilities" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const server = Server.init(cas.Store.init(tmp.dir));
+    const request = try encodeRequest(std.testing.allocator, reapi.GetCapabilitiesRequest{
+        .instance_name = "local",
+    });
+    defer std.testing.allocator.free(request);
+
+    const response_record = try server.handleUnary(
+        std.testing.io,
+        std.testing.allocator,
+        capabilities_get,
+        request,
+    );
+    defer std.testing.allocator.free(response_record);
+
+    const payload = try singlePayload(response_record);
+    try std.testing.expect(payload.len > 0);
 }

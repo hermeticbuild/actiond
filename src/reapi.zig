@@ -83,6 +83,125 @@ pub const Status = struct {
     }
 };
 
+pub const DigestFunction = enum(u32) {
+    unknown = 0,
+    sha256 = 1,
+};
+
+pub const SemVer = struct {
+    major: i32 = 0,
+    minor: i32 = 0,
+    patch: i32 = 0,
+
+    pub fn encode(self: SemVer, writer: *protobuf.Writer) !void {
+        if (self.major != 0) try writer.writeInt32Field(1, self.major);
+        if (self.minor != 0) try writer.writeInt32Field(2, self.minor);
+        if (self.patch != 0) try writer.writeInt32Field(3, self.patch);
+    }
+
+    pub fn encodedLen(self: SemVer) usize {
+        var len: usize = 0;
+        if (self.major != 0) len += protobuf.int32FieldLen(1, self.major);
+        if (self.minor != 0) len += protobuf.int32FieldLen(2, self.minor);
+        if (self.patch != 0) len += protobuf.int32FieldLen(3, self.patch);
+        return len;
+    }
+};
+
+pub const ActionCacheUpdateCapabilities = struct {
+    update_enabled: bool = false,
+
+    pub fn encode(self: ActionCacheUpdateCapabilities, writer: *protobuf.Writer) !void {
+        if (self.update_enabled) try writer.writeBoolField(1, true);
+    }
+
+    pub fn encodedLen(self: ActionCacheUpdateCapabilities) usize {
+        return if (self.update_enabled) protobuf.boolFieldLen(1) else 0;
+    }
+};
+
+pub const CacheCapabilities = struct {
+    digest_functions: []const DigestFunction = &.{},
+    action_cache_update_capabilities: ?ActionCacheUpdateCapabilities = null,
+    max_batch_total_size_bytes: i64 = 0,
+
+    pub fn encode(self: CacheCapabilities, writer: *protobuf.Writer) !void {
+        for (self.digest_functions) |function| try writer.writeEnumField(1, function);
+        if (self.action_cache_update_capabilities) |caps| try writer.writeMessageField(2, caps);
+        if (self.max_batch_total_size_bytes != 0) try writer.writeInt64Field(4, self.max_batch_total_size_bytes);
+    }
+
+    pub fn encodedLen(self: CacheCapabilities) usize {
+        var len: usize = 0;
+        for (self.digest_functions) |function| len += protobuf.enumFieldLen(1, function);
+        if (self.action_cache_update_capabilities) |caps| len += protobuf.messageFieldLen(2, caps.encodedLen());
+        if (self.max_batch_total_size_bytes != 0) len += protobuf.int64FieldLen(4, self.max_batch_total_size_bytes);
+        return len;
+    }
+};
+
+pub const ExecutionCapabilities = struct {
+    digest_function: DigestFunction = .unknown,
+    exec_enabled: bool = false,
+    digest_functions: []const DigestFunction = &.{},
+
+    pub fn encode(self: ExecutionCapabilities, writer: *protobuf.Writer) !void {
+        if (self.digest_function != .unknown) try writer.writeEnumField(1, self.digest_function);
+        if (self.exec_enabled) try writer.writeBoolField(2, true);
+        for (self.digest_functions) |function| try writer.writeEnumField(5, function);
+    }
+
+    pub fn encodedLen(self: ExecutionCapabilities) usize {
+        var len: usize = 0;
+        if (self.digest_function != .unknown) len += protobuf.enumFieldLen(1, self.digest_function);
+        if (self.exec_enabled) len += protobuf.boolFieldLen(2);
+        for (self.digest_functions) |function| len += protobuf.enumFieldLen(5, function);
+        return len;
+    }
+};
+
+pub const ServerCapabilities = struct {
+    cache_capabilities: ?CacheCapabilities = null,
+    execution_capabilities: ?ExecutionCapabilities = null,
+    low_api_version: ?SemVer = null,
+    high_api_version: ?SemVer = null,
+
+    pub fn encode(self: ServerCapabilities, writer: *protobuf.Writer) !void {
+        if (self.cache_capabilities) |caps| try writer.writeMessageField(1, caps);
+        if (self.execution_capabilities) |caps| try writer.writeMessageField(2, caps);
+        if (self.low_api_version) |version| try writer.writeMessageField(4, version);
+        if (self.high_api_version) |version| try writer.writeMessageField(5, version);
+    }
+
+    pub fn encodedLen(self: ServerCapabilities) usize {
+        var len: usize = 0;
+        if (self.cache_capabilities) |caps| len += protobuf.messageFieldLen(1, caps.encodedLen());
+        if (self.execution_capabilities) |caps| len += protobuf.messageFieldLen(2, caps.encodedLen());
+        if (self.low_api_version) |version| len += protobuf.messageFieldLen(4, version.encodedLen());
+        if (self.high_api_version) |version| len += protobuf.messageFieldLen(5, version.encodedLen());
+        return len;
+    }
+};
+
+pub const GetCapabilitiesRequest = struct {
+    instance_name: []const u8 = "",
+
+    pub fn encode(self: GetCapabilitiesRequest, writer: *protobuf.Writer) !void {
+        if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !GetCapabilitiesRequest {
+        var out: GetCapabilitiesRequest = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
 pub const EnvironmentVariable = struct {
     name: []const u8 = "",
     value: []const u8 = "",

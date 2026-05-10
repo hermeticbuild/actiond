@@ -6,6 +6,7 @@ pub const bytestream = @import("bytestream.zig");
 pub const bytestream_service = @import("bytestream_service.zig");
 pub const cas = @import("cas.zig");
 pub const cache_service = @import("cache_service.zig");
+pub const capabilities_service = @import("capabilities_service.zig");
 pub const execroot = @import("execroot.zig");
 pub const guest_init = @import("guest_init.zig");
 pub const grpc_record = @import("grpc_record.zig");
@@ -23,6 +24,7 @@ test {
     _ = bytestream_service;
     _ = cas;
     _ = cache_service;
+    _ = capabilities_service;
     _ = execroot;
     _ = guest_init;
     _ = grpc_record;
