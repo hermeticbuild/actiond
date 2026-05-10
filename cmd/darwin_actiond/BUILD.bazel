@@ -1,8 +1,40 @@
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
-    name = "darwin-actiond",
+    name = "darwin-actiond-bin",
     main = "main.zig",
+    csrcs = ["vz_bridge.m"],
+    copts = [
+        "-fblocks",
+        "-fobjc-arc",
+        "-isystem/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
+    ],
     deps = ["//src:actiond"],
+    linkopts = [
+        "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
+        "-L/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib",
+        "-framework",
+        "Foundation",
+        "-framework",
+        "Virtualization",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+genrule(
+    name = "darwin-actiond-signed",
+    srcs = [
+        ":darwin-actiond-bin",
+        "darwin-actiond.entitlements",
+    ],
+    outs = ["darwin-actiond"],
+    cmd = """
+set -euo pipefail
+cp "$(location :darwin-actiond-bin)" "$@"
+chmod +x "$@"
+/usr/bin/codesign --force --sign - --entitlements "$(location darwin-actiond.entitlements)" "$@"
+""",
+    executable = True,
+    target_compatible_with = ["@platforms//os:macos"],
     visibility = ["//visibility:public"],
 )
