@@ -23,16 +23,24 @@ pub const Outcome = struct {
         is_executable: bool = false,
     };
 
+    pub const OutputDirectory = struct {
+        path: []u8,
+        root_digest: cas.Digest,
+    };
+
     status: Status,
     stdout: []u8,
     stderr: []u8,
     stdout_digest: ?cas.Digest = null,
     stderr_digest: ?cas.Digest = null,
     output_files: []OutputFile = &.{},
+    output_directories: []OutputDirectory = &.{},
 
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
         for (self.output_files) |output_file| allocator.free(output_file.path);
+        for (self.output_directories) |output_directory| allocator.free(output_directory.path);
         allocator.free(self.output_files);
+        allocator.free(self.output_directories);
         allocator.free(self.stdout);
         allocator.free(self.stderr);
         self.* = undefined;

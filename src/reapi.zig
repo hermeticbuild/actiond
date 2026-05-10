@@ -1377,6 +1377,11 @@ test "Action and ExecuteRequest round-trip borrowed views" {
         .command_digest = digest,
         .input_root_digest = digest,
         .do_not_cache = true,
+        .platform = .{
+            .properties = &.{
+                .{ .name = "limits.memory.bytes", .value = "1048576" },
+            },
+        },
     };
     const request: ExecuteRequest = .{
         .instance_name = "local",
@@ -1391,6 +1396,11 @@ test "Action and ExecuteRequest round-trip borrowed views" {
     try std.testing.expect(decoded_action.command_digest.?.eql(digest));
     try std.testing.expect(decoded_action.input_root_digest.?.eql(digest));
     try std.testing.expect(decoded_action.do_not_cache);
+    var owned_action_reader = protobuf.Reader.init(action_bytes);
+    var owned_action = try Action.decodeOwned(std.testing.allocator, &owned_action_reader);
+    defer owned_action.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), owned_action.platform.?.properties.len);
+    try std.testing.expectEqualStrings("limits.memory.bytes", owned_action.platform.?.properties[0].name);
 
     const request_bytes = try encodeAlloc(std.testing.allocator, request);
     defer std.testing.allocator.free(request_bytes);
@@ -1515,6 +1525,9 @@ test "ActionResult round-trips exit code and stream digests" {
         .output_files = &.{
             .{ .path = "out/app", .digest = stdout_digest, .is_executable = true },
         },
+        .output_directories = &.{
+            .{ .path = "out/tree", .root_directory_digest = stderr_digest, .is_topologically_sorted = true },
+        },
         .exit_code = 7,
         .stdout_digest = stdout_digest,
         .stderr_digest = stderr_digest,
@@ -1530,6 +1543,10 @@ test "ActionResult round-trips exit code and stream digests" {
     try std.testing.expectEqualStrings("out/app", decoded.output_files[0].path);
     try std.testing.expect(decoded.output_files[0].is_executable);
     try std.testing.expect(decoded.output_files[0].digest.?.eql(stdout_digest));
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_directories.len);
+    try std.testing.expectEqualStrings("out/tree", decoded.output_directories[0].path);
+    try std.testing.expect(decoded.output_directories[0].root_directory_digest.?.eql(stderr_digest));
+    try std.testing.expect(decoded.output_directories[0].is_topologically_sorted);
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));

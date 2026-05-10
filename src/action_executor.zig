@@ -17,6 +17,7 @@ pub const Error = error{
     MissingInputRootDigest,
     OutputParentCreateFailed,
     InvalidDirectoryEntryName,
+    UnsupportedOutputDirectoryEntry,
 };
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
@@ -126,12 +127,14 @@ pub fn actionResultFromOutcome(
 pub const OwnedActionResult = struct {
     result: reapi.ActionResult,
     output_files: []reapi.OutputFile,
+    output_directories: []reapi.OutputDirectory,
     hash_strings: []const []u8,
 
     pub fn deinit(self: *OwnedActionResult, allocator: std.mem.Allocator) void {
         for (self.hash_strings) |hash| allocator.free(hash);
         allocator.free(self.hash_strings);
         allocator.free(self.output_files);
+        allocator.free(self.output_directories);
         self.* = undefined;
     }
 };
@@ -148,6 +151,8 @@ pub fn actionResultFromOutcomeOwned(
 
     var output_files = try allocator.alloc(reapi.OutputFile, outcome.output_files.len);
     errdefer allocator.free(output_files);
+    var output_directories = try allocator.alloc(reapi.OutputDirectory, outcome.output_directories.len);
+    errdefer allocator.free(output_directories);
 
     for (outcome.output_files, 0..) |output_file, i| {
         output_files[i] = .{
@@ -156,10 +161,18 @@ pub fn actionResultFromOutcomeOwned(
             .is_executable = output_file.is_executable,
         };
     }
+    for (outcome.output_directories, 0..) |output_directory, i| {
+        output_directories[i] = .{
+            .path = output_directory.path,
+            .root_directory_digest = try appendDigest(allocator, &hash_strings, output_directory.root_digest),
+            .is_topologically_sorted = true,
+        };
+    }
 
     return .{
         .result = .{
             .output_files = output_files,
+            .output_directories = output_directories,
             .exit_code = switch (outcome.status) {
                 .exited => |code| code,
                 .signaled => |signal| 128 + @as(i32, signal),
@@ -169,6 +182,7 @@ pub fn actionResultFromOutcomeOwned(
             .stderr_digest = if (outcome.stderr_digest) |digest| try appendDigest(allocator, &hash_strings, digest) else null,
         },
         .output_files = output_files,
+        .output_directories = output_directories,
         .hash_strings = try hash_strings.toOwnedSlice(allocator),
     };
 }
@@ -196,38 +210,130 @@ fn collectOutputFiles(
     command: reapi.Command,
     outcome: *action_runner.Outcome,
 ) !void {
-    const paths = if (command.output_paths.len != 0) command.output_paths else command.output_files;
     var output_files: std.ArrayListUnmanaged(action_runner.Outcome.OutputFile) = .empty;
+    var output_directories: std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory) = .empty;
     errdefer {
         for (output_files.items) |output_file| allocator.free(output_file.path);
+        for (output_directories.items) |output_directory| allocator.free(output_directory.path);
         output_files.deinit(allocator);
+        output_directories.deinit(allocator);
     }
 
-    for (paths) |path| {
-        try execroot.validatePath(path);
-        const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return err,
-        };
-        if (stat.kind != .file) return error.FailedPrecondition;
-
-        if (stat.size > max_output_file_bytes) return error.FileTooBig;
-
-        const digest = store.putFile(io, work_root, path) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return err,
-        };
-
-        const path_copy = try allocator.dupe(u8, path);
-        errdefer allocator.free(path_copy);
-        try output_files.append(allocator, .{
-            .path = path_copy,
-            .digest = digest,
-            .is_executable = isExecutable(stat),
-        });
+    if (command.output_paths.len != 0) {
+        for (command.output_paths) |path| {
+            try collectOutputPath(io, allocator, store, work_root, path, &output_files, &output_directories);
+        }
+    } else {
+        for (command.output_files) |path| {
+            try collectOutputFile(io, allocator, store, work_root, path, &output_files);
+        }
+        for (command.output_directories) |path| {
+            try collectOutputDirectory(io, allocator, store, work_root, path, &output_directories);
+        }
     }
 
     outcome.output_files = try output_files.toOwnedSlice(allocator);
+    outcome.output_directories = try output_directories.toOwnedSlice(allocator);
+}
+
+fn collectOutputPath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    path: []const u8,
+    output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
+    output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
+) !void {
+    try execroot.validatePath(path);
+    const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    switch (stat.kind) {
+        .file => try collectOutputFileWithStat(io, allocator, store, work_root, path, stat, output_files),
+        .directory => try collectOutputDirectoryWithStat(io, allocator, store, work_root, path, output_directories),
+        else => return error.FailedPrecondition,
+    }
+}
+
+fn collectOutputFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    path: []const u8,
+    output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
+) !void {
+    try execroot.validatePath(path);
+    const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind != .file) return error.FailedPrecondition;
+    try collectOutputFileWithStat(io, allocator, store, work_root, path, stat, output_files);
+}
+
+fn collectOutputFileWithStat(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    path: []const u8,
+    stat: std.Io.Dir.Stat,
+    output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
+) !void {
+    if (stat.size > max_output_file_bytes) return error.FileTooBig;
+
+    const digest = store.putFile(io, work_root, path) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+
+    const path_copy = try allocator.dupe(u8, path);
+    errdefer allocator.free(path_copy);
+    try output_files.append(allocator, .{
+        .path = path_copy,
+        .digest = digest,
+        .is_executable = isExecutable(stat),
+    });
+}
+
+fn collectOutputDirectory(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    path: []const u8,
+    output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
+) !void {
+    try execroot.validatePath(path);
+    const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind != .directory) return error.FailedPrecondition;
+    try collectOutputDirectoryWithStat(io, allocator, store, work_root, path, output_directories);
+}
+
+fn collectOutputDirectoryWithStat(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    path: []const u8,
+    output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
+) !void {
+    var dir = try work_root.openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    const digest = try putDirectoryTree(io, allocator, store, dir);
+
+    const path_copy = try allocator.dupe(u8, path);
+    errdefer allocator.free(path_copy);
+    try output_directories.append(allocator, .{
+        .path = path_copy,
+        .root_digest = digest,
+    });
 }
 
 fn prepareOutputParents(
@@ -255,6 +361,77 @@ fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void
 fn isExecutable(stat: std.Io.Dir.Stat) bool {
     if (comptime !std.Io.File.Permissions.has_executable_bit) return false;
     return stat.permissions.toMode() & 0o111 != 0;
+}
+
+const DirectoryEntry = struct {
+    name: []u8,
+    kind: std.Io.File.Kind,
+};
+
+fn putDirectoryTree(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    dir: std.Io.Dir,
+) !cas.Digest {
+    var entries: std.ArrayListUnmanaged(DirectoryEntry) = .empty;
+    defer {
+        for (entries.items) |entry| allocator.free(entry.name);
+        entries.deinit(allocator);
+    }
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        try entries.append(allocator, .{
+            .name = try allocator.dupe(u8, entry.name),
+            .kind = entry.kind,
+        });
+    }
+
+    std.mem.sort(DirectoryEntry, entries.items, {}, struct {
+        fn lessThan(_: void, lhs: DirectoryEntry, rhs: DirectoryEntry) bool {
+            return std.mem.lessThan(u8, lhs.name, rhs.name);
+        }
+    }.lessThan);
+
+    var files: std.ArrayListUnmanaged(reapi.FileNode) = .empty;
+    defer files.deinit(allocator);
+    var directories: std.ArrayListUnmanaged(reapi.DirectoryNode) = .empty;
+    defer directories.deinit(allocator);
+    var hash_strings: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (hash_strings.items) |hash| allocator.free(hash);
+        hash_strings.deinit(allocator);
+    }
+
+    for (entries.items) |entry| {
+        switch (entry.kind) {
+            .file => {
+                const stat = try dir.statFile(io, entry.name, .{});
+                const digest = try store.putFile(io, dir, entry.name);
+                try files.append(allocator, .{
+                    .name = entry.name,
+                    .digest = try appendDigest(allocator, &hash_strings, digest),
+                    .is_executable = isExecutable(stat),
+                });
+            },
+            .directory => {
+                var child = try dir.openDir(io, entry.name, .{ .iterate = true });
+                defer child.close(io);
+                const digest = try putDirectoryTree(io, allocator, store, child);
+                try directories.append(allocator, .{
+                    .name = entry.name,
+                    .digest = try appendDigest(allocator, &hash_strings, digest),
+                });
+            },
+            else => return error.UnsupportedOutputDirectoryEntry,
+        }
+    }
+
+    return try putProto(io, allocator, store, reapi.Directory{
+        .files = files.items,
+        .directories = directories.items,
+    });
 }
 
 fn collectInputs(
@@ -509,6 +686,50 @@ test "executeAction uploads requested output files" {
     try std.testing.expectEqual(@as(usize, 1), result.result.output_files.len);
     try std.testing.expectEqualStrings("out/file.txt", result.result.output_files[0].path);
     try std.testing.expect(result.result.output_files[0].digest.?.eql(outcome.output_files[0].digest.toReapi(&command_hash)));
+}
+
+test "executeAction uploads requested output directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
+    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
+        .arguments = &.{ "/bin/sh", "-c", "mkdir -p tree/sub && printf leaf > tree/sub/file.txt" },
+        .output_directories = &.{"tree"},
+    });
+
+    var command_hash: [64]u8 = undefined;
+    var root_hash: [64]u8 = undefined;
+    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
+        .command_digest = command_digest.toReapi(&command_hash),
+        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    });
+
+    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
+    defer outcome.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
+    try std.testing.expectEqualStrings("tree", outcome.output_directories[0].path);
+
+    const directory_bytes = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_directories[0].root_digest);
+    defer std.testing.allocator.free(directory_bytes);
+    var directory_reader = protobuf.Reader.init(directory_bytes);
+    var directory = try reapi.Directory.decodeOwned(std.testing.allocator, &directory_reader);
+    defer directory.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), directory.directories.len);
+    try std.testing.expectEqualStrings("sub", directory.directories[0].name);
+
+    var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.result.output_directories.len);
+    try std.testing.expectEqualStrings("tree", result.result.output_directories[0].path);
+    try std.testing.expect(result.result.output_directories[0].root_directory_digest.?.eql(outcome.output_directories[0].root_digest.toReapi(&root_hash)));
 }
 
 test "executeAction creates parent directories for declared outputs" {
