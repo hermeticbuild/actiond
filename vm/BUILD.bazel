@@ -9,18 +9,25 @@ genrule(
 
 genrule(
     name = "linux_kernel",
-    srcs = ["linux.config"],
+    srcs = [
+        "linux.config",
+        "@linux_kernel_src//:Makefile",
+        "@linux_kernel_src//:all",
+    ],
     outs = ["Image"],
     cmd = """
 set -euo pipefail
-if [ -z "$${LINUX_SRC:-}" ]; then
-  echo "Set LINUX_SRC to a Linux source checkout and build with --action_env=LINUX_SRC=/path/to/linux" >&2
-  exit 1
+KERNEL_SRC="$$(dirname "$(execpath @linux_kernel_src//:Makefile)")"
+KBUILD_OUT="$$(pwd)/$(@D)/kbuild"
+MAKE_BIN="$$(command -v gmake || command -v make)"
+CROSS_COMPILE_ARG=""
+if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+  CROSS_COMPILE_ARG="CROSS_COMPILE=aarch64-linux-gnu-"
 fi
-mkdir -p "$(@D)/kbuild"
-cp "$(location linux.config)" "$(@D)/kbuild/.config"
-make -C "$${LINUX_SRC}" O="$(@D)/kbuild" ARCH=arm64 olddefconfig Image
-cp "$(@D)/kbuild/arch/arm64/boot/Image" "$@"
+mkdir -p "$${KBUILD_OUT}"
+cp "$(location linux.config)" "$${KBUILD_OUT}/.config"
+"$${MAKE_BIN}" -C "$${KERNEL_SRC}" O="$${KBUILD_OUT}" ARCH=arm64 $${CROSS_COMPILE_ARG} olddefconfig Image
+cp "$${KBUILD_OUT}/arch/arm64/boot/Image" "$@"
 """,
     tags = ["manual"],
     visibility = ["//visibility:public"],
