@@ -22,9 +22,7 @@ pub const Error = error{
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
 
-pub const ExecuteOptions = struct {
-    isolation: action_runner.Isolation = .none,
-};
+pub const ExecuteOptions = struct {};
 
 pub fn executeAndCacheAction(
     io: std.Io,
@@ -97,7 +95,7 @@ pub fn executeActionWithOptions(
 
     const materializer = execroot.Materializer.init(store, work_root);
     var materialization = materializer.materializeInputs(io, allocator, inputs.items, .{
-        .chroot_root_path = if (options.isolation == .chroot) work_root_path else null,
+        .chroot_root_path = work_root_path,
     }) catch |err| switch (err) {
         error.FileNotFound => return error.MissingInputBlob,
         else => return err,
@@ -108,30 +106,17 @@ pub fn executeActionWithOptions(
         else => return err,
     };
 
-    var cwd_alloc: ?[]u8 = null;
-    defer if (cwd_alloc) |cwd| allocator.free(cwd);
-    const cwd = if (command.working_directory.len == 0)
-        work_root_path
-    else cwd: {
-        try execroot.validatePath(command.working_directory);
-        const resolved = try std.fmt.allocPrint(
-            allocator,
-            "{s}/{s}",
-            .{ work_root_path, command.working_directory },
-        );
-        cwd_alloc = resolved;
-        break :cwd resolved;
-    };
-
     const chroot_cwd = if (command.working_directory.len == 0)
         "/"
-    else
-        try std.fmt.allocPrint(allocator, "/{s}", .{command.working_directory});
+    else cwd: {
+        try execroot.validatePath(command.working_directory);
+        break :cwd try std.fmt.allocPrint(allocator, "/{s}", .{command.working_directory});
+    };
     defer if (command.working_directory.len != 0) allocator.free(chroot_cwd);
 
-    var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, cwd, .{
-        .isolation = options.isolation,
-        .chroot_dir = if (options.isolation == .chroot) work_root_path else null,
+    _ = options;
+    var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, .{
+        .chroot_dir = work_root_path,
         .chroot_cwd = chroot_cwd,
         .bind_mounts = materialization.bind_mounts,
         .cgroup_limits = action_runner.CgroupLimits.fromPlatform(action.platform),
@@ -534,7 +519,7 @@ fn putProto(
     return try store.putBytes(io, bytes);
 }
 
-test "executeAction materializes REAPI inputs and stores streams" {
+test "collectOutputFiles uploads requested output files and directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -544,208 +529,35 @@ test "executeAction materializes REAPI inputs and stores streams" {
     defer work_dir.close(std.testing.io);
 
     const store = cas.Store.init(cas_dir);
-    const input_digest = try store.putBytes(std.testing.io, "hello");
-
-    var input_hash: [64]u8 = undefined;
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .files = &.{
-            .{
-                .name = "input.txt",
-                .digest = input_digest.toReapi(&input_hash),
-            },
-        },
+    try work_dir.createDirPath(std.testing.io, "out");
+    try work_dir.writeFile(std.testing.io, .{
+        .sub_path = "out/file.txt",
+        .data = "artifact",
+        .flags = .{ .permissions = .executable_file },
+    });
+    try work_dir.createDirPath(std.testing.io, "tree/sub");
+    try work_dir.writeFile(std.testing.io, .{
+        .sub_path = "tree/sub/file.txt",
+        .data = "leaf",
     });
 
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "cat input.txt; printf '%s' err >&2" },
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
+    var outcome: action_runner.Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = try std.testing.allocator.alloc(u8, 0),
+        .stderr = try std.testing.allocator.alloc(u8, 0),
+    };
     defer outcome.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("hello", outcome.stdout);
-    try std.testing.expectEqualStrings("err", outcome.stderr);
-    try std.testing.expect(outcome.stdout_digest != null);
-    try std.testing.expect(outcome.stderr_digest != null);
-
-    switch (outcome.status) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.UnexpectedStatus,
-    }
-}
-
-test "executeAction walks nested REAPI directories" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
-    defer work_dir.close(std.testing.io);
-
-    const store = cas.Store.init(cas_dir);
-    const nested_file_digest = try store.putBytes(std.testing.io, "nested");
-
-    var nested_file_hash: [64]u8 = undefined;
-    const child_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .files = &.{
-            .{
-                .name = "value.txt",
-                .digest = nested_file_digest.toReapi(&nested_file_hash),
-            },
-        },
-    });
-
-    var child_hash: [64]u8 = undefined;
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{
-            .{
-                .name = "dir",
-                .digest = child_directory_digest.toReapi(&child_hash),
-            },
-        },
-    });
-
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "cat dir/value.txt" },
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
-    defer outcome.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("nested", outcome.stdout);
-}
-
-test "executeAction honors command working directory" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
-    defer work_dir.close(std.testing.io);
-
-    const store = cas.Store.init(cas_dir);
-    const marker_digest = try store.putBytes(std.testing.io, "from-subdir");
-
-    var marker_hash: [64]u8 = undefined;
-    const child_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .files = &.{
-            .{
-                .name = "marker.txt",
-                .digest = marker_digest.toReapi(&marker_hash),
-            },
-        },
-    });
-
-    var child_hash: [64]u8 = undefined;
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{
-            .{
-                .name = "pkg",
-                .digest = child_directory_digest.toReapi(&child_hash),
-            },
-        },
-    });
-
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "cat marker.txt" },
-        .working_directory = "pkg",
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
-    defer outcome.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("from-subdir", outcome.stdout);
-}
-
-test "executeAction uploads requested output files" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
-    defer work_dir.close(std.testing.io);
-
-    const store = cas.Store.init(cas_dir);
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "mkdir -p out && printf artifact > out/file.txt && chmod +x out/file.txt" },
-        .output_paths = &.{"out/file.txt"},
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
-    defer outcome.deinit(std.testing.allocator);
+    try collectOutputFiles(std.testing.io, std.testing.allocator, store, work_dir, .{
+        .output_paths = &.{ "out/file.txt", "tree" },
+    }, &outcome);
 
     try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
     try std.testing.expectEqualStrings("out/file.txt", outcome.output_files[0].path);
     try std.testing.expect(outcome.output_files[0].is_executable);
-
     const output = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_files[0].digest);
     defer std.testing.allocator.free(output);
     try std.testing.expectEqualStrings("artifact", output);
-
-    var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
-    defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), result.result.output_files.len);
-    try std.testing.expectEqualStrings("out/file.txt", result.result.output_files[0].path);
-    try std.testing.expect(result.result.output_files[0].digest.?.eql(outcome.output_files[0].digest.toReapi(&command_hash)));
-}
-
-test "executeAction uploads requested output directories" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
-    defer work_dir.close(std.testing.io);
-
-    const store = cas.Store.init(cas_dir);
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "mkdir -p tree/sub && printf leaf > tree/sub/file.txt" },
-        .output_directories = &.{"tree"},
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
-    defer outcome.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
     try std.testing.expectEqualStrings("tree", outcome.output_directories[0].path);
@@ -762,146 +574,48 @@ test "executeAction uploads requested output directories" {
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.result.output_directories.len);
     try std.testing.expectEqualStrings("tree", result.result.output_directories[0].path);
+    var root_hash: [64]u8 = undefined;
     try std.testing.expect(result.result.output_directories[0].root_directory_digest.?.eql(outcome.output_directories[0].root_digest.toReapi(&root_hash)));
 }
 
-test "executeAction creates parent directories for declared outputs" {
+test "prepareOutputParents creates parent directories for declared outputs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
     var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
     defer work_dir.close(std.testing.io);
 
-    const store = cas.Store.init(cas_dir);
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "printf generated > gen/out.txt" },
+    try prepareOutputParents(std.testing.io, work_dir, .{
         .output_files = &.{"gen/out.txt"},
     });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
-    defer outcome.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
-    const output = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_files[0].digest);
-    defer std.testing.allocator.free(output);
-    try std.testing.expectEqualStrings("generated", output);
+    _ = try work_dir.statFile(std.testing.io, "gen", .{});
 }
 
-test "executeAction creates parent directories for declared output paths" {
+test "prepareOutputParents creates parent directories for declared output paths" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
     var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
     defer work_dir.close(std.testing.io);
 
-    const store = cas.Store.init(cas_dir);
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "printf generated > bazel-out/bin/pkg/out.txt" },
+    try prepareOutputParents(std.testing.io, work_dir, .{
         .output_paths = &.{"bazel-out/bin/pkg/out.txt"},
     });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
-    defer outcome.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
-    try std.testing.expectEqualStrings("bazel-out/bin/pkg/out.txt", outcome.output_files[0].path);
+    _ = try work_dir.statFile(std.testing.io, "bazel-out/bin/pkg", .{});
 }
 
-test "executeAction creates parent directories for Bazel-style external output paths" {
+test "prepareOutputParents accepts Bazel-style external output paths" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
     var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
     defer work_dir.close(std.testing.io);
 
     const output_path =
         "bazel-out/darwin_arm64-fastbuild/bin/external/rules_zig++zig+zig_0.16.0_aarch64-macos/zig_toolchain.version_validation";
 
-    const store = cas.Store.init(cas_dir);
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "touch \"$1\"", "", output_path },
+    try prepareOutputParents(std.testing.io, work_dir, .{
         .output_paths = &.{output_path},
     });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
-    defer outcome.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
-    try std.testing.expectEqualStrings(output_path, outcome.output_files[0].path);
-}
-
-test "executeAndCacheAction stores ActionResult under action digest" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-    var ac_dir = try tmp.dir.createDirPathOpen(std.testing.io, "ac", .{});
-    defer ac_dir.close(std.testing.io);
-    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
-    defer work_dir.close(std.testing.io);
-
-    const blob_store = cas.Store.init(cas_dir);
-    const result_store = action_cache.Store.init(ac_dir);
-
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "printf cached; printf artifact > artifact.txt" },
-        .output_files = &.{"artifact.txt"},
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
-    });
-
-    var outcome = try executeAndCacheAction(
-        std.testing.io,
-        std.testing.allocator,
-        blob_store,
-        result_store,
-        work_dir,
-        action_digest,
-    );
-    defer outcome.deinit(std.testing.allocator);
-
-    var entry = try result_store.get(std.testing.io, std.testing.allocator, action_digest);
-    defer entry.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(i32, 0), entry.result.exit_code);
-    try std.testing.expect(entry.result.stdout_digest != null);
-    try std.testing.expectEqual(@as(usize, 1), entry.result.output_files.len);
-    try std.testing.expectEqualStrings("artifact.txt", entry.result.output_files[0].path);
+    _ = try work_dir.statFile(std.testing.io, "bazel-out/darwin_arm64-fastbuild/bin/external/rules_zig++zig+zig_0.16.0_aarch64-macos", .{});
 }

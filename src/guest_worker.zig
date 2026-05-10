@@ -34,7 +34,6 @@ pub fn run(io: std.Io) !void {
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
         .work_root = action_work_dir,
-        .execution_options = .{ .isolation = .chroot },
     };
 
     const listener = try vsock.listen(vsock.control_port);

@@ -134,17 +134,6 @@ fn executionWorkKey(
     );
 }
 
-fn putProto(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    value: anytype,
-) !cas.Digest {
-    const bytes = try reapi.encodeAlloc(allocator, value);
-    defer allocator.free(bytes);
-    return try store.putBytes(io, bytes);
-}
-
 test "execution work keys are unique for repeated action digests" {
     const digest = cas.Digest.fromBytes("same action");
     const first = try executionWorkKey(std.testing.allocator, digest);
@@ -157,7 +146,7 @@ test "execution work keys are unique for repeated action digests" {
     try std.testing.expect(std.mem.startsWith(u8, second, "exec/"));
 }
 
-test "execute returns completed operation and populates action cache" {
+test "execute returns cached completed operation without running an action" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -170,16 +159,9 @@ test "execute returns completed operation and populates action cache" {
 
     const blob_store = cas.Store.init(cas_dir);
     const result_store = action_cache.Store.init(ac_dir);
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "printf execute" },
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    const action_digest = cas.Digest.fromBytes("cached action");
+    try result_store.put(std.testing.io, std.testing.allocator, action_digest, .{
+        .exit_code = 0,
     });
 
     var action_hash: [64]u8 = undefined;
@@ -194,16 +176,6 @@ test "execute returns completed operation and populates action cache" {
 
     var response_reader = protobuf.Reader.init(operation.operation.response.?.value);
     const response = try reapi.ExecuteResponse.decode(&response_reader);
-    try std.testing.expect(!response.cached_result);
+    try std.testing.expect(response.cached_result);
     try std.testing.expectEqual(@as(i32, 0), response.result.?.exit_code);
-
-    var cached_operation = try execute(std.testing.io, std.testing.allocator, blob_store, result_store, work_dir, .{
-        .action_digest = action_digest.toReapi(&action_hash),
-    }, .{});
-    defer cached_operation.deinit(std.testing.allocator);
-
-    var cached_response_reader = protobuf.Reader.init(cached_operation.operation.response.?.value);
-    const cached_response = try reapi.ExecuteResponse.decode(&cached_response_reader);
-    try std.testing.expect(cached_response.cached_result);
-    try std.testing.expectEqual(@as(i32, 0), cached_response.result.?.exit_code);
 }

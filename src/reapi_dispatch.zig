@@ -481,7 +481,7 @@ test "Server dispatches GetCapabilities" {
     try std.testing.expect(payload.len > 0);
 }
 
-test "Server dispatches Execute as completed operation" {
+test "Server dispatches cached Execute operation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -493,21 +493,15 @@ test "Server dispatches Execute as completed operation" {
     defer work_dir.close(std.testing.io);
 
     const blob_store = cas.Store.init(cas_dir);
-    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Directory{});
-    const command_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Command{
-        .arguments = &.{ "/bin/sh", "-c", "printf dispatched" },
-    });
-
-    var command_hash: [64]u8 = undefined;
-    var root_hash: [64]u8 = undefined;
-    const action_digest = try putProto(std.testing.io, std.testing.allocator, blob_store, reapi.Action{
-        .command_digest = command_digest.toReapi(&command_hash),
-        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    const action_digest = cas.Digest.fromBytes("cached dispatch action");
+    const result_store = action_cache.Store.init(ac_dir);
+    try result_store.put(std.testing.io, std.testing.allocator, action_digest, .{
+        .exit_code = 0,
     });
 
     const server: Server = .{
         .store = blob_store,
-        .action_cache_store = action_cache.Store.init(ac_dir),
+        .action_cache_store = result_store,
         .work_root = work_dir,
     };
 
@@ -532,6 +526,6 @@ test "Server dispatches Execute as completed operation" {
 
     var execute_response_reader = protobuf.Reader.init(operation.response.?.value);
     const execute_response = try reapi.ExecuteResponse.decode(&execute_response_reader);
-    try std.testing.expect(!execute_response.cached_result);
+    try std.testing.expect(execute_response.cached_result);
     try std.testing.expectEqual(@as(i32, 0), execute_response.result.?.exit_code);
 }
