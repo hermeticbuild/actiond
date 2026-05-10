@@ -1,5 +1,7 @@
 const std = @import("std");
 const body_sink = @import("body_sink.zig");
+const bytestream = @import("bytestream.zig");
+const bytestream_service = @import("bytestream_service.zig");
 const cas = @import("cas.zig");
 const http2_frame = @import("http2_frame.zig");
 const http2_hpack = @import("http2_hpack.zig");
@@ -155,8 +157,20 @@ pub const Dispatcher = struct {
         allocator: std.mem.Allocator,
         method: []const u8,
     ) !ClientStream {
-        _ = io;
         const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, method, reapi_dispatch.bytestream_write)) {
+            const stream = try allocator.create(ByteStreamWriteClientStream);
+            stream.* = .{
+                .stream = bytestream_service.WriteGrpcStream.init(server.store),
+            };
+            return .{
+                .ctx = stream,
+                .append_fn = ByteStreamWriteClientStream.append,
+                .finish_fn = ByteStreamWriteClientStream.finish,
+                .deinit_fn = ByteStreamWriteClientStream.deinit,
+            };
+        }
+        _ = io;
         const stream = try allocator.create(BufferedClientStream);
         stream.* = .{
             .server = server,
@@ -168,6 +182,36 @@ pub const Dispatcher = struct {
             .finish_fn = BufferedClientStream.finish,
             .deinit_fn = BufferedClientStream.deinit,
         };
+    }
+};
+
+const ByteStreamWriteClientStream = struct {
+    stream: bytestream_service.WriteGrpcStream,
+
+    fn append(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !void {
+        const self: *ByteStreamWriteClientStream = @ptrCast(@alignCast(ctx));
+        try self.stream.append(io, allocator, bytes);
+    }
+
+    fn finish(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+    ) ![]u8 {
+        const self: *ByteStreamWriteClientStream = @ptrCast(@alignCast(ctx));
+        const response = try self.stream.finish(io);
+        return try encodeGrpcRequest(allocator, response);
+    }
+
+    fn deinit(ctx: *anyopaque, io: std.Io, allocator: std.mem.Allocator) void {
+        const self: *ByteStreamWriteClientStream = @ptrCast(@alignCast(ctx));
+        self.stream.deinit(io, allocator);
+        allocator.destroy(self);
     }
 };
 
@@ -1094,4 +1138,49 @@ test "HTTP/2 client streaming dispatches DATA frames without buffered handler" {
         }
     }
     try std.testing.expect(saw_streamed_response);
+}
+
+test "ReAPI dispatcher streams ByteStream writes into CAS" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    var server = reapi_dispatch.Server.init(store);
+    const dispatcher = Dispatcher.fromReapiServer(&server);
+
+    const digest = cas.Digest.fromBytes("streamed-write");
+    var hash: [64]u8 = undefined;
+    const resource_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "uploads/u/blobs/{s}/{d}",
+        .{ digest.formatHex(&hash), digest.size_bytes },
+    );
+    defer std.testing.allocator.free(resource_name);
+
+    const first = try encodeGrpcRequest(std.testing.allocator, bytestream.WriteRequest{
+        .resource_name = resource_name,
+        .write_offset = 0,
+        .data = "streamed",
+    });
+    defer std.testing.allocator.free(first);
+    const second = try encodeGrpcRequest(std.testing.allocator, bytestream.WriteRequest{
+        .write_offset = 8,
+        .data = "-write",
+        .finish_write = true,
+    });
+    defer std.testing.allocator.free(second);
+
+    const stream = try dispatcher.startClientStreaming(
+        std.testing.io,
+        std.testing.allocator,
+        reapi_dispatch.bytestream_write,
+    );
+    defer stream.deinit(std.testing.io, std.testing.allocator);
+    try stream.append(std.testing.io, std.testing.allocator, first[0..7]);
+    try stream.append(std.testing.io, std.testing.allocator, first[7..]);
+    try stream.append(std.testing.io, std.testing.allocator, second);
+    const response = try stream.finish(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expect(try store.has(std.testing.io, digest));
 }

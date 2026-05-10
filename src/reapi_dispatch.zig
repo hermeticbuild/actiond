@@ -161,6 +161,13 @@ pub const Server = struct {
             return try bytestream_service.writeReadGrpcRecords(io, allocator, self.store, request, writer);
         }
 
+        if (std.mem.eql(u8, method, cas_get_tree)) {
+            const payload = try singlePayload(request_record);
+            var reader = protobuf.Reader.init(payload);
+            const request = try reapi.GetTreeRequest.decode(&reader);
+            return try tree_service.writeGetTreeGrpcRecords(io, allocator, self.store, request, writer);
+        }
+
         const response = try self.handleServerStreaming(io, allocator, method, request_record);
         defer allocator.free(response);
         try writer.writeAll(io, allocator, response);
