@@ -91,28 +91,33 @@ pub fn executeActionWithOptions(
     defer freeInputs(allocator, inputs.items);
     try collectInputs(io, allocator, store, input_root_digest, "", &inputs);
 
+    var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd_len = try work_root.realPath(io, &cwd_buffer);
+    const work_root_path = cwd_buffer[0..cwd_len];
+
     const materializer = execroot.Materializer.init(store, work_root);
-    materializer.copyInputs(io, allocator, inputs.items) catch |err| switch (err) {
+    var materialization = materializer.materializeInputs(io, allocator, inputs.items, .{
+        .chroot_root_path = if (options.isolation == .chroot) work_root_path else null,
+    }) catch |err| switch (err) {
         error.FileNotFound => return error.MissingInputBlob,
         else => return err,
     };
+    defer materialization.deinit(allocator);
     prepareOutputParents(io, work_root, command) catch |err| switch (err) {
         error.FileNotFound => return error.OutputParentCreateFailed,
         else => return err,
     };
 
-    var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const cwd_len = try work_root.realPath(io, &cwd_buffer);
     var cwd_alloc: ?[]u8 = null;
     defer if (cwd_alloc) |cwd| allocator.free(cwd);
     const cwd = if (command.working_directory.len == 0)
-        cwd_buffer[0..cwd_len]
+        work_root_path
     else cwd: {
         try execroot.validatePath(command.working_directory);
         const resolved = try std.fmt.allocPrint(
             allocator,
             "{s}/{s}",
-            .{ cwd_buffer[0..cwd_len], command.working_directory },
+            .{ work_root_path, command.working_directory },
         );
         cwd_alloc = resolved;
         break :cwd resolved;
@@ -126,8 +131,9 @@ pub fn executeActionWithOptions(
 
     var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, cwd, .{
         .isolation = options.isolation,
-        .chroot_dir = if (options.isolation == .chroot) cwd_buffer[0..cwd_len] else null,
+        .chroot_dir = if (options.isolation == .chroot) work_root_path else null,
         .chroot_cwd = chroot_cwd,
+        .bind_mounts = materialization.bind_mounts,
         .cgroup_limits = action_runner.CgroupLimits.fromPlatform(action.platform),
     });
     errdefer outcome.deinit(allocator);

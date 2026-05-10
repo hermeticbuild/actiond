@@ -8,6 +8,7 @@ pub const Error = error{
 };
 
 const blob_prefix = "blobs/sha256/";
+pub const blob_prefix_len = blob_prefix.len;
 const hex_chars = "0123456789abcdef";
 const copy_buffer_len = 128 * 1024;
 const temp_path_prefix = blob_prefix ++ ".tmp-";
@@ -170,6 +171,40 @@ pub const Store = struct {
         }
     }
 
+    pub fn hardLinkToFile(
+        self: Store,
+        io: std.Io,
+        digest: Digest,
+        dest_dir: std.Io.Dir,
+        dest_path: []const u8,
+        permissions: std.Io.File.Permissions,
+    ) !void {
+        if (digest.isEmpty()) {
+            return dest_dir.writeFile(io, .{
+                .sub_path = dest_path,
+                .data = "",
+                .flags = .{ .read = true, .permissions = permissions },
+            });
+        }
+
+        var src_path_buffer: [blob_prefix.len + 64]u8 = undefined;
+        const src_path = blobSubPath(digest, &src_path_buffer);
+        try std.Io.Dir.hardLink(self.root, src_path, dest_dir, dest_path, io, .{});
+    }
+
+    pub fn blobRealPathAllocSentinel(
+        self: Store,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        digest: Digest,
+    ) ![:0]u8 {
+        var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root_len = try self.root.realPath(io, &root_buffer);
+        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
+        const sub_path = blobSubPath(digest, &path_buffer);
+        return try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_buffer[0..root_len], sub_path }, 0);
+    }
+
     pub fn putFile(
         self: Store,
         io: std.Io,
@@ -310,6 +345,10 @@ test "Store treats the empty digest as always present" {
 }
 
 fn blobPath(digest: Digest, out: *[blob_prefix.len + 64]u8) []const u8 {
+    return blobSubPath(digest, out);
+}
+
+pub fn blobSubPath(digest: Digest, out: *[blob_prefix.len + 64]u8) []const u8 {
     @memcpy(out[0..blob_prefix.len], blob_prefix);
     var hex: [64]u8 = undefined;
     @memcpy(out[blob_prefix.len..], digest.formatHex(&hex));

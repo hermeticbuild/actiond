@@ -45,7 +45,15 @@ pub const RunOptions = struct {
     isolation: Isolation = .none,
     chroot_dir: ?[]const u8 = null,
     chroot_cwd: []const u8 = "/",
+    bind_mounts: []const BindMount = &.{},
     cgroup_limits: CgroupLimits = .{},
+    sandbox_uid: u32 = 65534,
+    sandbox_gid: u32 = 65534,
+};
+
+pub const BindMount = struct {
+    source: [:0]u8,
+    target: [:0]u8,
 };
 
 pub const Status = union(enum) {
@@ -196,7 +204,6 @@ const Cgroup = struct {
     procs_path: ?[:0]u8 = null,
 
     fn create(io: std.Io, allocator: std.mem.Allocator, limits: CgroupLimits) !Cgroup {
-        if (!limits.any()) return .{};
         if (comptime builtin.os.tag != .linux) return .{};
 
         var root = std.Io.Dir.openDirAbsolute(io, "/sys/fs/cgroup", .{}) catch return .{};
@@ -244,19 +251,26 @@ const Cgroup = struct {
         };
     }
 
+    fn kill(self: Cgroup, io: std.Io, allocator: std.mem.Allocator) void {
+        const path = self.path orelse return;
+        if (std.Io.Dir.openDirAbsolute(io, "/sys/fs/cgroup", .{})) |root| {
+            var mutable_root = root;
+            defer mutable_root.close(io);
+            const kill_path = std.fmt.allocPrint(allocator, "{s}/cgroup.kill", .{path}) catch return;
+            defer allocator.free(kill_path);
+            mutable_root.writeFile(io, .{
+                .sub_path = kill_path,
+                .data = "1",
+            }) catch {};
+        } else |_| {}
+    }
+
     fn deinit(self: *Cgroup, io: std.Io, allocator: std.mem.Allocator) void {
         if (self.path) |path| {
+            self.kill(io, allocator);
             if (std.Io.Dir.openDirAbsolute(io, "/sys/fs/cgroup", .{})) |root| {
                 var mutable_root = root;
                 defer mutable_root.close(io);
-                const kill_path = std.fmt.allocPrint(allocator, "{s}/cgroup.kill", .{path}) catch null;
-                if (kill_path) |value| {
-                    defer allocator.free(value);
-                    mutable_root.writeFile(io, .{
-                        .sub_path = value,
-                        .data = "1",
-                    }) catch {};
-                }
                 mutable_root.deleteTree(io, path) catch {};
             } else |_| {}
             allocator.free(path);
@@ -285,6 +299,52 @@ fn writeCgroupValue(
     });
 }
 
+fn prepareChrootWritableDirs(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: []const u8,
+    uid: u32,
+    gid: u32,
+) !void {
+    _ = allocator;
+    if (comptime builtin.os.tag != .linux) return;
+    if (std.os.linux.geteuid() != 0) return;
+
+    var root = try std.Io.Dir.openDirAbsolute(io, chroot_dir, .{ .iterate = true });
+    defer root.close(io);
+    try makeDirectoryWritableBySandbox(root.handle, uid, gid);
+    try prepareChrootWritableSubdirs(io, root, uid, gid);
+}
+
+fn prepareChrootWritableSubdirs(
+    io: std.Io,
+    dir: std.Io.Dir,
+    uid: u32,
+    gid: u32,
+) !void {
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        var child = try dir.openDir(io, entry.name, .{ .iterate = true });
+        errdefer child.close(io);
+        try makeDirectoryWritableBySandbox(child.handle, uid, gid);
+        try prepareChrootWritableSubdirs(io, child, uid, gid);
+        child.close(io);
+    }
+}
+
+fn makeDirectoryWritableBySandbox(fd: std.posix.fd_t, uid: u32, gid: u32) !void {
+    const linux = std.os.linux;
+    switch (std.posix.errno(linux.fchown(fd, @intCast(uid), @intCast(gid)))) {
+        .SUCCESS => {},
+        else => return error.Unexpected,
+    }
+    switch (std.posix.errno(linux.fchmod(fd, 0o755))) {
+        .SUCCESS => {},
+        else => return error.Unexpected,
+    }
+}
+
 fn runCommandChroot(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -297,6 +357,7 @@ fn runCommandChroot(
 
     var cgroup = try Cgroup.create(io, allocator, options.cgroup_limits);
     defer cgroup.deinit(io, allocator);
+    try prepareChrootWritableDirs(io, allocator, chroot_dir, options.sandbox_uid, options.sandbox_gid);
 
     const exec_path = try resolveExecPath(io, allocator, command, chroot_dir);
     defer allocator.free(exec_path);
@@ -351,8 +412,13 @@ fn runCommandChroot(
         .exec_path = exec_z,
         .argv = argv.ptr,
         .envp = envp.ptr,
+        .bind_mounts = options.bind_mounts,
         .cgroup_procs_path = if (cgroup.procs_path) |path| path.ptr else null,
+        .sandbox_uid = options.sandbox_uid,
+        .sandbox_gid = options.sandbox_gid,
     });
+    var child_waited = false;
+    errdefer if (!child_waited) terminateChild(io, allocator, pid, cgroup);
 
     closeFd(stdin_pipe[0]);
     closeFd(stdin_pipe[1]);
@@ -370,6 +436,7 @@ fn runCommandChroot(
     }
 
     const status = try waitForPid(pid);
+    child_waited = true;
     return .{
         .status = status,
         .stdout = streams.stdout,
@@ -388,7 +455,10 @@ const ForkAction = struct {
     exec_path: [:0]const u8,
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
+    bind_mounts: []const BindMount,
     cgroup_procs_path: ?[*:0]const u8,
+    sandbox_uid: u32,
+    sandbox_gid: u32,
 };
 
 fn forkAction(action: ForkAction) !std.os.linux.pid_t {
@@ -412,15 +482,50 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childClose(action.stderr_pipe[0]);
     childClose(action.stderr_pipe[1]);
 
+    childSyscall(linux.setpgid(0, 0));
     if (action.cgroup_procs_path) |path| childWriteFile(path, "0\n");
     childSyscall(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
     childCloseExtraFds();
     childSyscall(linux.unshare(linux.CLONE.NEWNS));
     childSyscall(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0));
+    for (action.bind_mounts) |mount| childBindMountReadOnly(mount);
     childSyscall(linux.chroot(action.chroot_dir.ptr));
     childSyscall(linux.chdir(action.cwd.ptr));
+    childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
     _ = linux.execve(action.exec_path.ptr, action.argv, action.envp);
     linux.exit(127);
+}
+
+fn childBindMountReadOnly(mount: BindMount) void {
+    const linux = std.os.linux;
+    childSyscall(linux.mount(mount.source.ptr, mount.target.ptr, null, linux.MS.BIND, 0));
+    childSyscall(linux.mount(
+        null,
+        mount.target.ptr,
+        null,
+        linux.MS.BIND | linux.MS.REMOUNT | linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV,
+        0,
+    ));
+}
+
+const linux_capability_version_3: u32 = 0x20080522;
+
+fn childDropPrivileges(uid: u32, gid: u32) void {
+    const linux = std.os.linux;
+    var empty_groups = [_]linux.gid_t{0};
+    childSyscall(linux.setgroups(0, &empty_groups));
+    childSyscall(linux.setresgid(@intCast(gid), @intCast(gid), @intCast(gid)));
+    childSyscall(linux.setresuid(@intCast(uid), @intCast(uid), @intCast(uid)));
+
+    var header = linux.cap_user_header_t{
+        .version = linux_capability_version_3,
+        .pid = 0,
+    };
+    const data = [_]linux.cap_user_data_t{
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+    };
+    _ = linux.capset(&header, &data[0]);
 }
 
 fn childDup2(old: std.posix.fd_t, new: std.posix.fd_t) void {
@@ -491,6 +596,19 @@ fn closeFd(fd: std.posix.fd_t) void {
         .INTR => continue,
         else => return,
     };
+}
+
+fn terminateChild(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    pid: std.os.linux.pid_t,
+    cgroup: Cgroup,
+) void {
+    const linux = std.os.linux;
+    cgroup.kill(io, allocator);
+    _ = linux.kill(-pid, .KILL);
+    _ = linux.kill(pid, .KILL);
+    _ = waitForPid(pid) catch {};
 }
 
 const CollectedStreams = struct {
