@@ -3,6 +3,7 @@ const std = @import("std");
 const dir_mode: u32 = 0o040755;
 const file_mode: u32 = 0o100755;
 const module_mode: u32 = 0o100644;
+const symlink_mode: u32 = 0o120777;
 const max_input_file_bytes = 512 * 1024 * 1024;
 
 const Entry = struct {
@@ -37,6 +38,13 @@ pub fn main(init: std.process.Init) !void {
             const dest = stripLeadingSlash(spec[split + 1 ..]);
             const data = try std.Io.Dir.cwd().readFileAlloc(io, src, arena, .limited(max_input_file_bytes));
             try addFile(arena, &entries, dest, file_mode, data);
+        } else if (std.mem.startsWith(u8, arg, "--symlink=")) {
+            const spec = arg["--symlink=".len..];
+            const split = std.mem.indexOfScalar(u8, spec, '=') orelse return error.InvalidFileSpec;
+            if (split == 0 or split + 1 >= spec.len) return error.InvalidFileSpec;
+            const target = spec[0..split];
+            const dest = stripLeadingSlash(spec[split + 1 ..]);
+            try addSymlink(arena, &entries, dest, target);
         } else {
             const data = try std.Io.Dir.cwd().readFileAlloc(io, arg, arena, .limited(max_input_file_bytes));
             const dest = try std.fmt.allocPrint(arena, "modules/{s}", .{std.fs.path.basename(arg)});
@@ -65,7 +73,7 @@ fn usage(io: std.Io) !void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.writeAll("usage: initramfs_newc OUT ACTIOND [MODULE...] [--file=SRC=DEST]\n");
+    try stderr.writeAll("usage: initramfs_newc OUT ACTIOND [MODULE...] [--file=SRC=DEST] [--symlink=TARGET=DEST]\n");
     try stderr.flush();
     return error.InvalidArguments;
 }
@@ -76,7 +84,7 @@ fn addDir(
     raw_path: []const u8,
 ) !void {
     const path = stripSlashes(raw_path);
-    if (path.len == 0 or contains(entries.items, path, dir_mode)) return;
+    if (path.len == 0 or containsName(entries.items, path)) return;
     const parent = std.fs.path.dirname(path);
     if (parent) |value| try addDir(allocator, entries, value);
     try entries.append(allocator, .{
@@ -95,7 +103,7 @@ fn addFile(
     const path = stripSlashes(raw_path);
     if (path.len == 0) return error.InvalidFileSpec;
     if (std.fs.path.dirname(path)) |parent| try addDir(allocator, entries, parent);
-    if (contains(entries.items, path, mode)) return;
+    if (containsName(entries.items, path)) return;
     try entries.append(allocator, .{
         .name = try allocator.dupe(u8, path),
         .mode = mode,
@@ -103,8 +111,24 @@ fn addFile(
     });
 }
 
-fn contains(entries: []const Entry, name: []const u8, mode: u32) bool {
-    _ = mode;
+fn addSymlink(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayListUnmanaged(Entry),
+    raw_path: []const u8,
+    target: []const u8,
+) !void {
+    const path = stripSlashes(raw_path);
+    if (path.len == 0 or target.len == 0) return error.InvalidFileSpec;
+    if (std.fs.path.dirname(path)) |parent| try addDir(allocator, entries, parent);
+    if (containsName(entries.items, path)) return;
+    try entries.append(allocator, .{
+        .name = try allocator.dupe(u8, path),
+        .mode = symlink_mode,
+        .data = try allocator.dupe(u8, target),
+    });
+}
+
+fn containsName(entries: []const Entry, name: []const u8) bool {
     for (entries) |entry| {
         if (std.mem.eql(u8, entry.name, name)) return true;
     }
@@ -151,4 +175,20 @@ fn writeHex(writer: *std.Io.Writer, value: u32) !void {
 fn align4(writer: *std.Io.Writer) !void {
     const pad = (4 - (writer.end % 4)) % 4;
     try writer.splatByteAll(0, pad);
+}
+
+test "addSymlink creates parent directory and records target" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var entries: std.ArrayListUnmanaged(Entry) = .empty;
+
+    try addSymlink(allocator, &entries, "/bin/touch", "/usr/bin/busybox");
+
+    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+    try std.testing.expectEqualStrings("bin", entries.items[0].name);
+    try std.testing.expectEqual(dir_mode, entries.items[0].mode);
+    try std.testing.expectEqualStrings("bin/touch", entries.items[1].name);
+    try std.testing.expectEqual(symlink_mode, entries.items[1].mode);
+    try std.testing.expectEqualStrings("/usr/bin/busybox", entries.items[1].data);
 }

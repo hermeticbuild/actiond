@@ -6,6 +6,7 @@ import sys
 DIR_MODE = 0o040755
 FILE_MODE = 0o100755
 MODULE_MODE = 0o100644
+SYMLINK_MODE = 0o120777
 
 
 def align4(out):
@@ -42,13 +43,17 @@ def write_entry(out, ino, name, mode, data=b""):
 
 def main(argv):
     if len(argv) < 3:
-        print("usage: initramfs_newc.py OUT ACTIOND [MODULE...]", file=sys.stderr)
+        print(
+            "usage: initramfs_newc.py OUT ACTIOND [MODULE...] [--file=SRC=DEST] [--symlink=TARGET=DEST]",
+            file=sys.stderr,
+        )
         return 2
 
     out_path = argv[1]
     actiond_path = argv[2]
     module_paths = []
     file_specs = []
+    symlink_specs = []
     for arg in argv[3:]:
         if arg.startswith("--file="):
             spec = arg[len("--file="):]
@@ -57,6 +62,13 @@ def main(argv):
                 print(f"invalid file spec: {arg}", file=sys.stderr)
                 return 2
             file_specs.append((src, dest.lstrip("/")))
+        elif arg.startswith("--symlink="):
+            spec = arg[len("--symlink="):]
+            target, sep, dest = spec.partition("=")
+            if not sep or not target or not dest:
+                print(f"invalid symlink spec: {arg}", file=sys.stderr)
+                return 2
+            symlink_specs.append((target, dest.lstrip("/")))
         else:
             module_paths.append(arg)
     with open(actiond_path, "rb") as f:
@@ -86,6 +98,9 @@ def main(argv):
         seen_files.add(path)
         entries.append((path, mode, data))
 
+    def add_symlink(path, target):
+        add_file(path, SYMLINK_MODE, target.encode("utf-8"))
+
     for directory in ("dev", "proc", "sys", "tmp", "work", "cas", "modules"):
         add_dir(directory)
     add_file("init", FILE_MODE, actiond)
@@ -96,6 +111,8 @@ def main(argv):
     for src, dest in file_specs:
         with open(src, "rb") as f:
             add_file(dest, FILE_MODE, f.read())
+    for target, dest in symlink_specs:
+        add_symlink(dest, target)
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
