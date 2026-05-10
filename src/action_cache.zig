@@ -7,9 +7,14 @@ const key_prefix = "ac/sha256/";
 
 pub const Store = struct {
     root: std.Io.Dir,
+    layout_ready: bool = false,
 
     pub fn init(root: std.Io.Dir) Store {
         return .{ .root = root };
+    }
+
+    pub fn initReady(root: std.Io.Dir) Store {
+        return .{ .root = root, .layout_ready = true };
     }
 
     pub fn ensureLayout(self: Store, io: std.Io) !void {
@@ -23,7 +28,7 @@ pub const Store = struct {
         action_digest: cas.Digest,
         result: reapi.ActionResult,
     ) !void {
-        try self.ensureLayout(io);
+        if (!self.layout_ready) try self.ensureLayout(io);
         const bytes = try reapi.encodeAlloc(allocator, result);
         defer allocator.free(bytes);
 

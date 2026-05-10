@@ -150,16 +150,7 @@ pub const Server = struct {
         request_records: []const u8,
     ) ![]u8 {
         if (std.mem.eql(u8, method, bytestream_write)) {
-            var requests: std.ArrayListUnmanaged(bytestream.WriteRequest) = .empty;
-            defer requests.deinit(allocator);
-
-            var records = grpc_record.Iterator.init(request_records);
-            while (try records.next()) |message| {
-                var reader = protobuf.Reader.init(message.payload);
-                try requests.append(allocator, try bytestream.WriteRequest.decode(&reader));
-            }
-
-            const response = try bytestream_service.write(io, allocator, self.store, requests.items);
+            const response = try bytestream_service.writeGrpcRecords(io, allocator, self.store, request_records);
             return try encodeResponse(allocator, response);
         }
 

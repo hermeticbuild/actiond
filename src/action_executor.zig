@@ -211,22 +211,18 @@ fn collectOutputFiles(
         };
         if (stat.kind != .file) return error.FailedPrecondition;
 
-        const bytes = work_root.readFileAlloc(
-            io,
-            path,
-            allocator,
-            .limited(max_output_file_bytes),
-        ) catch |err| switch (err) {
+        if (stat.size > max_output_file_bytes) return error.FileTooBig;
+
+        const digest = store.putFile(io, work_root, path) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
-        defer allocator.free(bytes);
 
         const path_copy = try allocator.dupe(u8, path);
         errdefer allocator.free(path_copy);
         try output_files.append(allocator, .{
             .path = path_copy,
-            .digest = try store.putBytes(io, bytes),
+            .digest = digest,
             .is_executable = isExecutable(stat),
         });
     }

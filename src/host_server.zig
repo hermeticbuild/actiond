@@ -54,9 +54,12 @@ pub fn serve(
     var work_dir = try root_dir.createDirPathOpen(io, "work", .{});
     defer work_dir.close(io);
 
+    try cas.Store.init(cas_dir).ensureLayout(io);
+    try action_cache.Store.init(ac_dir).ensureLayout(io);
+
     const server: reapi_dispatch.Server = .{
-        .store = cas.Store.init(cas_dir),
-        .action_cache_store = action_cache.Store.init(ac_dir),
+        .store = cas.Store.initReady(cas_dir),
+        .action_cache_store = action_cache.Store.initReady(ac_dir),
         .work_root = work_dir,
     };
 

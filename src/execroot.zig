@@ -29,24 +29,18 @@ pub const Materializer = struct {
         allocator: std.mem.Allocator,
         inputs: []const Input,
     ) !void {
+        _ = allocator;
         for (inputs) |input| {
             try validatePath(input.path);
             try createParentDirs(self.root, io, input.path);
 
-            const bytes = try self.store.readAlloc(io, allocator, input.digest);
-            defer allocator.free(bytes);
-
-            try self.root.writeFile(io, .{
-                .sub_path = input.path,
-                .data = bytes,
-                .flags = .{
-                    .read = true,
-                    .permissions = if (input.is_executable)
-                        .executable_file
-                    else
-                        .default_file,
-                },
-            });
+            try self.store.copyToFile(
+                io,
+                input.digest,
+                self.root,
+                input.path,
+                if (input.is_executable) .executable_file else .default_file,
+            );
         }
     }
 };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cas = @import("cas.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
@@ -108,6 +109,7 @@ pub fn serve(
     const cas_path = options.cas orelse owned_cas_path;
 
     var cas_dir = try std.Io.Dir.cwd().createDirPathOpen(io, cas_path, .{});
+    try cas.Store.init(cas_dir).ensureLayout(io);
     cas_dir.close(io);
 
     var stderr_buffer: [512]u8 = undefined;

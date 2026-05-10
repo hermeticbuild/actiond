@@ -25,9 +25,12 @@ pub fn run(io: std.Io) !void {
     var action_work_dir = try work_dir.createDirPathOpen(io, "actions", .{});
     defer action_work_dir.close(io);
 
+    try cas.Store.init(cas_dir).ensureLayout(io);
+    try action_cache.Store.init(ac_dir).ensureLayout(io);
+
     const server: reapi_dispatch.Server = .{
-        .store = cas.Store.init(cas_dir),
-        .action_cache_store = action_cache.Store.init(ac_dir),
+        .store = cas.Store.initReady(cas_dir),
+        .action_cache_store = action_cache.Store.initReady(ac_dir),
         .work_root = action_work_dir,
     };
 
