@@ -1,6 +1,8 @@
 const std = @import("std");
 const bytestream = @import("bytestream.zig");
 const bytestream_service = @import("bytestream_service.zig");
+const action_cache = @import("action_cache.zig");
+const action_cache_service = @import("action_cache_service.zig");
 const cache_service = @import("cache_service.zig");
 const cas = @import("cas.zig");
 const grpc_record = @import("grpc_record.zig");
@@ -16,11 +18,14 @@ pub const Error = error{
 pub const cas_find_missing_blobs = "/build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs";
 pub const cas_batch_update_blobs = "/build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs";
 pub const cas_batch_read_blobs = "/build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs";
+pub const ac_get_action_result = "/build.bazel.remote.execution.v2.ActionCache/GetActionResult";
+pub const ac_update_action_result = "/build.bazel.remote.execution.v2.ActionCache/UpdateActionResult";
 pub const bytestream_read = "/google.bytestream.ByteStream/Read";
 pub const bytestream_write = "/google.bytestream.ByteStream/Write";
 
 pub const Server = struct {
     store: cas.Store,
+    action_cache_store: ?action_cache.Store = null,
 
     pub fn init(store: cas.Store) Server {
         return .{ .store = store };
@@ -60,6 +65,23 @@ pub const Server = struct {
             var result = try cache_service.batchReadBlobs(io, allocator, self.store, request);
             defer result.deinit(allocator);
             return try encodeResponse(allocator, result.response);
+        }
+
+        if (std.mem.eql(u8, method, ac_get_action_result)) {
+            const result_store = self.action_cache_store orelse return error.UnsupportedMethod;
+            var reader = protobuf.Reader.init(payload);
+            const request = try reapi.GetActionResultRequest.decode(&reader);
+            var entry = try action_cache_service.getActionResult(io, allocator, result_store, request);
+            defer entry.deinit(allocator);
+            return try encodeResponse(allocator, entry.result);
+        }
+
+        if (std.mem.eql(u8, method, ac_update_action_result)) {
+            const result_store = self.action_cache_store orelse return error.UnsupportedMethod;
+            var reader = protobuf.Reader.init(payload);
+            const request = try reapi.UpdateActionResultRequest.decode(&reader);
+            const response = try action_cache_service.updateActionResult(io, allocator, result_store, request);
+            return try encodeResponse(allocator, response);
         }
 
         return error.UnsupportedMethod;
@@ -275,4 +297,59 @@ test "Server dispatches ByteStream Write and Read record streams" {
     var read_reader = protobuf.Reader.init(try singlePayload(read_response_record));
     const read_response = try bytestream.ReadResponse.decode(&read_reader);
     try std.testing.expectEqualStrings("load", read_response.data);
+}
+
+test "Server dispatches ActionCache update and get" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var ac_dir = try tmp.dir.createDirPathOpen(std.testing.io, "ac", .{});
+    defer ac_dir.close(std.testing.io);
+
+    const action_digest = cas.Digest.fromBytes("action");
+    const stdout_digest = cas.Digest.fromBytes("stdout");
+    var action_hash: [64]u8 = undefined;
+    var stdout_hash: [64]u8 = undefined;
+
+    const server: Server = .{
+        .store = cas.Store.init(cas_dir),
+        .action_cache_store = action_cache.Store.init(ac_dir),
+    };
+
+    const update_request = try encodeRequest(std.testing.allocator, reapi.UpdateActionResultRequest{
+        .action_digest = action_digest.toReapi(&action_hash),
+        .action_result = .{
+            .exit_code = 2,
+            .stdout_digest = stdout_digest.toReapi(&stdout_hash),
+        },
+    });
+    defer std.testing.allocator.free(update_request);
+
+    const update_response_record = try server.handleUnary(
+        std.testing.io,
+        std.testing.allocator,
+        ac_update_action_result,
+        update_request,
+    );
+    defer std.testing.allocator.free(update_response_record);
+
+    const get_request = try encodeRequest(std.testing.allocator, reapi.GetActionResultRequest{
+        .action_digest = action_digest.toReapi(&action_hash),
+    });
+    defer std.testing.allocator.free(get_request);
+
+    const get_response_record = try server.handleUnary(
+        std.testing.io,
+        std.testing.allocator,
+        ac_get_action_result,
+        get_request,
+    );
+    defer std.testing.allocator.free(get_response_record);
+
+    var reader = protobuf.Reader.init(try singlePayload(get_response_record));
+    const result = try reapi.ActionResult.decode(&reader);
+    try std.testing.expectEqual(@as(i32, 2), result.exit_code);
+    try std.testing.expect(result.stdout_digest.?.eql(stdout_digest.toReapi(&stdout_hash)));
 }

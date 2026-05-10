@@ -415,6 +415,62 @@ pub const ActionResult = struct {
     }
 };
 
+pub const GetActionResultRequest = struct {
+    instance_name: []const u8 = "",
+    action_digest: ?Digest = null,
+
+    pub fn encode(self: GetActionResultRequest, writer: *protobuf.Writer) !void {
+        if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
+        if (self.action_digest) |digest| try writer.writeMessageField(2, digest);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !GetActionResultRequest {
+        var out: GetActionResultRequest = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.action_digest = try Digest.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
+pub const UpdateActionResultRequest = struct {
+    instance_name: []const u8 = "",
+    action_digest: ?Digest = null,
+    action_result: ?ActionResult = null,
+
+    pub fn encode(self: UpdateActionResultRequest, writer: *protobuf.Writer) !void {
+        if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
+        if (self.action_digest) |digest| try writer.writeMessageField(2, digest);
+        if (self.action_result) |result| try writer.writeMessageField(3, result);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !UpdateActionResultRequest {
+        var out: UpdateActionResultRequest = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.action_digest = try Digest.decode(&nested);
+                },
+                3 => {
+                    var nested = try reader.readMessage();
+                    out.action_result = try ActionResult.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
 pub const FindMissingBlobsRequest = struct {
     instance_name: []const u8 = "",
     blob_digests: []const Digest = &.{},

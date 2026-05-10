@@ -5,6 +5,7 @@ zig_library(
     main = "root.zig",
     srcs = [
         "action_cache.zig",
+        "action_cache_service.zig",
         "action_executor.zig",
         "action_runner.zig",
         "bytestream.zig",
@@ -28,6 +29,7 @@ zig_test(
     main = "root.zig",
     srcs = [
         "action_cache.zig",
+        "action_cache_service.zig",
         "action_executor.zig",
         "action_runner.zig",
         "bytestream.zig",
