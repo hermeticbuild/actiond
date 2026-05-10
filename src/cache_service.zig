@@ -47,7 +47,7 @@ pub fn batchUpdateBlobs(
             continue;
         }
 
-        _ = try store.putBytes(io, item.data);
+        try store.putKnownBytes(io, expected, item.data);
         try responses.append(allocator, .{
             .digest = item.digest,
             .status = .{},
