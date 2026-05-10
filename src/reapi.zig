@@ -534,6 +534,137 @@ pub const ActionResult = struct {
     }
 };
 
+pub const Any = struct {
+    type_url: []const u8 = "",
+    value: []const u8 = "",
+
+    pub fn encode(self: Any, writer: *protobuf.Writer) !void {
+        if (self.type_url.len != 0) try writer.writeStringField(1, self.type_url);
+        if (self.value.len != 0) try writer.writeBytesField(2, self.value);
+    }
+
+    pub fn encodedLen(self: Any) usize {
+        var len: usize = 0;
+        if (self.type_url.len != 0) len += protobuf.stringFieldLen(1, self.type_url.len);
+        if (self.value.len != 0) len += protobuf.bytesFieldLen(2, self.value.len);
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !Any {
+        var out: Any = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.type_url = try reader.readString(),
+                2 => out.value = try reader.readBytes(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
+pub const execute_response_type_url = "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse";
+
+pub const ExecuteResponse = struct {
+    result: ?ActionResult = null,
+    cached_result: bool = false,
+    status: ?Status = null,
+    message: []const u8 = "",
+
+    pub fn encode(self: ExecuteResponse, writer: *protobuf.Writer) !void {
+        if (self.result) |result| try writer.writeMessageField(1, result);
+        if (self.cached_result) try writer.writeBoolField(2, true);
+        if (self.status) |status| try writer.writeMessageField(3, status);
+        if (self.message.len != 0) try writer.writeStringField(5, self.message);
+    }
+
+    pub fn encodedLen(self: ExecuteResponse) usize {
+        var len: usize = 0;
+        if (self.result) |result| len += protobuf.messageFieldLen(1, result.encodedLen());
+        if (self.cached_result) len += protobuf.boolFieldLen(2);
+        if (self.status) |status| len += protobuf.messageFieldLen(3, status.encodedLen());
+        if (self.message.len != 0) len += protobuf.stringFieldLen(5, self.message.len);
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !ExecuteResponse {
+        var out: ExecuteResponse = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => {
+                    var nested = try reader.readMessage();
+                    out.result = try ActionResult.decode(&nested);
+                },
+                2 => out.cached_result = try reader.readBool(),
+                3 => {
+                    var nested = try reader.readMessage();
+                    out.status = try Status.decode(&nested);
+                },
+                5 => out.message = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+
+    pub fn toAny(self: ExecuteResponse, allocator: std.mem.Allocator) !Any {
+        return .{
+            .type_url = execute_response_type_url,
+            .value = try encodeAlloc(allocator, self),
+        };
+    }
+};
+
+pub const Operation = struct {
+    name: []const u8 = "",
+    metadata: ?Any = null,
+    done: bool = false,
+    err: ?Status = null,
+    response: ?Any = null,
+
+    pub fn encode(self: Operation, writer: *protobuf.Writer) !void {
+        if (self.name.len != 0) try writer.writeStringField(1, self.name);
+        if (self.metadata) |metadata| try writer.writeMessageField(2, metadata);
+        if (self.done) try writer.writeBoolField(3, true);
+        if (self.err) |status| try writer.writeMessageField(4, status);
+        if (self.response) |response| try writer.writeMessageField(5, response);
+    }
+
+    pub fn encodedLen(self: Operation) usize {
+        var len: usize = 0;
+        if (self.name.len != 0) len += protobuf.stringFieldLen(1, self.name.len);
+        if (self.metadata) |metadata| len += protobuf.messageFieldLen(2, metadata.encodedLen());
+        if (self.done) len += protobuf.boolFieldLen(3);
+        if (self.err) |status| len += protobuf.messageFieldLen(4, status.encodedLen());
+        if (self.response) |response| len += protobuf.messageFieldLen(5, response.encodedLen());
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !Operation {
+        var out: Operation = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.metadata = try Any.decode(&nested);
+                },
+                3 => out.done = try reader.readBool(),
+                4 => {
+                    var nested = try reader.readMessage();
+                    out.err = try Status.decode(&nested);
+                },
+                5 => {
+                    var nested = try reader.readMessage();
+                    out.response = try Any.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
 pub const GetActionResultRequest = struct {
     instance_name: []const u8 = "",
     action_digest: ?Digest = null,
@@ -1056,4 +1187,32 @@ test "ActionResult round-trips exit code and stream digests" {
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));
+}
+
+test "Operation carries packed ExecuteResponse" {
+    const response = ExecuteResponse{
+        .result = .{ .exit_code = 5 },
+        .cached_result = true,
+        .status = .{},
+    };
+    const packed_response = try response.toAny(std.testing.allocator);
+    defer std.testing.allocator.free(packed_response.value);
+
+    const encoded = try encodeAlloc(std.testing.allocator, Operation{
+        .name = "operations/local",
+        .done = true,
+        .response = packed_response,
+    });
+    defer std.testing.allocator.free(encoded);
+
+    var reader = protobuf.Reader.init(encoded);
+    const operation = try Operation.decode(&reader);
+    try std.testing.expect(operation.done);
+    try std.testing.expectEqualStrings("operations/local", operation.name);
+    try std.testing.expectEqualStrings(execute_response_type_url, operation.response.?.type_url);
+
+    var response_reader = protobuf.Reader.init(operation.response.?.value);
+    const decoded_response = try ExecuteResponse.decode(&response_reader);
+    try std.testing.expect(decoded_response.cached_result);
+    try std.testing.expectEqual(@as(i32, 5), decoded_response.result.?.exit_code);
 }
