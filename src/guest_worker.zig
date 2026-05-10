@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
+const bytestream_service = @import("bytestream_service.zig");
 const cas = @import("cas.zig");
 const control_protocol = @import("control_protocol.zig");
 const grpc_record = @import("grpc_record.zig");
@@ -95,6 +96,12 @@ fn handleConnectionFrame(
     try connection.readExact(&header_bytes);
 
     const header = try control_protocol.decodeHeader(&header_bytes);
+    const kind = try control_protocol.decodeCallKind(header.tag);
+    if (kind == .client_streaming_start) {
+        try handleClientStreamingFrames(io, allocator, server, connection, header);
+        return;
+    }
+
     const payload_len = try header.payloadLen();
     const frame = try allocator.alloc(u8, control_protocol.encoded_header_len + payload_len);
     defer allocator.free(frame);
@@ -117,6 +124,101 @@ fn handleConnectionFrame(
     });
 }
 
+fn handleClientStreamingFrames(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: reapi_dispatch.Server,
+    connection: vsock.Connection,
+    start_header: control_protocol.Header,
+) !void {
+    if (start_header.body_len != 0) return error.InvalidCallKind;
+
+    const method = try allocator.alloc(u8, start_header.method_len);
+    defer allocator.free(method);
+    try connection.readExact(method);
+
+    const response_body = dispatchClientStreamingFrames(
+        io,
+        allocator,
+        server,
+        connection,
+        method,
+    ) catch |err| {
+        try writeResponse(connection, .{
+            .status = .application_error,
+            .body = @errorName(err),
+        });
+        return;
+    };
+    defer allocator.free(response_body);
+
+    try writeResponse(connection, .{
+        .status = .ok,
+        .body = response_body,
+    });
+}
+
+fn dispatchClientStreamingFrames(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: reapi_dispatch.Server,
+    connection: vsock.Connection,
+    method: []const u8,
+) ![]u8 {
+    if (!std.mem.eql(u8, method, reapi_dispatch.bytestream_write)) {
+        return error.UnsupportedMethod;
+    }
+
+    var stream = bytestream_service.WriteGrpcStream.init(server.store);
+    defer stream.deinit(io, allocator);
+
+    var stream_error: ?anyerror = null;
+    while (true) {
+        var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
+        try connection.readExact(&header_bytes);
+
+        const header = try control_protocol.decodeHeader(&header_bytes);
+        const kind = try control_protocol.decodeCallKind(header.tag);
+        switch (kind) {
+            .client_streaming_chunk => {
+                if (header.method_len != 0) return error.InvalidCallKind;
+                try readClientStreamingChunk(io, allocator, connection, header.body_len, &stream, &stream_error);
+            },
+            .client_streaming_finish => {
+                if (header.method_len != 0 or header.body_len != 0) return error.InvalidCallKind;
+                if (stream_error) |err| return err;
+                const response = try stream.finish(io);
+                return try encodeGrpcRequest(allocator, response);
+            },
+            else => return error.InvalidCallKind,
+        }
+    }
+}
+
+const client_streaming_read_buffer_len = 64 * 1024;
+
+fn readClientStreamingChunk(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    connection: vsock.Connection,
+    body_len: u64,
+    stream: *bytestream_service.WriteGrpcStream,
+    stream_error: *?anyerror,
+) !void {
+    var buffer: [client_streaming_read_buffer_len]u8 = undefined;
+    var remaining = body_len;
+    while (remaining != 0) {
+        const read_len: usize = @intCast(@min(remaining, buffer.len));
+        try connection.readExact(buffer[0..read_len]);
+        if (stream_error.* == null) {
+            stream.append(io, allocator, buffer[0..read_len]) catch |err| {
+                stream_error.* = err;
+            };
+        }
+        remaining -= read_len;
+    }
+}
+
 pub fn dispatchControlRequest(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -127,6 +229,10 @@ pub fn dispatchControlRequest(
         .unary => try server.handleUnary(io, allocator, request.method, request.body),
         .server_streaming => try server.handleServerStreaming(io, allocator, request.method, request.body),
         .client_streaming => try server.handleClientStreaming(io, allocator, request.method, request.body),
+        .client_streaming_start,
+        .client_streaming_chunk,
+        .client_streaming_finish,
+        => error.InvalidCallKind,
     };
 }
 

@@ -154,39 +154,110 @@ pub fn writeGrpcRecords(
     store: cas.Store,
     request_records: []const u8,
 ) !bytestream.WriteResponse {
-    var records = grpc_record.Iterator.init(request_records);
-    var resource_name: ?[]const u8 = null;
-    var expected_digest: ?cas.Digest = null;
-    var writer: ?cas.BlobWriter = null;
-    defer if (writer) |*value| value.deinit(io);
+    var stream = WriteGrpcStream.init(store);
+    defer stream.deinit(io, allocator);
+    try stream.append(io, allocator, request_records);
+    return try stream.finish(io);
+}
 
-    var committed_size: u64 = 0;
-    var finished = false;
-    while (try records.next()) |message| {
-        var reader = protobuf.Reader.init(message.payload);
+pub const WriteGrpcStream = struct {
+    store: cas.Store,
+    pending: std.ArrayListUnmanaged(u8) = .empty,
+    resource_name: ?[]u8 = null,
+    expected_digest: ?cas.Digest = null,
+    writer: ?cas.BlobWriter = null,
+    committed_size: u64 = 0,
+    finished: bool = false,
+
+    pub fn init(store: cas.Store) WriteGrpcStream {
+        return .{ .store = store };
+    }
+
+    pub fn deinit(self: *WriteGrpcStream, io: std.Io, allocator: std.mem.Allocator) void {
+        if (self.writer) |*writer| writer.deinit(io);
+        if (self.resource_name) |resource_name| allocator.free(resource_name);
+        self.pending.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn append(
+        self: *WriteGrpcStream,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !void {
+        try self.pending.appendSlice(allocator, bytes);
+
+        var offset: usize = 0;
+        while (self.pending.items.len - offset >= grpc_record.header_len) {
+            const header = self.pending.items[offset..][0..grpc_record.header_len];
+            const compressed = switch (header[0]) {
+                0 => false,
+                1 => true,
+                else => return error.InvalidCompressionFlag,
+            };
+            if (compressed) return error.UnsupportedCompression;
+
+            const payload_len = std.mem.readInt(u32, header[1..grpc_record.header_len], .big);
+            const record_len = try grpc_record.encodedLen(payload_len);
+            if (self.pending.items.len - offset < record_len) break;
+
+            const payload_start = offset + grpc_record.header_len;
+            try self.appendPayload(io, allocator, self.pending.items[payload_start..][0..payload_len]);
+            offset += record_len;
+        }
+
+        if (offset != 0) {
+            const remaining_len = self.pending.items.len - offset;
+            if (remaining_len != 0) {
+                std.mem.copyForwards(
+                    u8,
+                    self.pending.items[0..remaining_len],
+                    self.pending.items[offset..],
+                );
+            }
+            self.pending.shrinkRetainingCapacity(remaining_len);
+        }
+    }
+
+    pub fn finish(self: *WriteGrpcStream, io: std.Io) !bytestream.WriteResponse {
+        if (self.pending.items.len != 0) return error.UnexpectedEof;
+        if (self.resource_name == null) return error.EmptyWrite;
+        if (!self.finished) return error.IncompleteWrite;
+
+        _ = try self.writer.?.finish(io, self.expected_digest.?);
+        return .{ .committed_size = @intCast(self.committed_size) };
+    }
+
+    fn appendPayload(
+        self: *WriteGrpcStream,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+    ) !void {
+        if (self.finished) return error.InvalidOffset;
+
+        var reader = protobuf.Reader.init(payload);
         const request = try bytestream.WriteRequest.decode(&reader);
-        if (resource_name == null) {
+        if (self.resource_name == null) {
             if (request.resource_name.len == 0) return error.MissingResourceName;
-            resource_name = request.resource_name;
             const resource = try bytestream.parseBlobResource(allocator, request.resource_name);
-            expected_digest = resource.digest;
-            writer = try store.beginBlobWriter(io);
-        } else if (request.resource_name.len != 0 and !std.mem.eql(u8, request.resource_name, resource_name.?)) {
+            self.resource_name = try allocator.dupe(u8, request.resource_name);
+            self.expected_digest = resource.digest;
+            self.writer = try self.store.beginBlobWriter(io);
+        } else if (request.resource_name.len != 0 and
+            !std.mem.eql(u8, request.resource_name, self.resource_name.?))
+        {
             return error.MissingResourceName;
         }
 
         if (request.write_offset < 0) return error.InvalidOffset;
-        if (@as(u64, @intCast(request.write_offset)) != committed_size) return error.InvalidOffset;
-        try writer.?.writeAll(request.data);
-        committed_size += request.data.len;
-        if (request.finish_write) finished = true;
+        if (@as(u64, @intCast(request.write_offset)) != self.committed_size) return error.InvalidOffset;
+        try self.writer.?.writeAll(request.data);
+        self.committed_size += request.data.len;
+        if (request.finish_write) self.finished = true;
     }
-
-    if (resource_name == null) return error.EmptyWrite;
-    if (!finished) return error.IncompleteWrite;
-    _ = try writer.?.finish(io, expected_digest.?);
-    return .{ .committed_size = @intCast(committed_size) };
-}
+};
 
 fn appendVarintAssumeCapacity(out: *std.ArrayListUnmanaged(u8), value: u64) void {
     var current = value;
@@ -280,6 +351,50 @@ test "writeGrpcRecords streams chunks into CAS" {
 
     const response = try writeGrpcRecords(std.testing.io, std.testing.allocator, store, records);
     try std.testing.expectEqual(@as(i64, 5), response.committed_size);
+    try std.testing.expect(try store.has(std.testing.io, digest));
+}
+
+test "WriteGrpcStream accepts records split across appends" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    const digest = cas.Digest.fromBytes("split-record");
+    var hash: [64]u8 = undefined;
+    const resource_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "uploads/u/blobs/{s}/{d}",
+        .{ digest.formatHex(&hash), digest.size_bytes },
+    );
+    defer std.testing.allocator.free(resource_name);
+
+    const first_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .resource_name = resource_name,
+        .write_offset = 0,
+        .data = "split",
+    });
+    defer std.testing.allocator.free(first_proto);
+    const first_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = first_proto });
+    defer std.testing.allocator.free(first_record);
+    const second_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .write_offset = 5,
+        .data = "-record",
+        .finish_write = true,
+    });
+    defer std.testing.allocator.free(second_proto);
+    const second_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = second_proto });
+    defer std.testing.allocator.free(second_record);
+    const records = try std.mem.concat(std.testing.allocator, u8, &.{ first_record, second_record });
+    defer std.testing.allocator.free(records);
+
+    var stream = WriteGrpcStream.init(store);
+    defer stream.deinit(std.testing.io, std.testing.allocator);
+    try stream.append(std.testing.io, std.testing.allocator, records[0..3]);
+    try stream.append(std.testing.io, std.testing.allocator, records[3..11]);
+    try stream.append(std.testing.io, std.testing.allocator, records[11..]);
+    const response = try stream.finish(std.testing.io);
+
+    try std.testing.expectEqual(@as(i64, 12), response.committed_size);
     try std.testing.expect(try store.has(std.testing.io, digest));
 }
 

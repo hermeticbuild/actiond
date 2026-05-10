@@ -15,6 +15,9 @@ pub const CallKind = enum(u8) {
     unary = 0,
     server_streaming = 1,
     client_streaming = 2,
+    client_streaming_start = 3,
+    client_streaming_chunk = 4,
+    client_streaming_finish = 5,
 };
 
 pub const Request = struct {
@@ -55,10 +58,14 @@ pub fn encodeRequestHeader(out: *[encoded_header_len]u8, request: Request) !void
 pub fn decodeRequest(bytes: []const u8) !Request {
     const decoded = try decode(bytes);
     return .{
-        .kind = try decodeEnum(CallKind, decoded.tag),
+        .kind = try decodeCallKind(decoded.tag),
         .method = decoded.method,
         .body = decoded.body,
     };
+}
+
+pub fn decodeCallKind(tag: u8) !CallKind {
+    return decodeEnum(CallKind, tag);
 }
 
 pub fn encodeResponseAlloc(allocator: std.mem.Allocator, response: Response) ![]u8 {

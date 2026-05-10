@@ -41,6 +41,7 @@ pub const Client = struct {
         return .{
             .ctx = self,
             .round_trip = roundTrip,
+            .start_client_streaming = startClientStreaming,
         };
     }
 
@@ -58,9 +59,42 @@ pub const Client = struct {
 
         const fd = try self.slotFd(slot);
         return self.roundTripFd(allocator, fd, request) catch |err| {
-            if (slot.fd) |cached| closeFd(cached);
-            slot.fd = null;
+            self.closeSlot(slot);
             return err;
+        };
+    }
+
+    fn startClientStreaming(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+    ) !guest_proxy.ClientStream {
+        const self: *Client = @ptrCast(@alignCast(ctx));
+        const stream = try allocator.create(ControlClientStream);
+        errdefer allocator.destroy(stream);
+
+        const slot_index = self.next_slot.fetchAdd(1, .monotonic) % connection_pool_size;
+        const slot = &self.slots[slot_index];
+        try slot.mutex.lock(io);
+        errdefer slot.mutex.unlock(io);
+
+        const fd = try self.slotFd(slot);
+        writeRequestFrame(fd, .client_streaming_start, method, "") catch |err| {
+            self.closeSlot(slot);
+            return err;
+        };
+
+        stream.* = .{
+            .client = self,
+            .slot = slot,
+            .fd = fd,
+        };
+        return .{
+            .ctx = stream,
+            .append_fn = ControlClientStream.append,
+            .finish_fn = ControlClientStream.finish,
+            .deinit_fn = ControlClientStream.deinit,
         };
     }
 
@@ -71,26 +105,8 @@ pub const Client = struct {
         request: control_protocol.Request,
     ) !guest_proxy.OwnedResponse {
         _ = self;
-
-        var request_header: [control_protocol.encoded_header_len]u8 = undefined;
-        try control_protocol.encodeRequestHeader(&request_header, request);
-        try writeAll(fd, &request_header);
-        try writeAll(fd, request.method);
-        try writeAll(fd, request.body);
-
-        var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
-        try readExact(fd, &header_bytes);
-        const header = try control_protocol.decodeHeader(&header_bytes);
-        if (header.method_len != 0) return error.InvalidCallKind;
-        const body_len = try responseBodyLen(header);
-
-        const response_body = try allocator.alloc(u8, body_len);
-        errdefer allocator.free(response_body);
-        try readExact(fd, response_body);
-        return .{
-            .status = try responseStatus(header.tag),
-            .body = response_body,
-        };
+        try writeRequestFrame(fd, request.kind, request.method, request.body);
+        return try readResponse(allocator, fd);
     }
 
     fn slotFd(self: *Client, slot: *ConnectionSlot) !std.posix.fd_t {
@@ -99,7 +115,102 @@ pub const Client = struct {
         slot.fd = fd;
         return fd;
     }
+
+    fn closeSlot(self: *Client, slot: *ConnectionSlot) void {
+        _ = self;
+        if (slot.fd) |fd| closeFd(fd);
+        slot.fd = null;
+    }
 };
+
+const ControlClientStream = struct {
+    client: *Client,
+    slot: *ConnectionSlot,
+    fd: std.posix.fd_t,
+    closed: bool = false,
+
+    fn append(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !void {
+        _ = allocator;
+        const self: *ControlClientStream = @ptrCast(@alignCast(ctx));
+        if (self.closed) return error.InvalidCallKind;
+        writeRequestFrame(self.fd, .client_streaming_chunk, "", bytes) catch |err| {
+            self.close(io);
+            return err;
+        };
+    }
+
+    fn finish(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+    ) !guest_proxy.OwnedResponse {
+        const self: *ControlClientStream = @ptrCast(@alignCast(ctx));
+        if (self.closed) return error.InvalidCallKind;
+
+        writeRequestFrame(self.fd, .client_streaming_finish, "", "") catch |err| {
+            self.close(io);
+            return err;
+        };
+        const response = readResponse(allocator, self.fd) catch |err| {
+            self.close(io);
+            return err;
+        };
+        self.closed = true;
+        self.slot.mutex.unlock(io);
+        return response;
+    }
+
+    fn deinit(ctx: *anyopaque, io: std.Io, allocator: std.mem.Allocator) void {
+        const self: *ControlClientStream = @ptrCast(@alignCast(ctx));
+        if (!self.closed) self.close(io);
+        allocator.destroy(self);
+    }
+
+    fn close(self: *ControlClientStream, io: std.Io) void {
+        if (self.closed) return;
+        self.client.closeSlot(self.slot);
+        self.closed = true;
+        self.slot.mutex.unlock(io);
+    }
+};
+
+fn writeRequestFrame(
+    fd: std.posix.fd_t,
+    kind: control_protocol.CallKind,
+    method: []const u8,
+    body: []const u8,
+) !void {
+    var request_header: [control_protocol.encoded_header_len]u8 = undefined;
+    try control_protocol.encodeRequestHeader(&request_header, .{
+        .kind = kind,
+        .method = method,
+        .body = body,
+    });
+    try writeAll(fd, &request_header);
+    try writeAll(fd, method);
+    try writeAll(fd, body);
+}
+
+fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t) !guest_proxy.OwnedResponse {
+    var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
+    try readExact(fd, &header_bytes);
+    const header = try control_protocol.decodeHeader(&header_bytes);
+    if (header.method_len != 0) return error.InvalidCallKind;
+    const body_len = try responseBodyLen(header);
+
+    const response_body = try allocator.alloc(u8, body_len);
+    errdefer allocator.free(response_body);
+    try readExact(fd, response_body);
+    return .{
+        .status = try responseStatus(header.tag),
+        .body = response_body,
+    };
+}
 
 fn responseStatus(tag: u8) !control_protocol.Status {
     return switch (tag) {
@@ -217,6 +328,77 @@ test "Client round trips a control frame over an fd" {
     server_thread.join();
     try std.testing.expectEqual(control_protocol.Status.ok, response.status);
     try std.testing.expectEqualStrings("world", response.body);
+}
+
+test "Client streams request chunks over one locked fd" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var fds: [2]std.posix.socket_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM,
+        0,
+        &fds,
+    ))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    const server_thread = try std.Thread.spawn(.{}, struct {
+        fn expectRequestFrame(
+            fd: std.posix.fd_t,
+            kind: control_protocol.CallKind,
+            method: []const u8,
+            body: []const u8,
+        ) !void {
+            var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
+            try readExact(fd, &header_bytes);
+            const header = try control_protocol.decodeHeader(&header_bytes);
+            const payload_len = try header.payloadLen();
+            const frame = try std.testing.allocator.alloc(u8, control_protocol.encoded_header_len + payload_len);
+            defer std.testing.allocator.free(frame);
+            @memcpy(frame[0..control_protocol.encoded_header_len], &header_bytes);
+            try readExact(fd, frame[control_protocol.encoded_header_len..]);
+
+            const request = try control_protocol.decodeRequest(frame);
+            try std.testing.expectEqual(kind, request.kind);
+            try std.testing.expectEqualStrings(method, request.method);
+            try std.testing.expectEqualStrings(body, request.body);
+        }
+
+        fn run(fd: std.posix.fd_t) !void {
+            defer closeFd(fd);
+            try expectRequestFrame(fd, .client_streaming_start, "/svc/Write", "");
+            try expectRequestFrame(fd, .client_streaming_chunk, "", "ab");
+            try expectRequestFrame(fd, .client_streaming_chunk, "", "cd");
+            try expectRequestFrame(fd, .client_streaming_finish, "", "");
+
+            const response = try control_protocol.encodeResponseAlloc(std.testing.allocator, .{
+                .status = .ok,
+                .body = "done",
+            });
+            defer std.testing.allocator.free(response);
+            try writeAll(fd, response);
+        }
+    }.run, .{fds[0]});
+    defer closeFd(fds[1]);
+
+    var opener = SocketPairOpener{ .fd = fds[1] };
+    var client = Client{ .opener = opener.opener() };
+    defer client.deinit(std.testing.io);
+    var stream = try client.transport().startClientStreaming(
+        std.testing.io,
+        std.testing.allocator,
+        "/svc/Write",
+    );
+    defer stream.deinit(std.testing.io, std.testing.allocator);
+    try stream.append(std.testing.io, std.testing.allocator, "ab");
+    try stream.append(std.testing.io, std.testing.allocator, "cd");
+    var response = try stream.finish(std.testing.io, std.testing.allocator);
+    defer response.deinit(std.testing.allocator);
+
+    server_thread.join();
+    try std.testing.expectEqual(control_protocol.Status.ok, response.status);
+    try std.testing.expectEqualStrings("done", response.body);
 }
 
 test "Client reuses a cached fd for repeated calls on one thread" {
