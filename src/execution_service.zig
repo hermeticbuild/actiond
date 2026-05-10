@@ -9,6 +9,8 @@ pub const Error = error{
     MissingActionDigest,
 };
 
+var next_work_id = std.atomic.Value(u64).init(0);
+
 pub const CompletedOperation = struct {
     operation: reapi.Operation,
     operation_name: []u8,
@@ -45,9 +47,12 @@ pub fn execute(
     }
 
     const do_not_cache = try readDoNotCache(io, allocator, blob_store, action_digest);
-    const work_path = try operationKey(allocator, "exec", action_digest);
+    const work_path = try executionWorkKey(allocator, action_digest);
     defer allocator.free(work_path);
     var work_dir = try work_root.createDirPathOpen(io, work_path, .{});
+    defer work_root.deleteTree(io, work_path) catch |err| {
+        std.log.warn("failed to remove action work directory {s}: {s}", .{ work_path, @errorName(err) });
+    };
     defer work_dir.close(io);
 
     var outcome = try action_executor.executeAction(io, allocator, blob_store, work_dir, action_digest);
@@ -115,6 +120,19 @@ fn operationKey(
     );
 }
 
+fn executionWorkKey(
+    allocator: std.mem.Allocator,
+    digest: cas.Digest,
+) ![]u8 {
+    const id = next_work_id.fetchAdd(1, .monotonic);
+    var hash: [64]u8 = undefined;
+    return try std.fmt.allocPrint(
+        allocator,
+        "exec/{s}-{d}-{d}",
+        .{ digest.formatHex(&hash), digest.size_bytes, id },
+    );
+}
+
 fn putProto(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -124,6 +142,18 @@ fn putProto(
     const bytes = try reapi.encodeAlloc(allocator, value);
     defer allocator.free(bytes);
     return try store.putBytes(io, bytes);
+}
+
+test "execution work keys are unique for repeated action digests" {
+    const digest = cas.Digest.fromBytes("same action");
+    const first = try executionWorkKey(std.testing.allocator, digest);
+    defer std.testing.allocator.free(first);
+    const second = try executionWorkKey(std.testing.allocator, digest);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    try std.testing.expect(std.mem.startsWith(u8, first, "exec/"));
+    try std.testing.expect(std.mem.startsWith(u8, second, "exec/"));
 }
 
 test "execute returns completed operation and populates action cache" {
