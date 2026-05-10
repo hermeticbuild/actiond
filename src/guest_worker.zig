@@ -67,7 +67,15 @@ fn handleConnection(
     try connection.readExact(frame[control_protocol.encoded_header_len..]);
 
     const request = try control_protocol.decodeRequest(frame);
-    const response_body = try dispatchControlRequest(io, allocator, server, request);
+    const response_body = dispatchControlRequest(io, allocator, server, request) catch |err| {
+        const response_frame = try control_protocol.encodeResponseAlloc(allocator, .{
+            .status = .application_error,
+            .body = @errorName(err),
+        });
+        defer allocator.free(response_frame);
+        try connection.writeAll(response_frame);
+        return;
+    };
     defer allocator.free(response_body);
 
     const response_frame = try control_protocol.encodeResponseAlloc(allocator, .{
