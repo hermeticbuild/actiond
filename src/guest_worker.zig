@@ -42,12 +42,30 @@ pub fn run(io: std.Io) !void {
 
     while (true) {
         const connection = try listener.accept();
-        defer connection.close();
-        handleConnection(io, allocator, server, connection) catch |err| {
-            try stderr.print("linux-actiond guest worker connection failed: {s}\n", .{@errorName(err)});
+        const thread = std.Thread.spawn(.{}, connectionThread, .{ io, allocator, server, connection }) catch |err| {
+            connection.close();
+            try stderr.print("linux-actiond guest worker spawn failed: {s}\n", .{@errorName(err)});
             try stderr.flush();
+            continue;
         };
+        thread.detach();
     }
+}
+
+fn connectionThread(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: reapi_dispatch.Server,
+    connection: vsock.Connection,
+) void {
+    defer connection.close();
+    handleConnection(io, allocator, server, connection) catch |err| {
+        var buffer: [256]u8 = undefined;
+        var stderr_writer = std.Io.File.stderr().writer(io, &buffer);
+        const stderr = &stderr_writer.interface;
+        stderr.print("linux-actiond guest worker connection failed: {s}\n", .{@errorName(err)}) catch {};
+        stderr.flush() catch {};
+    };
 }
 
 fn handleConnection(
