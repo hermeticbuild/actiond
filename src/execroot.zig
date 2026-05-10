@@ -30,6 +30,13 @@ pub const Materialization = struct {
     }
 };
 
+const ChrootInputMode = enum {
+    hardlink,
+    bind_mount,
+};
+
+var next_probe_id = std.atomic.Value(u64).init(0);
+
 pub const Materializer = struct {
     store: cas.Store,
     root: std.Io.Dir,
@@ -68,7 +75,11 @@ pub const Materializer = struct {
         }
         var cas_root_path: ?[]u8 = null;
         defer if (cas_root_path) |path| allocator.free(path);
-        if (options.chroot_root_path != null) {
+        const chroot_input_mode: ?ChrootInputMode = if (options.chroot_root_path != null)
+            try self.detectChrootInputMode(io, inputs)
+        else
+            null;
+        if (chroot_input_mode == .bind_mount) {
             var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const cas_root_len = try self.store.root.realPath(io, &cas_root_buffer);
             cas_root_path = try allocator.dupe(u8, cas_root_buffer[0..cas_root_len]);
@@ -85,7 +96,15 @@ pub const Materializer = struct {
             }
 
             if (options.chroot_root_path) |root_path| {
-                try self.materializeChrootInput(io, allocator, input, root_path, cas_root_path.?, &bind_mounts);
+                try self.materializeChrootInput(
+                    io,
+                    allocator,
+                    input,
+                    root_path,
+                    chroot_input_mode.?,
+                    cas_root_path,
+                    &bind_mounts,
+                );
             } else {
                 try self.store.copyToFile(
                     io,
@@ -108,7 +127,8 @@ pub const Materializer = struct {
         allocator: std.mem.Allocator,
         input: Input,
         root_path: []const u8,
-        cas_root_path: []const u8,
+        mode: ChrootInputMode,
+        cas_root_path: ?[]const u8,
         bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
     ) !void {
         const permissions: std.Io.File.Permissions = if (input.is_executable) .executable_file else .default_file;
@@ -116,32 +136,64 @@ pub const Materializer = struct {
             return self.store.copyToFile(io, input.digest, self.root, input.path, permissions);
         }
 
-        self.store.hardLinkToFile(io, input.digest, self.root, input.path, permissions) catch |err| switch (err) {
+        switch (mode) {
+            .hardlink => return self.store.hardLinkToFile(io, input.digest, self.root, input.path, permissions),
+            .bind_mount => {},
+        }
+
+        var blob = try self.store.openBlob(io, input.digest);
+        blob.close(io);
+        try self.root.writeFile(io, .{
+            .sub_path = input.path,
+            .data = "",
+            .flags = .{ .read = true, .permissions = .default_file },
+        });
+        var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+        const blob_path = cas.blobSubPath(input.digest, &blob_path_buffer);
+        const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path.?, blob_path }, 0);
+        errdefer allocator.free(source);
+        const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_path, input.path }, 0);
+        errdefer allocator.free(target);
+        try bind_mounts.append(allocator, .{
+            .source = source,
+            .target = target,
+        });
+    }
+
+    fn detectChrootInputMode(
+        self: Materializer,
+        io: std.Io,
+        inputs: []const Input,
+    ) !ChrootInputMode {
+        for (inputs) |input| {
+            if (input.is_executable or input.digest.isEmpty()) continue;
+            return self.probeHardlinkInputMode(io, input.digest);
+        }
+        return .hardlink;
+    }
+
+    fn probeHardlinkInputMode(
+        self: Materializer,
+        io: std.Io,
+        digest: cas.Digest,
+    ) !ChrootInputMode {
+        var path_buffer: [64]u8 = undefined;
+        const probe_path = try std.fmt.bufPrint(
+            &path_buffer,
+            ".actiond-hardlink-probe-{d}",
+            .{next_probe_id.fetchAdd(1, .monotonic)},
+        );
+        self.store.hardLinkToFile(io, digest, self.root, probe_path, .default_file) catch |err| switch (err) {
             error.CrossDevice,
             error.OperationUnsupported,
             error.AccessDenied,
             error.PermissionDenied,
-            => {
-                var blob = try self.store.openBlob(io, input.digest);
-                blob.close(io);
-                try self.root.writeFile(io, .{
-                    .sub_path = input.path,
-                    .data = "",
-                    .flags = .{ .read = true, .permissions = .default_file },
-                });
-                var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
-                const blob_path = cas.blobSubPath(input.digest, &blob_path_buffer);
-                const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path, blob_path }, 0);
-                errdefer allocator.free(source);
-                const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_path, input.path }, 0);
-                errdefer allocator.free(target);
-                try bind_mounts.append(allocator, .{
-                    .source = source,
-                    .target = target,
-                });
-            },
+            error.ReadOnlyFileSystem,
+            => return .bind_mount,
             else => |e| return e,
         };
+        self.root.deleteFile(io, probe_path) catch {};
+        return .hardlink;
     }
 };
 
