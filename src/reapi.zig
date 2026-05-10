@@ -1088,6 +1088,79 @@ pub const BatchReadBlobsResponse = struct {
     }
 };
 
+pub const GetTreeRequest = struct {
+    instance_name: []const u8 = "",
+    root_digest: ?Digest = null,
+    page_size: i32 = 0,
+    page_token: []const u8 = "",
+
+    pub fn encode(self: GetTreeRequest, writer: *protobuf.Writer) !void {
+        if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
+        if (self.root_digest) |digest| try writer.writeMessageField(2, digest);
+        if (self.page_size != 0) try writer.writeInt32Field(3, self.page_size);
+        if (self.page_token.len != 0) try writer.writeStringField(4, self.page_token);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !GetTreeRequest {
+        var out: GetTreeRequest = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.root_digest = try Digest.decode(&nested);
+                },
+                3 => out.page_size = try reader.readInt32(),
+                4 => out.page_token = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
+pub const GetTreeResponse = struct {
+    directories: []const Directory = &.{},
+    next_page_token: []const u8 = "",
+
+    pub fn deinit(self: *GetTreeResponse, allocator: std.mem.Allocator) void {
+        for (self.directories) |directory| {
+            var copy = directory;
+            copy.deinit(allocator);
+        }
+        allocator.free(self.directories);
+        self.* = .{};
+    }
+
+    pub fn encode(self: GetTreeResponse, writer: *protobuf.Writer) !void {
+        for (self.directories) |directory| try writer.writeMessageField(1, directory);
+        if (self.next_page_token.len != 0) try writer.writeStringField(2, self.next_page_token);
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !GetTreeResponse {
+        var directories: std.ArrayListUnmanaged(Directory) = .empty;
+        errdefer {
+            for (directories.items) |*directory| directory.deinit(allocator);
+            directories.deinit(allocator);
+        }
+
+        var out: GetTreeResponse = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => {
+                    var nested = try reader.readMessage();
+                    try directories.append(allocator, try Directory.decodeOwned(allocator, &nested));
+                },
+                2 => out.next_page_token = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+
+        out.directories = try directories.toOwnedSlice(allocator);
+        return out;
+    }
+};
+
 pub fn encodeAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     return protobuf.encodeAlloc(allocator, value);
 }
@@ -1245,6 +1318,34 @@ test "CAS batch messages decode repeated request and response fields" {
     try std.testing.expectEqualStrings("data", decoded_read_response.responses[0].data);
     try std.testing.expectEqual(StatusCode.not_found, decoded_read_response.responses[1].status.code);
     try std.testing.expectEqualStrings("missing", decoded_read_response.responses[1].status.message);
+}
+
+test "GetTreeResponse round-trips directories" {
+    const file_digest: Digest = .{
+        .hash = "9999999999999999999999999999999999999999999999999999999999999999",
+        .size_bytes = 9,
+    };
+    const response = GetTreeResponse{
+        .directories = &.{
+            .{
+                .files = &.{
+                    .{ .name = "file.txt", .digest = file_digest },
+                },
+            },
+        },
+    };
+
+    const encoded = try encodeAlloc(std.testing.allocator, response);
+    defer std.testing.allocator.free(encoded);
+
+    var reader = protobuf.Reader.init(encoded);
+    var decoded = try GetTreeResponse.decodeOwned(std.testing.allocator, &reader);
+    defer decoded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.directories.len);
+    try std.testing.expectEqual(@as(usize, 1), decoded.directories[0].files.len);
+    try std.testing.expectEqualStrings("file.txt", decoded.directories[0].files[0].name);
+    try std.testing.expect(decoded.directories[0].files[0].digest.?.eql(file_digest));
 }
 
 test "ActionResult round-trips exit code and stream digests" {

@@ -10,6 +10,7 @@ const execution_service = @import("execution_service.zig");
 const grpc_record = @import("grpc_record.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
+const tree_service = @import("tree_service.zig");
 
 pub const Error = error{
     ExtraGrpcMessage,
@@ -20,6 +21,7 @@ pub const Error = error{
 pub const cas_find_missing_blobs = "/build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs";
 pub const cas_batch_update_blobs = "/build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs";
 pub const cas_batch_read_blobs = "/build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs";
+pub const cas_get_tree = "/build.bazel.remote.execution.v2.ContentAddressableStorage/GetTree";
 pub const ac_get_action_result = "/build.bazel.remote.execution.v2.ActionCache/GetActionResult";
 pub const ac_update_action_result = "/build.bazel.remote.execution.v2.ActionCache/UpdateActionResult";
 pub const bytestream_read = "/google.bytestream.ByteStream/Read";
@@ -127,6 +129,14 @@ pub const Server = struct {
             var reader = protobuf.Reader.init(payload);
             const request = try bytestream.ReadRequest.decode(&reader);
             var result = try bytestream_service.read(io, allocator, self.store, request);
+            defer result.deinit(allocator);
+            return try encodeResponse(allocator, result.response);
+        }
+
+        if (std.mem.eql(u8, method, cas_get_tree)) {
+            var reader = protobuf.Reader.init(payload);
+            const request = try reapi.GetTreeRequest.decode(&reader);
+            var result = try tree_service.getTree(io, allocator, self.store, request);
             defer result.deinit(allocator);
             return try encodeResponse(allocator, result.response);
         }
@@ -335,6 +345,43 @@ test "Server dispatches ByteStream Write and Read record streams" {
     var read_reader = protobuf.Reader.init(try singlePayload(read_response_record));
     const read_response = try bytestream.ReadResponse.decode(&read_reader);
     try std.testing.expectEqualStrings("load", read_response.data);
+}
+
+test "Server dispatches GetTree" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    const child_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{ .{ .name = "leaf.txt" } },
+    });
+    var child_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{ .{ .name = "child", .digest = child_digest.toReapi(&child_hash) } },
+    });
+
+    const server = Server.init(store);
+    var root_hash: [64]u8 = undefined;
+    const request = try encodeRequest(std.testing.allocator, reapi.GetTreeRequest{
+        .root_digest = root_digest.toReapi(&root_hash),
+    });
+    defer std.testing.allocator.free(request);
+
+    const response_record = try server.handleServerStreaming(
+        std.testing.io,
+        std.testing.allocator,
+        cas_get_tree,
+        request,
+    );
+    defer std.testing.allocator.free(response_record);
+
+    var reader = protobuf.Reader.init(try singlePayload(response_record));
+    var response = try reapi.GetTreeResponse.decodeOwned(std.testing.allocator, &reader);
+    defer response.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), response.directories.len);
+    try std.testing.expectEqualStrings("child", response.directories[0].directories[0].name);
+    try std.testing.expectEqualStrings("leaf.txt", response.directories[1].files[0].name);
 }
 
 test "Server dispatches ActionCache update and get" {

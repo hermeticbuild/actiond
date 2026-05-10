@@ -16,6 +16,7 @@ pub const grpc_record = @import("grpc_record.zig");
 pub const protobuf_wire = @import("protobuf_wire.zig");
 pub const reapi = @import("reapi.zig");
 pub const reapi_dispatch = @import("reapi_dispatch.zig");
+pub const tree_service = @import("tree_service.zig");
 pub const version = @import("version.zig");
 pub const vsock = @import("vsock.zig");
 
@@ -38,6 +39,7 @@ test {
     _ = protobuf_wire;
     _ = reapi;
     _ = reapi_dispatch;
+    _ = tree_service;
     _ = version;
     _ = vsock;
 }
