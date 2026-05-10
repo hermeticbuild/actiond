@@ -13,6 +13,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len > 1 and std.mem.eql(u8, args[1], "--guest-init")) {
         return actiond.guest_init.run(io);
     }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--guest-worker")) {
+        return actiond.guest_worker.run(io);
+    }
 
     var stdout_buffer: [256]u8 = undefined;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);

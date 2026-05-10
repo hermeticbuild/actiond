@@ -10,6 +10,7 @@ pub const capabilities_service = @import("capabilities_service.zig");
 pub const execroot = @import("execroot.zig");
 pub const execution_service = @import("execution_service.zig");
 pub const guest_init = @import("guest_init.zig");
+pub const guest_worker = @import("guest_worker.zig");
 pub const grpc_record = @import("grpc_record.zig");
 pub const protobuf_wire = @import("protobuf_wire.zig");
 pub const reapi = @import("reapi.zig");
@@ -29,6 +30,7 @@ test {
     _ = execroot;
     _ = execution_service;
     _ = guest_init;
+    _ = guest_worker;
     _ = grpc_record;
     _ = protobuf_wire;
     _ = reapi;
