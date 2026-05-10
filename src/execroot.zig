@@ -30,13 +30,6 @@ pub const Materialization = struct {
     }
 };
 
-const ChrootInputMode = enum {
-    hardlink,
-    bind_mount,
-};
-
-var next_probe_id = std.atomic.Value(u64).init(0);
-
 pub const Materializer = struct {
     store: cas.Store,
     root: std.Io.Dir,
@@ -75,11 +68,7 @@ pub const Materializer = struct {
         }
         var cas_root_path: ?[]u8 = null;
         defer if (cas_root_path) |path| allocator.free(path);
-        const chroot_input_mode: ?ChrootInputMode = if (options.chroot_root_path != null)
-            try self.detectChrootInputMode(io, inputs)
-        else
-            null;
-        if (chroot_input_mode == .bind_mount) {
+        if (options.chroot_root_path != null) {
             var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const cas_root_len = try self.store.root.realPath(io, &cas_root_buffer);
             cas_root_path = try allocator.dupe(u8, cas_root_buffer[0..cas_root_len]);
@@ -101,7 +90,6 @@ pub const Materializer = struct {
                     allocator,
                     input,
                     root_path,
-                    chroot_input_mode.?,
                     cas_root_path,
                     &bind_mounts,
                 );
@@ -127,18 +115,12 @@ pub const Materializer = struct {
         allocator: std.mem.Allocator,
         input: Input,
         root_path: []const u8,
-        mode: ChrootInputMode,
         cas_root_path: ?[]const u8,
         bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
     ) !void {
         const permissions: std.Io.File.Permissions = if (input.is_executable) .executable_file else .default_file;
         if (input.is_executable or input.digest.isEmpty()) {
             return self.store.copyToFile(io, input.digest, self.root, input.path, permissions);
-        }
-
-        switch (mode) {
-            .hardlink => return self.store.hardLinkToFile(io, input.digest, self.root, input.path, permissions),
-            .bind_mount => {},
         }
 
         var blob = try self.store.openBlob(io, input.digest);
@@ -158,42 +140,6 @@ pub const Materializer = struct {
             .source = source,
             .target = target,
         });
-    }
-
-    fn detectChrootInputMode(
-        self: Materializer,
-        io: std.Io,
-        inputs: []const Input,
-    ) !ChrootInputMode {
-        for (inputs) |input| {
-            if (input.is_executable or input.digest.isEmpty()) continue;
-            return self.probeHardlinkInputMode(io, input.digest);
-        }
-        return .hardlink;
-    }
-
-    fn probeHardlinkInputMode(
-        self: Materializer,
-        io: std.Io,
-        digest: cas.Digest,
-    ) !ChrootInputMode {
-        var path_buffer: [64]u8 = undefined;
-        const probe_path = try std.fmt.bufPrint(
-            &path_buffer,
-            ".actiond-hardlink-probe-{d}",
-            .{next_probe_id.fetchAdd(1, .monotonic)},
-        );
-        self.store.hardLinkToFile(io, digest, self.root, probe_path, .default_file) catch |err| switch (err) {
-            error.CrossDevice,
-            error.OperationUnsupported,
-            error.AccessDenied,
-            error.PermissionDenied,
-            error.ReadOnlyFileSystem,
-            => return .bind_mount,
-            else => |e| return e,
-        };
-        self.root.deleteFile(io, probe_path) catch {};
-        return .hardlink;
     }
 };
 
@@ -272,7 +218,7 @@ test "Materializer copies CAS blobs into an execroot" {
     try std.testing.expectEqualStrings("#!/bin/sh\n", restored_tool);
 }
 
-test "Materializer hardlinks immutable non-executable inputs for chroot actions when possible" {
+test "Materializer prepares read-only bind mounts for chroot inputs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -283,23 +229,55 @@ test "Materializer hardlinks immutable non-executable inputs for chroot actions 
 
     const store = cas.Store.init(cas_dir);
     const digest = try store.putBytes(std.testing.io, "large-ish immutable input");
+    const tool = try store.putBytes(std.testing.io, "#!/bin/sh\n");
 
     var work_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const work_root_len = try work_dir.realPath(std.testing.io, &work_root_buffer);
+    var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cas_root_len = try cas_dir.realPath(std.testing.io, &cas_root_buffer);
     const materializer = Materializer.init(store, work_dir);
     var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{
         .{ .path = "inputs/data.txt", .digest = digest },
+        .{ .path = "tools/run.sh", .digest = tool, .is_executable = true },
     }, .{
         .chroot_root_path = work_root_buffer[0..work_root_len],
     });
     defer materialization.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 0), materialization.bind_mounts.len);
+    try std.testing.expectEqual(@as(usize, 1), materialization.bind_mounts.len);
 
     var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
     const blob_path = cas.blobSubPath(digest, &blob_path_buffer);
-    const cas_stat = try cas_dir.statFile(std.testing.io, blob_path, .{});
-    const work_stat = try work_dir.statFile(std.testing.io, "inputs/data.txt", .{});
-    try std.testing.expectEqual(cas_stat.inode, work_stat.inode);
-    try std.testing.expect(cas_stat.nlink >= 2);
+    const expected_source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/{s}",
+        .{ cas_root_buffer[0..cas_root_len], blob_path },
+    );
+    defer std.testing.allocator.free(expected_source);
+    const expected_target = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/inputs/data.txt",
+        .{work_root_buffer[0..work_root_len]},
+    );
+    defer std.testing.allocator.free(expected_target);
+    try std.testing.expectEqualStrings(expected_source, materialization.bind_mounts[0].source);
+    try std.testing.expectEqualStrings(expected_target, materialization.bind_mounts[0].target);
+
+    const placeholder = try work_dir.readFileAlloc(
+        std.testing.io,
+        "inputs/data.txt",
+        std.testing.allocator,
+        .limited(1),
+    );
+    defer std.testing.allocator.free(placeholder);
+    try std.testing.expectEqual(@as(usize, 0), placeholder.len);
+
+    const restored_tool = try work_dir.readFileAlloc(
+        std.testing.io,
+        "tools/run.sh",
+        std.testing.allocator,
+        .limited(64),
+    );
+    defer std.testing.allocator.free(restored_tool);
+    try std.testing.expectEqualStrings("#!/bin/sh\n", restored_tool);
 }

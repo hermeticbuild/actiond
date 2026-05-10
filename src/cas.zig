@@ -171,27 +171,6 @@ pub const Store = struct {
         }
     }
 
-    pub fn hardLinkToFile(
-        self: Store,
-        io: std.Io,
-        digest: Digest,
-        dest_dir: std.Io.Dir,
-        dest_path: []const u8,
-        permissions: std.Io.File.Permissions,
-    ) !void {
-        if (digest.isEmpty()) {
-            return dest_dir.writeFile(io, .{
-                .sub_path = dest_path,
-                .data = "",
-                .flags = .{ .read = true, .permissions = permissions },
-            });
-        }
-
-        var src_path_buffer: [blob_prefix.len + 64]u8 = undefined;
-        const src_path = blobSubPath(digest, &src_path_buffer);
-        try std.Io.Dir.hardLink(self.root, src_path, dest_dir, dest_path, io, .{});
-    }
-
     pub fn putFile(
         self: Store,
         io: std.Io,
