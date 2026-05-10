@@ -1,0 +1,4 @@
+build --remote_download_outputs=all
+build --remote_timeout=120
+build --jobs=8
+build --remote_cache_async=false

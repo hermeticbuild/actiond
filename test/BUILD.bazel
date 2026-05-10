@@ -1,0 +1,41 @@
+load(":stress.bzl", "stress_consumer", "stress_tree")
+
+filegroup(
+    name = "bare_inputs",
+    srcs = glob(["bare/*.txt"]),
+)
+
+filegroup(
+    name = "source_dir_inputs",
+    srcs = glob(["source_dir/**/*.txt"]),
+)
+
+stress_tree(
+    name = "tree_seed",
+    srcs = [":bare_inputs"],
+    files = 32,
+    tool = "//tool:action-tool",
+)
+
+stress_tree(
+    name = "tree_mixed",
+    srcs = [":source_dir_inputs"],
+    trees = [":tree_seed"],
+    files = 48,
+    tool = "//tool:action-tool",
+)
+
+stress_consumer(
+    name = "stress_all",
+    srcs = [
+        ":bare_inputs",
+        ":source_dir_inputs",
+    ],
+    trees = [
+        ":tree_seed",
+        ":tree_mixed",
+    ],
+    files = 64,
+    tool = "//tool:action-tool",
+)
+

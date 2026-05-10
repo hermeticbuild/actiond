@@ -1,0 +1,5 @@
+module(
+    name = "actiond_e2e_test",
+    version = "0.1.0",
+)
+

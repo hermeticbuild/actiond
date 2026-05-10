@@ -1,0 +1,5 @@
+/bare/
+/source_dir/
+/tool/action-tool
+/MODULE.bazel.lock
+/bazel-*

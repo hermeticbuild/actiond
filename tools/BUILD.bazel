@@ -1,10 +1,32 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary", "zig_test")
 
 exports_files(["initramfs_newc.py"])
 
 zig_binary(
     name = "initramfs_newc",
     main = "initramfs_newc.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_binary(
+    name = "e2e_action_tool",
+    main = "e2e_action_tool.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_configure_binary(
+    name = "e2e_action_tool_linux_aarch64",
+    actual = ":e2e_action_tool",
+    target = "//platforms:linux_aarch64",
+    zig_version = "0.16.0",
+    visibility = ["//visibility:public"],
+)
+
+zig_configure_binary(
+    name = "e2e_action_tool_linux_x86_64",
+    actual = ":e2e_action_tool",
+    target = "//platforms:linux_x86_64",
+    zig_version = "0.16.0",
     visibility = ["//visibility:public"],
 )
 
