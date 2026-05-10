@@ -1,5 +1,10 @@
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
+exports_files([
+    "kernel.Dockerfile",
+    "linux.Dockerfile",
+])
+
 sh_binary(
     name = "linux_docker_tests",
     srcs = ["run_linux_tests.sh"],

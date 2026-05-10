@@ -11,25 +11,18 @@ genrule(
     name = "linux_kernel",
     srcs = [
         "linux.config",
+        "//tools:build_linux_kernel.sh",
+        "//tools/docker:kernel.Dockerfile",
         "@linux_kernel_src//:Makefile",
         "@linux_kernel_src//:all",
     ],
     outs = ["Image"],
-    cmd = """
-set -euo pipefail
-KERNEL_SRC="$$(dirname "$(execpath @linux_kernel_src//:Makefile)")"
-KBUILD_OUT="$$(pwd)/$(@D)/kbuild"
-MAKE_BIN="$$(command -v gmake || command -v make)"
-CROSS_COMPILE_ARG=""
-if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-  CROSS_COMPILE_ARG="CROSS_COMPILE=aarch64-linux-gnu-"
-fi
-mkdir -p "$${KBUILD_OUT}"
-cp "$(location linux.config)" "$${KBUILD_OUT}/.config"
-"$${MAKE_BIN}" -C "$${KERNEL_SRC}" O="$${KBUILD_OUT}" ARCH=arm64 $${CROSS_COMPILE_ARG} olddefconfig Image
-cp "$${KBUILD_OUT}/arch/arm64/boot/Image" "$@"
-""",
-    tags = ["manual"],
+    cmd = "$(location //tools:build_linux_kernel.sh) $@ $(location linux.config) $(execpath @linux_kernel_src//:Makefile) $(location //tools/docker:kernel.Dockerfile)",
+    tags = [
+        "local",
+        "manual",
+        "no-sandbox",
+    ],
     visibility = ["//visibility:public"],
 )
 
