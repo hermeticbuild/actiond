@@ -4,6 +4,7 @@ zig_library(
     name = "actiond",
     main = "root.zig",
     srcs = [
+        "cas.zig",
         "protobuf_wire.zig",
         "reapi.zig",
         "version.zig",
@@ -16,6 +17,7 @@ zig_test(
     name = "unit_tests",
     main = "root.zig",
     srcs = [
+        "cas.zig",
         "protobuf_wire.zig",
         "reapi.zig",
         "version.zig",
