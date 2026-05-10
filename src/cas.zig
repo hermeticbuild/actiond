@@ -13,6 +13,10 @@ pub const Digest = struct {
     hash: [32]u8,
     size_bytes: u64,
 
+    pub fn empty() Digest {
+        return fromBytes("");
+    }
+
     pub fn fromBytes(bytes: []const u8) Digest {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
@@ -24,6 +28,10 @@ pub const Digest = struct {
 
     pub fn eql(lhs: Digest, rhs: Digest) bool {
         return lhs.size_bytes == rhs.size_bytes and std.mem.eql(u8, &lhs.hash, &rhs.hash);
+    }
+
+    pub fn isEmpty(self: Digest) bool {
+        return self.eql(empty());
     }
 
     pub fn formatHex(self: Digest, out: *[64]u8) []const u8 {
@@ -86,6 +94,8 @@ pub const Store = struct {
     }
 
     pub fn has(self: Store, io: std.Io, digest: Digest) !bool {
+        if (digest.isEmpty()) return true;
+
         var path_buffer: [blob_prefix.len + 64]u8 = undefined;
         const path = blobPath(digest, &path_buffer);
         self.root.access(io, path, .{}) catch |err| switch (err) {
@@ -101,6 +111,8 @@ pub const Store = struct {
         allocator: std.mem.Allocator,
         digest: Digest,
     ) ![]u8 {
+        if (digest.isEmpty()) return try allocator.alloc(u8, 0);
+
         var path_buffer: [blob_prefix.len + 64]u8 = undefined;
         const path = blobPath(digest, &path_buffer);
         return self.root.readFileAlloc(io, path, allocator, .limited(digest.size_bytes + 1));
@@ -117,6 +129,19 @@ pub fn parseHexHash(text: []const u8) ![32]u8 {
         byte.* = (high << 4) | low;
     }
     return hash;
+}
+
+test "Store treats the empty digest as always present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    const empty_digest = Digest.empty();
+
+    try std.testing.expect(try store.has(std.testing.io, empty_digest));
+    const bytes = try store.readAlloc(std.testing.io, std.testing.allocator, empty_digest);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("", bytes);
 }
 
 fn blobPath(digest: Digest, out: *[blob_prefix.len + 64]u8) []const u8 {
