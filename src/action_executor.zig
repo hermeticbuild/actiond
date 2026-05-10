@@ -7,10 +7,15 @@ const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
 
 pub const Error = error{
+    MissingActionBlob,
     MissingCommandDigest,
+    MissingCommandBlob,
+    MissingDirectoryBlob,
     MissingDirectoryDigest,
     MissingFileDigest,
+    MissingInputBlob,
     MissingInputRootDigest,
+    OutputParentCreateFailed,
     InvalidDirectoryEntryName,
 };
 
@@ -45,13 +50,19 @@ pub fn executeAction(
     work_root: std.Io.Dir,
     action_digest: cas.Digest,
 ) !action_runner.Outcome {
-    const action_bytes = try store.readAlloc(io, allocator, action_digest);
+    const action_bytes = store.readAlloc(io, allocator, action_digest) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingActionBlob,
+        else => return err,
+    };
     defer allocator.free(action_bytes);
     var action_reader = protobuf.Reader.init(action_bytes);
     const action = try reapi.Action.decode(&action_reader);
 
     const command_digest = try cas.Digest.fromReapi(action.command_digest orelse return error.MissingCommandDigest);
-    const command_bytes = try store.readAlloc(io, allocator, command_digest);
+    const command_bytes = store.readAlloc(io, allocator, command_digest) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingCommandBlob,
+        else => return err,
+    };
     defer allocator.free(command_bytes);
     var command_reader = protobuf.Reader.init(command_bytes);
     var command = try reapi.Command.decodeOwned(allocator, &command_reader);
@@ -64,8 +75,14 @@ pub fn executeAction(
     try collectInputs(io, allocator, store, input_root_digest, "", &inputs);
 
     const materializer = execroot.Materializer.init(store, work_root);
-    try materializer.copyInputs(io, allocator, inputs.items);
-    try prepareOutputParents(io, work_root, command);
+    materializer.copyInputs(io, allocator, inputs.items) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingInputBlob,
+        else => return err,
+    };
+    prepareOutputParents(io, work_root, command) catch |err| switch (err) {
+        error.FileNotFound => return error.OutputParentCreateFailed,
+        else => return err,
+    };
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
@@ -252,7 +269,10 @@ fn collectInputs(
     prefix: []const u8,
     inputs: *std.ArrayListUnmanaged(execroot.Input),
 ) !void {
-    const directory_bytes = try store.readAlloc(io, allocator, directory_digest);
+    const directory_bytes = store.readAlloc(io, allocator, directory_digest) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingDirectoryBlob,
+        else => return err,
+    };
     defer allocator.free(directory_bytes);
 
     var reader = protobuf.Reader.init(directory_bytes);
@@ -525,6 +545,69 @@ test "executeAction creates parent directories for declared outputs" {
     const output = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_files[0].digest);
     defer std.testing.allocator.free(output);
     try std.testing.expectEqualStrings("generated", output);
+}
+
+test "executeAction creates parent directories for declared output paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
+    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
+        .arguments = &.{ "/bin/sh", "-c", "printf generated > bazel-out/bin/pkg/out.txt" },
+        .output_paths = &.{"bazel-out/bin/pkg/out.txt"},
+    });
+
+    var command_hash: [64]u8 = undefined;
+    var root_hash: [64]u8 = undefined;
+    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
+        .command_digest = command_digest.toReapi(&command_hash),
+        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    });
+
+    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
+    defer outcome.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
+    try std.testing.expectEqualStrings("bazel-out/bin/pkg/out.txt", outcome.output_files[0].path);
+}
+
+test "executeAction creates parent directories for Bazel-style external output paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const output_path =
+        "bazel-out/darwin_arm64-fastbuild/bin/external/rules_zig++zig+zig_0.16.0_aarch64-macos/zig_toolchain.version_validation";
+
+    const store = cas.Store.init(cas_dir);
+    const root_directory_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
+    const command_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Command{
+        .arguments = &.{ "/bin/sh", "-c", "touch \"$1\"", "", output_path },
+        .output_paths = &.{output_path},
+    });
+
+    var command_hash: [64]u8 = undefined;
+    var root_hash: [64]u8 = undefined;
+    const action_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Action{
+        .command_digest = command_digest.toReapi(&command_hash),
+        .input_root_digest = root_directory_digest.toReapi(&root_hash),
+    });
+
+    var outcome = try executeAction(std.testing.io, std.testing.allocator, store, work_dir, action_digest);
+    defer outcome.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
+    try std.testing.expectEqualStrings(output_path, outcome.output_files[0].path);
 }
 
 test "executeAndCacheAction stores ActionResult under action digest" {
