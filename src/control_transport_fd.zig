@@ -49,7 +49,7 @@ pub const Client = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         request: control_protocol.Request,
-    ) ![]u8 {
+    ) !guest_proxy.OwnedResponse {
         const self: *Client = @ptrCast(@alignCast(ctx));
         const slot_index = self.next_slot.fetchAdd(1, .monotonic) % connection_pool_size;
         const slot = &self.slots[slot_index];
@@ -69,7 +69,7 @@ pub const Client = struct {
         allocator: std.mem.Allocator,
         fd: std.posix.fd_t,
         request: control_protocol.Request,
-    ) ![]u8 {
+    ) !guest_proxy.OwnedResponse {
         _ = self;
 
         var request_header: [control_protocol.encoded_header_len]u8 = undefined;
@@ -81,13 +81,16 @@ pub const Client = struct {
         var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
         try readExact(fd, &header_bytes);
         const header = try control_protocol.decodeHeader(&header_bytes);
-        const payload_len = try header.payloadLen();
+        if (header.method_len != 0) return error.InvalidCallKind;
+        const body_len = try responseBodyLen(header);
 
-        const response_frame = try allocator.alloc(u8, control_protocol.encoded_header_len + payload_len);
-        errdefer allocator.free(response_frame);
-        @memcpy(response_frame[0..control_protocol.encoded_header_len], &header_bytes);
-        try readExact(fd, response_frame[control_protocol.encoded_header_len..]);
-        return response_frame;
+        const response_body = try allocator.alloc(u8, body_len);
+        errdefer allocator.free(response_body);
+        try readExact(fd, response_body);
+        return .{
+            .status = try responseStatus(header.tag),
+            .body = response_body,
+        };
     }
 
     fn slotFd(self: *Client, slot: *ConnectionSlot) !std.posix.fd_t {
@@ -97,6 +100,19 @@ pub const Client = struct {
         return fd;
     }
 };
+
+fn responseStatus(tag: u8) !control_protocol.Status {
+    return switch (tag) {
+        @intFromEnum(control_protocol.Status.ok) => .ok,
+        @intFromEnum(control_protocol.Status.application_error) => .application_error,
+        else => error.InvalidCallKind,
+    };
+}
+
+fn responseBodyLen(header: control_protocol.Header) !usize {
+    if (header.body_len > std.math.maxInt(usize)) return error.MessageTooLarge;
+    return @intCast(header.body_len);
+}
 
 fn readExact(fd: std.posix.fd_t, buffer: []u8) !void {
     var offset: usize = 0;
@@ -191,15 +207,14 @@ test "Client round trips a control frame over an fd" {
     var opener = SocketPairOpener{ .fd = fds[1] };
     var client = Client{ .opener = opener.opener() };
     defer client.deinit(std.testing.io);
-    const response_frame = try client.transport().call(std.testing.io, std.testing.allocator, .{
+    var response = try client.transport().call(std.testing.io, std.testing.allocator, .{
         .kind = .unary,
         .method = "/svc/Call",
         .body = "hello",
     });
-    defer std.testing.allocator.free(response_frame);
+    defer response.deinit(std.testing.allocator);
 
     server_thread.join();
-    const response = try control_protocol.decodeResponse(response_frame);
     try std.testing.expectEqual(control_protocol.Status.ok, response.status);
     try std.testing.expectEqualStrings("world", response.body);
 }
@@ -245,14 +260,13 @@ test "Client reuses a cached fd for repeated calls on one thread" {
     var client = Client{ .opener = opener.opener() };
     defer client.deinit(std.testing.io);
     for (0..connection_pool_size + 1) |_| {
-        const response_frame = try client.transport().call(std.testing.io, std.testing.allocator, .{
+        var response = try client.transport().call(std.testing.io, std.testing.allocator, .{
             .kind = .unary,
             .method = "/svc/Call",
             .body = "hello",
         });
-        defer std.testing.allocator.free(response_frame);
+        defer response.deinit(std.testing.allocator);
 
-        const response = try control_protocol.decodeResponse(response_frame);
         try std.testing.expectEqual(control_protocol.Status.ok, response.status);
         try std.testing.expectEqualStrings("world", response.body);
     }

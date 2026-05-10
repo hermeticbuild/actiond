@@ -6,6 +6,16 @@ pub const Error = error{
     GuestApplicationError,
 };
 
+pub const OwnedResponse = struct {
+    status: control_protocol.Status,
+    body: []u8,
+
+    pub fn deinit(self: *OwnedResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.body);
+        self.* = undefined;
+    }
+};
+
 pub const Transport = struct {
     ctx: *anyopaque,
     round_trip: *const fn (
@@ -13,14 +23,14 @@ pub const Transport = struct {
         std.Io,
         std.mem.Allocator,
         control_protocol.Request,
-    ) anyerror![]u8,
+    ) anyerror!OwnedResponse,
 
     pub fn call(
         self: Transport,
         io: std.Io,
         allocator: std.mem.Allocator,
         request: control_protocol.Request,
-    ) ![]u8 {
+    ) !OwnedResponse {
         return self.round_trip(self.ctx, io, allocator, request);
     }
 };
@@ -78,17 +88,15 @@ pub const Proxy = struct {
         method: []const u8,
         body: []const u8,
     ) ![]u8 {
-        const response_frame = try self.transport.call(io, allocator, .{
+        var response = try self.transport.call(io, allocator, .{
             .kind = kind,
             .method = method,
             .body = body,
         });
-        defer allocator.free(response_frame);
-
-        const response = try control_protocol.decodeResponse(response_frame);
         return switch (response.status) {
-            .ok => try allocator.dupe(u8, response.body),
+            .ok => response.body,
             .application_error => {
+                defer response.deinit(allocator);
                 std.log.err("guest application error for {s}: {s}", .{ method, response.body });
                 return error.GuestApplicationError;
             },
@@ -114,16 +122,16 @@ const FakeTransport = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         request: control_protocol.Request,
-    ) ![]u8 {
+    ) !OwnedResponse {
         _ = io;
         const self: *FakeTransport = @ptrCast(@alignCast(ctx));
         try std.testing.expectEqual(self.expected_kind, request.kind);
         try std.testing.expectEqualStrings(self.expected_method, request.method);
         try std.testing.expectEqualStrings(self.expected_body, request.body);
-        return try control_protocol.encodeResponseAlloc(allocator, .{
+        return .{
             .status = .ok,
-            .body = self.response_body,
-        });
+            .body = try allocator.dupe(u8, self.response_body),
+        };
     }
 };
 
