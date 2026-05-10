@@ -128,9 +128,7 @@ pub const Server = struct {
         if (std.mem.eql(u8, method, bytestream_read)) {
             var reader = protobuf.Reader.init(payload);
             const request = try bytestream.ReadRequest.decode(&reader);
-            var result = try bytestream_service.read(io, allocator, self.store, request);
-            defer result.deinit(allocator);
-            return try encodeResponse(allocator, result.response);
+            return try bytestream_service.readGrpcRecords(io, allocator, self.store, request);
         }
 
         if (std.mem.eql(u8, method, cas_get_tree)) {

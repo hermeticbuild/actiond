@@ -1,6 +1,8 @@
 const std = @import("std");
 const bytestream = @import("bytestream.zig");
 const cas = @import("cas.zig");
+const grpc_record = @import("grpc_record.zig");
+const protobuf = @import("protobuf_wire.zig");
 
 pub const Error = error{
     DigestMismatch,
@@ -9,6 +11,8 @@ pub const Error = error{
     InvalidOffset,
     MissingResourceName,
 };
+
+pub const max_read_response_data_bytes = 1024 * 1024;
 
 pub const ReadResult = struct {
     response: bytestream.ReadResponse,
@@ -46,6 +50,55 @@ pub fn read(
     const data = try allocator.dupe(u8, blob[offset..][0..limit]);
     allocator.free(blob);
     return .{ .response = .{ .data = data } };
+}
+
+pub fn readGrpcRecords(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    request: bytestream.ReadRequest,
+) ![]u8 {
+    const resource = try bytestream.parseBlobResource(allocator, request.resource_name);
+    const blob = try store.readAlloc(io, allocator, resource.digest);
+    defer allocator.free(blob);
+
+    if (request.read_offset < 0) return error.InvalidOffset;
+    const offset: usize = @intCast(request.read_offset);
+    if (offset > blob.len) return error.InvalidOffset;
+
+    const available = blob.len - offset;
+    const limit: usize = if (request.read_limit <= 0)
+        available
+    else
+        @min(available, @as(usize, @intCast(request.read_limit)));
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var remaining = blob[offset..][0..limit];
+    if (remaining.len == 0) {
+        try appendReadResponseRecord(allocator, &out, "");
+    } else {
+        while (remaining.len != 0) {
+            const chunk_len = @min(remaining.len, max_read_response_data_bytes);
+            try appendReadResponseRecord(allocator, &out, remaining[0..chunk_len]);
+            remaining = remaining[chunk_len..];
+        }
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendReadResponseRecord(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    data: []const u8,
+) !void {
+    const proto = try protobuf.encodeAlloc(allocator, bytestream.ReadResponse{ .data = data });
+    defer allocator.free(proto);
+    const record = try grpc_record.encodeAlloc(allocator, .{ .payload = proto });
+    defer allocator.free(record);
+    try out.appendSlice(allocator, record);
 }
 
 pub fn write(
@@ -148,4 +201,42 @@ test "read returns requested byte range" {
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("cde", result.response.data);
+}
+
+test "readGrpcRecords chunks large blobs into multiple gRPC messages" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    const data = try std.testing.allocator.alloc(u8, max_read_response_data_bytes + 7);
+    defer std.testing.allocator.free(data);
+    @memset(data[0..max_read_response_data_bytes], 'a');
+    @memset(data[max_read_response_data_bytes..], 'b');
+
+    const digest = try store.putBytes(std.testing.io, data);
+    var hash: [64]u8 = undefined;
+    const resource_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "blobs/{s}/{d}",
+        .{ digest.formatHex(&hash), digest.size_bytes },
+    );
+    defer std.testing.allocator.free(resource_name);
+
+    const records = try readGrpcRecords(std.testing.io, std.testing.allocator, store, .{
+        .resource_name = resource_name,
+    });
+    defer std.testing.allocator.free(records);
+
+    var it = grpc_record.Iterator.init(records);
+    const first = (try it.next()).?;
+    var first_reader = protobuf.Reader.init(first.payload);
+    const first_response = try bytestream.ReadResponse.decode(&first_reader);
+    try std.testing.expectEqual(@as(usize, max_read_response_data_bytes), first_response.data.len);
+
+    const second = (try it.next()).?;
+    var second_reader = protobuf.Reader.init(second.payload);
+    const second_response = try bytestream.ReadResponse.decode(&second_reader);
+    try std.testing.expectEqualStrings("bbbbbbb", second_response.data);
+
+    try std.testing.expectEqual(@as(?grpc_record.Message, null), try it.next());
 }
