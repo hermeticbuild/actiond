@@ -33,6 +33,8 @@ pub fn execute(
     options: action_executor.ExecuteOptions,
 ) !CompletedOperation {
     const action_digest = try cas.Digest.fromReapi(request.action_digest orelse return error.MissingActionDigest);
+    var action_hash: [64]u8 = undefined;
+    const action_hex = action_digest.formatHex(&action_hash);
 
     if (!request.skip_cache_lookup) {
         if (result_store) |store| {
@@ -47,7 +49,14 @@ pub fn execute(
         }
     }
 
-    const do_not_cache = try readDoNotCache(io, allocator, blob_store, action_digest);
+    const do_not_cache = readDoNotCache(io, allocator, blob_store, action_digest) catch |err| {
+        std.log.err("execute {s}/{d}: failed reading action cache policy: {s}", .{
+            action_hex,
+            action_digest.size_bytes,
+            @errorName(err),
+        });
+        return err;
+    };
     const work_path = try executionWorkKey(allocator, action_digest);
     defer allocator.free(work_path);
     var work_dir = try work_root.createDirPathOpen(io, work_path, .{});
@@ -56,7 +65,14 @@ pub fn execute(
     };
     defer work_dir.close(io);
 
-    var outcome = try action_executor.executeActionWithOptions(io, allocator, blob_store, work_dir, action_digest, options);
+    var outcome = action_executor.executeActionWithOptions(io, allocator, blob_store, work_dir, action_digest, options) catch |err| {
+        std.log.err("execute {s}/{d}: action execution setup failed: {s}", .{
+            action_hex,
+            action_digest.size_bytes,
+            @errorName(err),
+        });
+        return err;
+    };
     defer outcome.deinit(allocator);
 
     var result = try action_executor.actionResultFromOutcomeOwned(allocator, outcome);

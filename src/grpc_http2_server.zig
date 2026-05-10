@@ -493,7 +493,7 @@ fn sendServerSettings(writer: *std.Io.Writer) !void {
     defer payload.deinit(std.heap.smp_allocator);
     try http2_frame.appendSettingsPayload(std.heap.smp_allocator, &payload, &.{
         .{ .id = .enable_push, .value = 0 },
-        .{ .id = .max_concurrent_streams, .value = 128 },
+        .{ .id = .max_concurrent_streams, .value = 1 },
         .{ .id = .initial_window_size, .value = 1024 * 1024 },
         .{ .id = .max_frame_size, .value = 1024 * 1024 },
     });
@@ -642,7 +642,8 @@ fn respondStream(
     }
 
     const response_body = dispatchGrpc(io, allocator, dispatcher, state, method) catch |err| {
-        const status = if (err == error.UnsupportedMethod) "12" else "13";
+        const status = grpcStatusForError(err);
+        if (!std.mem.eql(u8, status, "5")) std.log.err("gRPC {s} failed: {s}", .{ method, @errorName(err) });
         return sendGrpcError(writer, state.id, status, @errorName(err));
     };
     defer allocator.free(response_body);
@@ -697,7 +698,8 @@ fn respondServerStreaming(
         state.body.items,
         body_writer.bodyWriter(),
     ) catch |err| {
-        const status = if (err == error.UnsupportedMethod) "12" else "13";
+        const status = grpcStatusForError(err);
+        if (!std.mem.eql(u8, status, "5")) std.log.err("gRPC {s} failed: {s}", .{ method, @errorName(err) });
         try sendHeaders(writer, state.id, true, &.{
             .{ .name = "grpc-status", .value = status },
             .{ .name = "grpc-message", .value = @errorName(err) },
@@ -709,6 +711,14 @@ fn respondServerStreaming(
         .{ .name = "grpc-status", .value = "0" },
     });
     try writer.flush();
+}
+
+fn grpcStatusForError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "5",
+        error.UnsupportedMethod => "12",
+        else => "13",
+    };
 }
 
 fn dispatchGrpc(

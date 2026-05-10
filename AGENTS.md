@@ -21,10 +21,10 @@ On macOS, use Docker for the Linux chroot path:
 tools/docker/run_linux_e2e.sh
 ```
 
-For the Virtualization.framework path, provide an arm64 Linux kernel image and run:
+For the Virtualization.framework path on macOS, run:
 
 ```bash
-ACTIOND_VM_KERNEL=/path/to/Image tools/e2e.sh vm
+tools/e2e.sh vm
 ```
 
 Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.

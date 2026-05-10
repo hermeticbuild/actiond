@@ -7,6 +7,12 @@ pub const Error = error{
     GuestApplicationError,
 };
 
+pub fn applicationError(body: []const u8) anyerror {
+    if (std.mem.eql(u8, body, "FileNotFound")) return error.FileNotFound;
+    if (std.mem.eql(u8, body, "UnsupportedMethod")) return error.UnsupportedMethod;
+    return error.GuestApplicationError;
+}
+
 pub const OwnedResponse = struct {
     status: control_protocol.Status,
     body: []u8,
@@ -201,8 +207,9 @@ pub const Proxy = struct {
             },
             .application_error => {
                 defer response.deinit(allocator);
-                std.log.err("guest application error for {s}: {s}", .{ method, response.body });
-                return error.GuestApplicationError;
+                const err = applicationError(response.body);
+                if (err != error.FileNotFound) std.log.err("guest application error for {s}: {s}", .{ method, response.body });
+                return err;
             },
         };
     }
@@ -237,8 +244,9 @@ const ProxyClientStream = struct {
             },
             .application_error => {
                 defer response.deinit(allocator);
-                std.log.err("guest application error for {s}: {s}", .{ self.method, response.body });
-                return error.GuestApplicationError;
+                const err = applicationError(response.body);
+                if (err != error.FileNotFound) std.log.err("guest application error for {s}: {s}", .{ self.method, response.body });
+                return err;
             },
         };
     }

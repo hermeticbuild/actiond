@@ -251,7 +251,11 @@ fn readStreamingResponse(
         switch (response.status) {
             .stream_chunk => try writer.writeAll(io, allocator, response.body),
             .ok => return,
-            .application_error => return error.GuestApplicationError,
+            .application_error => {
+                const err = guest_proxy.applicationError(response.body);
+                if (err != error.FileNotFound) std.log.err("guest streaming application error: {s}", .{response.body});
+                return err;
+            },
         }
     }
 }

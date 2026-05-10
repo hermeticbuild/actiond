@@ -17,7 +17,6 @@ Modes:
 Environment:
   ACTIOND_E2E_PORT=8980
   ACTIOND_E2E_HOST=127.0.0.1
-  ACTIOND_VM_KERNEL=/path/to/arm64/Image    required for vm unless //vm:linux_kernel builds locally
   ACTIOND_VM_MEMORY_MIB=1024
   ACTIOND_VM_CPUS=4
   ACTIOND_E2E_BARE_COUNT=160
@@ -29,6 +28,32 @@ EOF
 e2e_host="${ACTIOND_E2E_HOST:-127.0.0.1}"
 e2e_port="${ACTIOND_E2E_PORT:-8980}"
 endpoint="${e2e_host}:${e2e_port}"
+e2e_server_pid=""
+e2e_root=""
+e2e_log=""
+e2e_log_label="actiond log"
+
+cleanup_e2e_server() {
+  local status="${1:-$?}"
+  if [[ "${status}" -ne 0 && -n "${e2e_log}" && -f "${e2e_log}" ]]; then
+    echo "----- ${e2e_log_label} (${e2e_log}) -----" >&2
+    tail -200 "${e2e_log}" >&2 || true
+  fi
+  if [[ -n "${e2e_server_pid}" ]]; then
+    kill "${e2e_server_pid}" >/dev/null 2>&1 || true
+    wait "${e2e_server_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${e2e_root}" ]]; then
+    if [[ "${ACTIOND_E2E_KEEP_TMP:-0}" == "1" ]]; then
+      echo "kept e2e root: ${e2e_root}" >&2
+    else
+      rm -rf "${e2e_root}"
+    fi
+  fi
+  e2e_server_pid=""
+  e2e_root=""
+  e2e_log=""
+}
 
 run_bazel() {
   (cd "${repo_root}" && bazel "$@")
@@ -89,10 +114,14 @@ wait_for_port() {
 run_stress_workspace() {
   (
     cd "${test_workspace}"
+    bazel clean --expunge >/dev/null
     bazel build //:stress_all \
       --remote_executor="grpc://${endpoint}" \
+      --remote_cache="grpc://${endpoint}" \
+      --noremote_accept_cached \
       --remote_local_fallback=false \
       --remote_upload_local_results=false \
+      --disk_cache= \
       --spawn_strategy=remote \
       --genrule_strategy=remote
   )
@@ -126,29 +155,21 @@ run_linux_e2e() {
   local log="${root}/linux-actiond.log"
 
   "${server}" serve --listen="${endpoint}" --root="${root}/server" >"${log}" 2>&1 &
-  local server_pid="$!"
-  cleanup() {
-    kill "${server_pid}" >/dev/null 2>&1 || true
-    wait "${server_pid}" >/dev/null 2>&1 || true
-    rm -rf "${root}"
-  }
-  trap cleanup RETURN
+  e2e_server_pid="$!"
+  e2e_root="${root}"
+  e2e_log="${log}"
+  e2e_log_label="linux-actiond log"
+  trap 'cleanup_e2e_server $?' EXIT
 
   wait_for_port "${e2e_host}" "${e2e_port}" 30
   run_stress_workspace
+  cleanup_e2e_server 0
+  trap - EXIT
 }
 
 kernel_path() {
-  if [[ -n "${ACTIOND_VM_KERNEL:-}" ]]; then
-    echo "${ACTIOND_VM_KERNEL}"
-    return 0
-  fi
-  if run_bazel build //vm:linux_kernel; then
-    bazel_output //vm:linux_kernel
-    return 0
-  fi
-  echo "ACTIOND_VM_KERNEL is required when //vm:linux_kernel cannot build locally" >&2
-  return 1
+  run_bazel build //vm:linux_kernel
+  bazel_output //vm:linux_kernel
 }
 
 run_vm_e2e() {
@@ -174,16 +195,16 @@ run_vm_e2e() {
     --initramfs="${initramfs}" \
     --memory-mib="${ACTIOND_VM_MEMORY_MIB:-1024}" \
     --cpus="${ACTIOND_VM_CPUS:-4}" >"${log}" 2>&1 &
-  local server_pid="$!"
-  cleanup() {
-    kill "${server_pid}" >/dev/null 2>&1 || true
-    wait "${server_pid}" >/dev/null 2>&1 || true
-    rm -rf "${root}"
-  }
-  trap cleanup RETURN
+  e2e_server_pid="$!"
+  e2e_root="${root}"
+  e2e_log="${log}"
+  e2e_log_label="darwin-actiond VM log"
+  trap 'cleanup_e2e_server $?' EXIT
 
   wait_for_port "${e2e_host}" "${e2e_port}" 90
   run_stress_workspace
+  cleanup_e2e_server 0
+  trap - EXIT
 }
 
 case "${1:-}" in
@@ -200,13 +221,7 @@ case "${1:-}" in
     run_build_checks
     case "$(uname -s)" in
       Linux) run_linux_e2e ;;
-      Darwin)
-        if [[ -n "${ACTIOND_VM_KERNEL:-}" ]]; then
-          run_vm_e2e
-        else
-          echo "skipping vm e2e: set ACTIOND_VM_KERNEL to run it" >&2
-        fi
-        ;;
+      Darwin) run_vm_e2e ;;
       *) echo "no e2e mode for $(uname -s)" >&2 ;;
     esac
     ;;
@@ -215,4 +230,3 @@ case "${1:-}" in
     exit 2
     ;;
 esac
-
