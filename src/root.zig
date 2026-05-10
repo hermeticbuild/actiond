@@ -12,6 +12,7 @@ pub const execroot = @import("execroot.zig");
 pub const execution_service = @import("execution_service.zig");
 pub const guest_init = @import("guest_init.zig");
 pub const guest_worker = @import("guest_worker.zig");
+pub const grpc_http2_server = @import("grpc_http2_server.zig");
 pub const grpc_record = @import("grpc_record.zig");
 pub const http2_frame = @import("http2_frame.zig");
 pub const http2_header = @import("http2_header.zig");
@@ -38,6 +39,7 @@ test {
     _ = execution_service;
     _ = guest_init;
     _ = guest_worker;
+    _ = grpc_http2_server;
     _ = grpc_record;
     _ = http2_frame;
     _ = http2_header;
