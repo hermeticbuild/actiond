@@ -13,8 +13,14 @@ pub const Input = struct {
     is_executable: bool = false,
 };
 
+pub const DirectoryInput = struct {
+    path: []const u8,
+    digest: cas.Digest,
+};
+
 pub const MaterializeOptions = struct {
     chroot_root_path: ?[]const u8 = null,
+    directory_inputs: []const DirectoryInput = &.{},
 };
 
 pub const Materialization = struct {
@@ -72,6 +78,23 @@ pub const Materializer = struct {
             var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const cas_root_len = try self.store.root.realPath(io, &cas_root_buffer);
             cas_root_path = try allocator.dupe(u8, cas_root_buffer[0..cas_root_len]);
+        }
+
+        if (options.directory_inputs.len != 0 and options.chroot_root_path == null) {
+            return error.UnsupportedDirectoryInputsWithoutChroot;
+        }
+
+        for (options.directory_inputs) |input| {
+            try validatePath(input.path);
+            if (parentDir(input.path)) |parent| try self.root.createDirPath(io, parent);
+            try self.materializeChrootDirectoryInput(
+                io,
+                allocator,
+                input,
+                options.chroot_root_path.?,
+                cas_root_path,
+                &bind_mounts,
+            );
         }
 
         var last_parent: ?[]const u8 = null;
@@ -133,6 +156,30 @@ pub const Materializer = struct {
         var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
         const blob_path = cas.blobSubPath(input.digest, &blob_path_buffer);
         const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path.?, blob_path }, 0);
+        errdefer allocator.free(source);
+        const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_path, input.path }, 0);
+        errdefer allocator.free(target);
+        try bind_mounts.append(allocator, .{
+            .source = source,
+            .target = target,
+        });
+    }
+
+    fn materializeChrootDirectoryInput(
+        self: Materializer,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        input: DirectoryInput,
+        root_path: []const u8,
+        cas_root_path: ?[]const u8,
+        bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+    ) !void {
+        if (!try self.store.hasTree(io, input.digest)) return error.MissingInputTree;
+        try self.root.createDirPath(io, input.path);
+
+        var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+        const tree_path = cas.treeSubPath(input.digest, &tree_path_buffer);
+        const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path.?, tree_path }, 0);
         errdefer allocator.free(source);
         const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_path, input.path }, 0);
         errdefer allocator.free(target);
@@ -280,4 +327,53 @@ test "Materializer prepares read-only bind mounts for chroot inputs" {
     );
     defer std.testing.allocator.free(restored_tool);
     try std.testing.expectEqualStrings("#!/bin/sh\n", restored_tool);
+}
+
+test "Materializer prepares read-only bind mounts for chroot tree inputs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    try store.ensureLayout(std.testing.io);
+    const tree_digest = cas.Digest.fromBytes("tree proto");
+    var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+    const tree_path = cas.treeSubPath(tree_digest, &tree_path_buffer);
+    try cas_dir.createDirPath(std.testing.io, tree_path);
+
+    var work_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const work_root_len = try work_dir.realPath(std.testing.io, &work_root_buffer);
+    var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cas_root_len = try cas_dir.realPath(std.testing.io, &cas_root_buffer);
+    const materializer = Materializer.init(store, work_dir);
+    var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{}, .{
+        .chroot_root_path = work_root_buffer[0..work_root_len],
+        .directory_inputs = &.{
+            .{ .path = "tree-artifact", .digest = tree_digest },
+        },
+    });
+    defer materialization.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), materialization.bind_mounts.len);
+    const expected_source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/{s}",
+        .{ cas_root_buffer[0..cas_root_len], tree_path },
+    );
+    defer std.testing.allocator.free(expected_source);
+    const expected_target = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/tree-artifact",
+        .{work_root_buffer[0..work_root_len]},
+    );
+    defer std.testing.allocator.free(expected_target);
+    try std.testing.expectEqualStrings(expected_source, materialization.bind_mounts[0].source);
+    try std.testing.expectEqualStrings(expected_target, materialization.bind_mounts[0].target);
+
+    const stat = try work_dir.statFile(std.testing.io, "tree-artifact", .{});
+    try std.testing.expectEqual(std.Io.File.Kind.directory, stat.kind);
 }

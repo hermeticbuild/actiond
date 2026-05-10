@@ -87,7 +87,10 @@ pub fn executeActionWithOptions(
     var inputs: std.ArrayListUnmanaged(execroot.Input) = .empty;
     defer inputs.deinit(allocator);
     defer freeInputs(allocator, inputs.items);
-    try collectInputs(io, allocator, store, input_root_digest, "", &inputs);
+    var directory_inputs: std.ArrayListUnmanaged(execroot.DirectoryInput) = .empty;
+    defer directory_inputs.deinit(allocator);
+    defer freeDirectoryInputs(allocator, directory_inputs.items);
+    try collectInputs(io, allocator, store, input_root_digest, "", &inputs, &directory_inputs);
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
@@ -96,8 +99,9 @@ pub fn executeActionWithOptions(
     const materializer = execroot.Materializer.init(store, work_root);
     var materialization = materializer.materializeInputs(io, allocator, inputs.items, .{
         .chroot_root_path = work_root_path,
+        .directory_inputs = directory_inputs.items,
     }) catch |err| switch (err) {
-        error.FileNotFound => return error.MissingInputBlob,
+        error.FileNotFound, error.MissingInputTree => return error.MissingInputBlob,
         else => return err,
     };
     defer materialization.deinit(allocator);
@@ -459,6 +463,7 @@ fn collectInputs(
     directory_digest: cas.Digest,
     prefix: []const u8,
     inputs: *std.ArrayListUnmanaged(execroot.Input),
+    directory_inputs: *std.ArrayListUnmanaged(execroot.DirectoryInput),
 ) !void {
     const directory_bytes = store.readAlloc(io, allocator, directory_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingDirectoryBlob,
@@ -486,8 +491,16 @@ fn collectInputs(
         try validateEntryName(child.name);
         const digest = try cas.Digest.fromReapi(child.digest orelse return error.MissingDirectoryDigest);
         const child_prefix = try joinPath(allocator, prefix, child.name);
-        defer allocator.free(child_prefix);
-        try collectInputs(io, allocator, store, digest, child_prefix, inputs);
+        errdefer allocator.free(child_prefix);
+        if (try store.hasTree(io, digest)) {
+            try directory_inputs.append(allocator, .{
+                .path = child_prefix,
+                .digest = digest,
+            });
+        } else {
+            try collectInputs(io, allocator, store, digest, child_prefix, inputs, directory_inputs);
+            allocator.free(child_prefix);
+        }
     }
 }
 
@@ -508,6 +521,10 @@ fn freeInputs(allocator: std.mem.Allocator, inputs: []const execroot.Input) void
     for (inputs) |input| allocator.free(input.path);
 }
 
+fn freeDirectoryInputs(allocator: std.mem.Allocator, inputs: []const execroot.DirectoryInput) void {
+    for (inputs) |input| allocator.free(input.path);
+}
+
 fn putProto(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -517,6 +534,49 @@ fn putProto(
     const bytes = try reapi.encodeAlloc(allocator, value);
     defer allocator.free(bytes);
     return try store.putBytes(io, bytes);
+}
+
+test "collectInputs preserves materialized tree directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    try store.ensureLayout(std.testing.io);
+
+    const file_digest = try store.putBytes(std.testing.io, "leaf");
+    var file_hash: [64]u8 = undefined;
+    const child_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{
+            .{ .name = "leaf.txt", .digest = file_digest.toReapi(&file_hash) },
+        },
+    });
+    var child_tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+    const child_tree_path = cas.treeSubPath(child_digest, &child_tree_path_buffer);
+    try cas_dir.createDirPath(std.testing.io, child_tree_path);
+
+    var child_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{
+            .{ .name = "tree", .digest = child_digest.toReapi(&child_hash) },
+        },
+    });
+
+    var files: std.ArrayListUnmanaged(execroot.Input) = .empty;
+    defer files.deinit(std.testing.allocator);
+    defer freeInputs(std.testing.allocator, files.items);
+    var dirs: std.ArrayListUnmanaged(execroot.DirectoryInput) = .empty;
+    defer dirs.deinit(std.testing.allocator);
+    defer freeDirectoryInputs(std.testing.allocator, dirs.items);
+
+    try collectInputs(std.testing.io, std.testing.allocator, store, root_digest, "", &files, &dirs);
+
+    try std.testing.expectEqual(@as(usize, 0), files.items.len);
+    try std.testing.expectEqual(@as(usize, 1), dirs.items.len);
+    try std.testing.expectEqualStrings("tree", dirs.items[0].path);
+    try std.testing.expect(dirs.items[0].digest.eql(child_digest));
 }
 
 test "collectOutputFiles uploads requested output files and directories" {

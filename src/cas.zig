@@ -9,6 +9,8 @@ pub const Error = error{
 
 const blob_prefix = "blobs/sha256/";
 pub const blob_prefix_len = blob_prefix.len;
+const tree_prefix = "trees/sha256/";
+pub const tree_prefix_len = tree_prefix.len;
 const hex_chars = "0123456789abcdef";
 const copy_buffer_len = 128 * 1024;
 const temp_path_prefix = blob_prefix ++ ".tmp-";
@@ -78,6 +80,7 @@ pub const Store = struct {
 
     pub fn ensureLayout(self: Store, io: std.Io) !void {
         try self.root.createDirPath(io, "blobs/sha256");
+        try self.root.createDirPath(io, "trees/sha256");
     }
 
     pub fn putBytes(self: Store, io: std.Io, bytes: []const u8) !Digest {
@@ -115,6 +118,16 @@ pub const Store = struct {
             else => |e| return e,
         };
         return true;
+    }
+
+    pub fn hasTree(self: Store, io: std.Io, digest: Digest) !bool {
+        var path_buffer: [tree_prefix.len + 64]u8 = undefined;
+        const path = treeSubPath(digest, &path_buffer);
+        const stat = self.root.statFile(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => |e| return e,
+        };
+        return stat.kind == .directory;
     }
 
     pub fn readAlloc(
@@ -318,6 +331,13 @@ pub fn blobSubPath(digest: Digest, out: *[blob_prefix.len + 64]u8) []const u8 {
     @memcpy(out[0..blob_prefix.len], blob_prefix);
     var hex: [64]u8 = undefined;
     @memcpy(out[blob_prefix.len..], digest.formatHex(&hex));
+    return out;
+}
+
+pub fn treeSubPath(digest: Digest, out: *[tree_prefix.len + 64]u8) []const u8 {
+    @memcpy(out[0..tree_prefix.len], tree_prefix);
+    var hex: [64]u8 = undefined;
+    @memcpy(out[tree_prefix.len..], digest.formatHex(&hex));
     return out;
 }
 
