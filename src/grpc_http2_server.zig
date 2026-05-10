@@ -1,4 +1,5 @@
 const std = @import("std");
+const body_sink = @import("body_sink.zig");
 const cas = @import("cas.zig");
 const http2_frame = @import("http2_frame.zig");
 const http2_hpack = @import("http2_hpack.zig");
@@ -38,6 +39,7 @@ pub const Dispatcher = struct {
     ctx: *anyopaque,
     handle_unary: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
     handle_server_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
+    handle_server_streaming_response: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8, body_sink.Writer) anyerror!void,
     handle_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
     start_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8) anyerror!ClientStream,
 
@@ -46,6 +48,7 @@ pub const Dispatcher = struct {
             .ctx = server,
             .handle_unary = reapiUnary,
             .handle_server_streaming = reapiServerStreaming,
+            .handle_server_streaming_response = reapiServerStreamingResponse,
             .handle_client_streaming = reapiClientStreaming,
             .start_client_streaming = reapiStartClientStreaming,
         };
@@ -69,6 +72,17 @@ pub const Dispatcher = struct {
         body: []const u8,
     ) ![]u8 {
         return self.handle_server_streaming(self.ctx, io, allocator, method, body);
+    }
+
+    pub fn handleServerStreamingResponse(
+        self: Dispatcher,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        return self.handle_server_streaming_response(self.ctx, io, allocator, method, body, writer);
     }
 
     pub fn handleClientStreaming(
@@ -110,6 +124,18 @@ pub const Dispatcher = struct {
     ) ![]u8 {
         const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
         return server.*.handleServerStreaming(io, allocator, method, body);
+    }
+
+    fn reapiServerStreamingResponse(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
+        return server.*.handleServerStreamingResponse(io, allocator, method, body, writer);
     }
 
     fn reapiClientStreaming(
@@ -566,12 +592,79 @@ fn respondStream(
     state: *StreamState,
 ) !void {
     const method = state.method orelse return sendGrpcError(writer, state.id, "13", "MissingPathHeader");
+    const kind = methodKind(method) orelse return sendGrpcError(writer, state.id, "12", "UnsupportedMethod");
+    if (kind == .server_streaming) {
+        return respondServerStreaming(io, allocator, dispatcher, writer, state, method);
+    }
+
     const response_body = dispatchGrpc(io, allocator, dispatcher, state, method) catch |err| {
         const status = if (err == error.UnsupportedMethod) "12" else "13";
         return sendGrpcError(writer, state.id, status, @errorName(err));
     };
     defer allocator.free(response_body);
     return sendGrpcSuccess(writer, state.id, response_body);
+}
+
+const Http2BodyWriter = struct {
+    writer: *std.Io.Writer,
+    stream_id: u31,
+
+    fn bodyWriter(self: *Http2BodyWriter) body_sink.Writer {
+        return .{
+            .ctx = self,
+            .write_all = writeAll,
+        };
+    }
+
+    fn writeAll(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !void {
+        _ = io;
+        _ = allocator;
+        const self: *Http2BodyWriter = @ptrCast(@alignCast(ctx));
+        try sendData(self.writer, self.stream_id, bytes);
+    }
+};
+
+fn respondServerStreaming(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dispatcher: Dispatcher,
+    writer: *std.Io.Writer,
+    state: *StreamState,
+    method: []const u8,
+) !void {
+    try sendHeaders(writer, state.id, false, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-type", .value = "application/grpc" },
+    });
+
+    var body_writer = Http2BodyWriter{
+        .writer = writer,
+        .stream_id = state.id,
+    };
+    dispatcher.handleServerStreamingResponse(
+        io,
+        allocator,
+        method,
+        state.body.items,
+        body_writer.bodyWriter(),
+    ) catch |err| {
+        const status = if (err == error.UnsupportedMethod) "12" else "13";
+        try sendHeaders(writer, state.id, true, &.{
+            .{ .name = "grpc-status", .value = status },
+            .{ .name = "grpc-message", .value = @errorName(err) },
+        });
+        return writer.flush();
+    };
+
+    try sendHeaders(writer, state.id, true, &.{
+        .{ .name = "grpc-status", .value = "0" },
+    });
+    try writer.flush();
 }
 
 fn dispatchGrpc(
@@ -825,6 +918,7 @@ test "HTTP/2 client streaming dispatches DATA frames without buffered handler" {
                 .ctx = self,
                 .handle_unary = unary,
                 .handle_server_streaming = serverStreaming,
+                .handle_server_streaming_response = serverStreamingResponse,
                 .handle_client_streaming = clientStreaming,
                 .start_client_streaming = startClientStreaming,
             };
@@ -853,6 +947,19 @@ test "HTTP/2 client streaming dispatches DATA frames without buffered handler" {
             body: []const u8,
         ) ![]u8 {
             return unary(ctx, io, allocator, method, body);
+        }
+
+        fn serverStreamingResponse(
+            ctx: *anyopaque,
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            method: []const u8,
+            body: []const u8,
+            writer: body_sink.Writer,
+        ) !void {
+            const response = try serverStreaming(ctx, io, allocator, method, body);
+            defer allocator.free(response);
+            try writer.writeAll(io, allocator, response);
         }
 
         fn clientStreaming(

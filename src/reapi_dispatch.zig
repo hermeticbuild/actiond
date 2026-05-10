@@ -1,4 +1,5 @@
 const std = @import("std");
+const body_sink = @import("body_sink.zig");
 const bytestream = @import("bytestream.zig");
 const bytestream_service = @import("bytestream_service.zig");
 const action_cache = @import("action_cache.zig");
@@ -140,6 +141,26 @@ pub const Server = struct {
         }
 
         return error.UnsupportedMethod;
+    }
+
+    pub fn handleServerStreamingResponse(
+        self: Server,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        request_record: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        if (std.mem.eql(u8, method, bytestream_read)) {
+            const payload = try singlePayload(request_record);
+            var reader = protobuf.Reader.init(payload);
+            const request = try bytestream.ReadRequest.decode(&reader);
+            return try bytestream_service.writeReadGrpcRecords(io, allocator, self.store, request, writer);
+        }
+
+        const response = try self.handleServerStreaming(io, allocator, method, request_record);
+        defer allocator.free(response);
+        try writer.writeAll(io, allocator, response);
     }
 
     pub fn handleClientStreaming(
@@ -342,11 +363,11 @@ test "Server dispatches GetTree" {
 
     const store = cas.Store.init(tmp.dir);
     const child_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .files = &.{ .{ .name = "leaf.txt" } },
+        .files = &.{.{ .name = "leaf.txt" }},
     });
     var child_hash: [64]u8 = undefined;
     const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{ .{ .name = "child", .digest = child_digest.toReapi(&child_hash) } },
+        .directories = &.{.{ .name = "child", .digest = child_digest.toReapi(&child_hash) }},
     });
 
     const server = Server.init(store);

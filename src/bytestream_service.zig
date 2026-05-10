@@ -1,4 +1,5 @@
 const std = @import("std");
+const body_sink = @import("body_sink.zig");
 const bytestream = @import("bytestream.zig");
 const cas = @import("cas.zig");
 const grpc_record = @import("grpc_record.zig");
@@ -58,6 +59,20 @@ pub fn readGrpcRecords(
     store: cas.Store,
     request: bytestream.ReadRequest,
 ) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var list_writer = body_sink.ArrayListWriter{ .out = &out };
+    try writeReadGrpcRecords(io, allocator, store, request, list_writer.writer());
+    return try out.toOwnedSlice(allocator);
+}
+
+pub fn writeReadGrpcRecords(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    request: bytestream.ReadRequest,
+    writer: body_sink.Writer,
+) !void {
     const resource = try bytestream.parseBlobResource(allocator, request.resource_name);
     if (request.read_offset < 0) return error.InvalidOffset;
     const offset: usize = @intCast(request.read_offset);
@@ -69,11 +84,12 @@ pub fn readGrpcRecords(
     else
         @min(available, @as(usize, @intCast(request.read_limit)));
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
+    var record: std.ArrayListUnmanaged(u8) = .empty;
+    defer record.deinit(allocator);
 
     if (limit == 0) {
-        try appendReadResponseRecord(allocator, &out, "");
+        try appendReadResponseRecord(allocator, &record, "");
+        try writer.writeAll(io, allocator, record.items);
     } else {
         var blob_file = try store.openBlob(io, resource.digest);
         defer blob_file.close(io);
@@ -87,12 +103,12 @@ pub fn readGrpcRecords(
             const read_len = @min(remaining, buffer.len);
             const n = try readFd(blob_file.handle, buffer[0..read_len]);
             if (n == 0) return error.UnexpectedEof;
-            try appendReadResponseRecord(allocator, &out, buffer[0..n]);
+            record.clearRetainingCapacity();
+            try appendReadResponseRecord(allocator, &record, buffer[0..n]);
+            try writer.writeAll(io, allocator, record.items);
             remaining -= n;
         }
     }
-
-    return try out.toOwnedSlice(allocator);
 }
 
 fn appendReadResponseRecord(

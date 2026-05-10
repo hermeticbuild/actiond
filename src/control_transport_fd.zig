@@ -1,4 +1,5 @@
 const std = @import("std");
+const body_sink = @import("body_sink.zig");
 const control_protocol = @import("control_protocol.zig");
 const guest_proxy = @import("guest_proxy.zig");
 
@@ -42,6 +43,7 @@ pub const Client = struct {
             .ctx = self,
             .round_trip = roundTrip,
             .start_client_streaming = startClientStreaming,
+            .stream_server_response = streamServerResponse,
         };
     }
 
@@ -95,6 +97,31 @@ pub const Client = struct {
             .append_fn = ControlClientStream.append,
             .finish_fn = ControlClientStream.finish,
             .deinit_fn = ControlClientStream.deinit,
+        };
+    }
+
+    fn streamServerResponse(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        const self: *Client = @ptrCast(@alignCast(ctx));
+        const slot_index = self.next_slot.fetchAdd(1, .monotonic) % connection_pool_size;
+        const slot = &self.slots[slot_index];
+        try slot.mutex.lock(io);
+        defer slot.mutex.unlock(io);
+
+        const fd = try self.slotFd(slot);
+        writeRequestFrame(fd, .server_streaming_stream, method, body) catch |err| {
+            self.closeSlot(slot);
+            return err;
+        };
+        readStreamingResponse(allocator, fd, writer, io) catch |err| {
+            self.closeSlot(slot);
+            return err;
         };
     }
 
@@ -212,10 +239,28 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t) !guest_proxy.O
     };
 }
 
+fn readStreamingResponse(
+    allocator: std.mem.Allocator,
+    fd: std.posix.fd_t,
+    writer: body_sink.Writer,
+    io: std.Io,
+) !void {
+    while (true) {
+        var response = try readResponse(allocator, fd);
+        defer response.deinit(allocator);
+        switch (response.status) {
+            .stream_chunk => try writer.writeAll(io, allocator, response.body),
+            .ok => return,
+            .application_error => return error.GuestApplicationError,
+        }
+    }
+}
+
 fn responseStatus(tag: u8) !control_protocol.Status {
     return switch (tag) {
         @intFromEnum(control_protocol.Status.ok) => .ok,
         @intFromEnum(control_protocol.Status.application_error) => .application_error,
+        @intFromEnum(control_protocol.Status.stream_chunk) => .stream_chunk,
         else => error.InvalidCallKind,
     };
 }
@@ -399,6 +444,76 @@ test "Client streams request chunks over one locked fd" {
     server_thread.join();
     try std.testing.expectEqual(control_protocol.Status.ok, response.status);
     try std.testing.expectEqualStrings("done", response.body);
+}
+
+test "Client streams response chunks from one fd" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var fds: [2]std.posix.socket_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM,
+        0,
+        &fds,
+    ))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    const server_thread = try std.Thread.spawn(.{}, struct {
+        fn run(fd: std.posix.fd_t) !void {
+            defer closeFd(fd);
+            var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
+            try readExact(fd, &header_bytes);
+            const header = try control_protocol.decodeHeader(&header_bytes);
+            const payload_len = try header.payloadLen();
+            const frame = try std.testing.allocator.alloc(u8, control_protocol.encoded_header_len + payload_len);
+            defer std.testing.allocator.free(frame);
+            @memcpy(frame[0..control_protocol.encoded_header_len], &header_bytes);
+            try readExact(fd, frame[control_protocol.encoded_header_len..]);
+
+            const request = try control_protocol.decodeRequest(frame);
+            try std.testing.expectEqual(control_protocol.CallKind.server_streaming_stream, request.kind);
+            try std.testing.expectEqualStrings("/svc/Read", request.method);
+            try std.testing.expectEqualStrings("request", request.body);
+
+            const first = try control_protocol.encodeResponseAlloc(std.testing.allocator, .{
+                .status = .stream_chunk,
+                .body = "ab",
+            });
+            defer std.testing.allocator.free(first);
+            try writeAll(fd, first);
+            const second = try control_protocol.encodeResponseAlloc(std.testing.allocator, .{
+                .status = .stream_chunk,
+                .body = "cd",
+            });
+            defer std.testing.allocator.free(second);
+            try writeAll(fd, second);
+            const end = try control_protocol.encodeResponseAlloc(std.testing.allocator, .{
+                .status = .ok,
+                .body = "",
+            });
+            defer std.testing.allocator.free(end);
+            try writeAll(fd, end);
+        }
+    }.run, .{fds[0]});
+    defer closeFd(fds[1]);
+
+    var opener = SocketPairOpener{ .fd = fds[1] };
+    var client = Client{ .opener = opener.opener() };
+    defer client.deinit(std.testing.io);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    var list_writer = body_sink.ArrayListWriter{ .out = &out };
+    try client.transport().streamServerResponse(
+        std.testing.io,
+        std.testing.allocator,
+        "/svc/Read",
+        "request",
+        list_writer.writer(),
+    );
+
+    server_thread.join();
+    try std.testing.expectEqualStrings("abcd", out.items);
 }
 
 test "Client reuses a cached fd for repeated calls on one thread" {

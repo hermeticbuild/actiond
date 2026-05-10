@@ -1,4 +1,5 @@
 const std = @import("std");
+const body_sink = @import("body_sink.zig");
 const control_protocol = @import("control_protocol.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 
@@ -58,6 +59,14 @@ pub const Transport = struct {
         std.mem.Allocator,
         []const u8,
     ) anyerror!ClientStream,
+    stream_server_response: *const fn (
+        *anyopaque,
+        std.Io,
+        std.mem.Allocator,
+        []const u8,
+        []const u8,
+        body_sink.Writer,
+    ) anyerror!void,
 
     pub fn call(
         self: Transport,
@@ -76,6 +85,17 @@ pub const Transport = struct {
     ) !ClientStream {
         return self.start_client_streaming(self.ctx, io, allocator, method);
     }
+
+    pub fn streamServerResponse(
+        self: Transport,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        return self.stream_server_response(self.ctx, io, allocator, method, body, writer);
+    }
 };
 
 pub const Proxy = struct {
@@ -86,6 +106,7 @@ pub const Proxy = struct {
             .ctx = self,
             .handle_unary = unary,
             .handle_server_streaming = serverStreaming,
+            .handle_server_streaming_response = serverStreamingResponse,
             .handle_client_streaming = clientStreaming,
             .start_client_streaming = startClientStreaming,
         };
@@ -111,6 +132,18 @@ pub const Proxy = struct {
     ) ![]u8 {
         const self: *Proxy = @ptrCast(@alignCast(ctx));
         return self.forward(io, allocator, .server_streaming, method, body);
+    }
+
+    fn serverStreamingResponse(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        const self: *Proxy = @ptrCast(@alignCast(ctx));
+        return self.transport.streamServerResponse(io, allocator, method, body, writer);
     }
 
     fn clientStreaming(
@@ -162,6 +195,10 @@ pub const Proxy = struct {
         });
         return switch (response.status) {
             .ok => response.body,
+            .stream_chunk => {
+                defer response.deinit(allocator);
+                return error.GuestApplicationError;
+            },
             .application_error => {
                 defer response.deinit(allocator);
                 std.log.err("guest application error for {s}: {s}", .{ method, response.body });
@@ -194,6 +231,10 @@ const ProxyClientStream = struct {
         var response = try self.inner.finish(io, allocator);
         return switch (response.status) {
             .ok => response.body,
+            .stream_chunk => {
+                defer response.deinit(allocator);
+                return error.GuestApplicationError;
+            },
             .application_error => {
                 defer response.deinit(allocator);
                 std.log.err("guest application error for {s}: {s}", .{ self.method, response.body });
@@ -220,6 +261,7 @@ const FakeTransport = struct {
             .ctx = self,
             .round_trip = roundTrip,
             .start_client_streaming = startClientStreaming,
+            .stream_server_response = streamServerResponse,
         };
     }
 
@@ -251,6 +293,27 @@ const FakeTransport = struct {
         _ = allocator;
         _ = method;
         return error.UnsupportedMethod;
+    }
+
+    fn streamServerResponse(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        const response = try roundTrip(ctx, io, allocator, .{
+            .kind = .server_streaming,
+            .method = method,
+            .body = body,
+        });
+        defer {
+            var owned = response;
+            owned.deinit(allocator);
+        }
+        if (response.status != .ok) return error.GuestApplicationError;
+        try writer.writeAll(io, allocator, response.body);
     }
 };
 
@@ -285,6 +348,7 @@ const FakeStreamingTransport = struct {
             .ctx = self,
             .round_trip = roundTrip,
             .start_client_streaming = startClientStreaming,
+            .stream_server_response = streamServerResponse,
         };
     }
 
@@ -347,6 +411,23 @@ const FakeStreamingTransport = struct {
         _ = ctx;
         _ = io;
         _ = allocator;
+    }
+
+    fn streamServerResponse(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        _ = ctx;
+        _ = io;
+        _ = allocator;
+        _ = method;
+        _ = body;
+        _ = writer;
+        return error.UnexpectedRoundTrip;
     }
 };
 

@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
+const body_sink = @import("body_sink.zig");
 const bytestream_service = @import("bytestream_service.zig");
 const cas = @import("cas.zig");
 const control_protocol = @import("control_protocol.zig");
@@ -109,6 +110,11 @@ fn handleConnectionFrame(
     try connection.readExact(frame[control_protocol.encoded_header_len..]);
 
     const request = try control_protocol.decodeRequest(frame);
+    if (request.kind == .server_streaming_stream) {
+        try handleServerStreamingStreamRequest(io, allocator, server, connection, request);
+        return;
+    }
+
     const response_body = dispatchControlRequest(io, allocator, server, request) catch |err| {
         try writeResponse(connection, .{
             .status = .application_error,
@@ -121,6 +127,60 @@ fn handleConnectionFrame(
     try writeResponse(connection, .{
         .status = .ok,
         .body = response_body,
+    });
+}
+
+const ControlStreamWriter = struct {
+    connection: vsock.Connection,
+
+    fn writer(self: *ControlStreamWriter) body_sink.Writer {
+        return .{
+            .ctx = self,
+            .write_all = writeAll,
+        };
+    }
+
+    fn writeAll(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !void {
+        _ = io;
+        _ = allocator;
+        const self: *ControlStreamWriter = @ptrCast(@alignCast(ctx));
+        try writeResponse(self.connection, .{
+            .status = .stream_chunk,
+            .body = bytes,
+        });
+    }
+};
+
+fn handleServerStreamingStreamRequest(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: reapi_dispatch.Server,
+    connection: vsock.Connection,
+    request: control_protocol.Request,
+) !void {
+    var stream_writer = ControlStreamWriter{ .connection = connection };
+    server.handleServerStreamingResponse(
+        io,
+        allocator,
+        request.method,
+        request.body,
+        stream_writer.writer(),
+    ) catch |err| {
+        try writeResponse(connection, .{
+            .status = .application_error,
+            .body = @errorName(err),
+        });
+        return;
+    };
+
+    try writeResponse(connection, .{
+        .status = .ok,
+        .body = "",
     });
 }
 
@@ -229,6 +289,7 @@ pub fn dispatchControlRequest(
         .unary => try server.handleUnary(io, allocator, request.method, request.body),
         .server_streaming => try server.handleServerStreaming(io, allocator, request.method, request.body),
         .client_streaming => try server.handleClientStreaming(io, allocator, request.method, request.body),
+        .server_streaming_stream,
         .client_streaming_start,
         .client_streaming_chunk,
         .client_streaming_finish,
