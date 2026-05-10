@@ -55,13 +55,20 @@ pub fn runCommand(
         try env_map.put(variable.name, variable.value);
     }
 
-    const result = try std.process.run(allocator, io, .{
+    const result = std.process.run(allocator, io, .{
         .argv = command.arguments,
         .cwd = if (cwd) |path| .{ .path = path } else .inherit,
         .environ_map = &env_map,
         .stdout_limit = .limited(max_stream_bytes),
         .stderr_limit = .limited(max_stream_bytes),
-    });
+    }) catch |err| {
+        std.log.err("failed to run action command: {s}; cwd={?s}; argv0={s}", .{
+            @errorName(err),
+            cwd,
+            command.arguments[0],
+        });
+        return err;
+    };
     errdefer allocator.free(result.stdout);
     errdefer allocator.free(result.stderr);
 

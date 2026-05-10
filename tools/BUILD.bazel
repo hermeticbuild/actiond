@@ -1,1 +1,9 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
 exports_files(["initramfs_newc.py"])
+
+zig_binary(
+    name = "initramfs_newc",
+    main = "initramfs_newc.zig",
+    visibility = ["//visibility:public"],
+)

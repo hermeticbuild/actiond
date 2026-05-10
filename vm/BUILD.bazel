@@ -2,8 +2,8 @@ genrule(
     name = "initramfs",
     srcs = ["//cmd/linux_actiond:linux-actiond-guest-aarch64"],
     outs = ["initramfs.cpio"],
-    cmd = "python3 $(location //tools:initramfs_newc.py) $@ $(location //cmd/linux_actiond:linux-actiond-guest-aarch64)",
-    tools = ["//tools:initramfs_newc.py"],
+    cmd = "$(execpath //tools:initramfs_newc) $@ $(location //cmd/linux_actiond:linux-actiond-guest-aarch64)",
+    tools = ["//tools:initramfs_newc"],
     visibility = ["//visibility:public"],
 )
 

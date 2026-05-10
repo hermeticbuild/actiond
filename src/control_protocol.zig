@@ -9,7 +9,7 @@ pub const Error = error{
 const magic = "ACTD";
 const version: u8 = 1;
 pub const encoded_header_len = 18;
-const max_message_bytes = 64 * 1024 * 1024;
+const max_message_bytes = 512 * 1024 * 1024;
 
 pub const CallKind = enum(u8) {
     unary = 0,

@@ -88,7 +88,10 @@ pub const Proxy = struct {
         const response = try control_protocol.decodeResponse(response_frame);
         return switch (response.status) {
             .ok => try allocator.dupe(u8, response.body),
-            .application_error => error.GuestApplicationError,
+            .application_error => {
+                std.log.err("guest application error for {s}: {s}", .{ method, response.body });
+                return error.GuestApplicationError;
+            },
         };
     }
 };
