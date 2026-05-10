@@ -53,22 +53,32 @@ pub const Client = struct {
 fn readExact(fd: std.posix.fd_t, buffer: []u8) !void {
     var offset: usize = 0;
     while (offset < buffer.len) {
-        const rc = std.c.read(fd, buffer[offset..].ptr, buffer.len - offset);
-        if (rc < 0) return error.ReadFailed;
-        const n: usize = @intCast(rc);
-        if (n == 0) return error.UnexpectedEof;
-        offset += n;
+        const rc = std.posix.system.read(fd, buffer[offset..].ptr, buffer.len - offset);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.UnexpectedEof;
+                offset += n;
+            },
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
     }
 }
 
 fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
-        const rc = std.c.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        if (rc < 0) return error.WriteFailed;
-        const n: usize = @intCast(rc);
-        if (n == 0) return error.WriteFailed;
-        offset += n;
+        const rc = std.posix.system.write(fd, bytes[offset..].ptr, bytes.len - offset);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.WriteFailed;
+                offset += n;
+            },
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
     }
 }
 
@@ -91,9 +101,15 @@ const SocketPairOpener = struct {
 test "Client round trips a control frame over an fd" {
     if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
 
-    var fds: [2]std.c.fd_t = undefined;
-    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) {
-        return error.SkipZigTest;
+    var fds: [2]std.posix.socket_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM,
+        0,
+        &fds,
+    ))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
     }
     const server_thread = try std.Thread.spawn(.{}, struct {
         fn run(fd: std.posix.fd_t) !void {
@@ -137,5 +153,9 @@ test "Client round trips a control frame over an fd" {
 }
 
 fn closeFd(fd: std.posix.fd_t) void {
-    _ = std.c.close(fd);
+    while (true) switch (std.posix.errno(std.posix.system.close(fd))) {
+        .SUCCESS => return,
+        .INTR => continue,
+        else => return,
+    };
 }
