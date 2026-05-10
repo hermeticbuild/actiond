@@ -1,0 +1,19 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "actiond",
+    main = "root.zig",
+    srcs = [
+        "version.zig",
+    ],
+    import_name = "actiond",
+    visibility = ["//visibility:public"],
+)
+
+zig_test(
+    name = "unit_tests",
+    main = "root.zig",
+    srcs = [
+        "version.zig",
+    ],
+)

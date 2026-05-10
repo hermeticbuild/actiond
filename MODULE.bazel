@@ -1,0 +1,12 @@
+module(
+    name = "actiond",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "rules_zig", version = "0.14.0")
+
+zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
+zig.toolchain(zig_version = "0.16.0")
+use_repo(zig, "zig_toolchains")
+
+register_toolchains("@zig_toolchains//:all")
