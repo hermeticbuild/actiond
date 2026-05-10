@@ -12,6 +12,7 @@ zig_library(
         "grpc_record.zig",
         "protobuf_wire.zig",
         "reapi.zig",
+        "reapi_dispatch.zig",
         "version.zig",
     ],
     import_name = "actiond",
@@ -30,6 +31,7 @@ zig_test(
         "grpc_record.zig",
         "protobuf_wire.zig",
         "reapi.zig",
+        "reapi_dispatch.zig",
         "version.zig",
     ],
 )
