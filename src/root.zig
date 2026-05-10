@@ -7,6 +7,7 @@ pub const bytestream_service = @import("bytestream_service.zig");
 pub const cas = @import("cas.zig");
 pub const cache_service = @import("cache_service.zig");
 pub const capabilities_service = @import("capabilities_service.zig");
+pub const control_protocol = @import("control_protocol.zig");
 pub const execroot = @import("execroot.zig");
 pub const execution_service = @import("execution_service.zig");
 pub const guest_init = @import("guest_init.zig");
@@ -28,6 +29,7 @@ test {
     _ = cas;
     _ = cache_service;
     _ = capabilities_service;
+    _ = control_protocol;
     _ = execroot;
     _ = execution_service;
     _ = guest_init;
