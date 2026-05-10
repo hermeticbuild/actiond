@@ -74,13 +74,33 @@ pub fn serve(
     try stderr.flush();
 
     while (true) {
-        var stream = try listener.accept(io);
-        defer stream.close(io);
-        handleConnection(io, allocator, server, stream) catch |err| {
-            try stderr.print("actiond gRPC connection failed: {s}\n", .{@errorName(err)});
-            try stderr.flush();
-        };
+        const stream = try listener.accept(io);
+        const thread = try std.Thread.spawn(.{}, connectionThread, .{
+            io,
+            allocator,
+            server,
+            stream,
+        });
+        thread.detach();
     }
+}
+
+fn connectionThread(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: reapi_dispatch.Server,
+    stream: std.Io.net.Stream,
+) void {
+    var owned_stream = stream;
+    defer owned_stream.close(io);
+
+    handleConnection(io, allocator, server, owned_stream) catch |err| {
+        var stderr_buffer: [256]u8 = undefined;
+        var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+        const stderr = &stderr_writer.interface;
+        stderr.print("actiond gRPC connection failed: {s}\n", .{@errorName(err)}) catch {};
+        stderr.flush() catch {};
+    };
 }
 
 pub fn handleConnection(
