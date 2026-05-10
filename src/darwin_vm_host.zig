@@ -137,6 +137,7 @@ pub fn serve(
     try stderr.flush();
 
     var fd_client = control_transport_fd.Client{ .opener = vm.opener() };
+    defer fd_client.deinit(io);
     var proxy = guest_proxy.Proxy{ .transport = fd_client.transport() };
     return grpc_http2_server.serveDispatcher(io, allocator, .{
         .listen = options.listen,

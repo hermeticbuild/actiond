@@ -77,6 +77,20 @@ fn handleConnection(
     server: reapi_dispatch.Server,
     connection: vsock.Connection,
 ) !void {
+    while (true) {
+        handleConnectionFrame(io, allocator, server, connection) catch |err| switch (err) {
+            error.UnexpectedEof => return,
+            else => |e| return e,
+        };
+    }
+}
+
+fn handleConnectionFrame(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: reapi_dispatch.Server,
+    connection: vsock.Connection,
+) !void {
     var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
     try connection.readExact(&header_bytes);
 

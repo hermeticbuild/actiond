@@ -10,16 +10,18 @@ pub const Transport = struct {
     ctx: *anyopaque,
     round_trip: *const fn (
         *anyopaque,
+        std.Io,
         std.mem.Allocator,
         control_protocol.Request,
     ) anyerror![]u8,
 
     pub fn call(
         self: Transport,
+        io: std.Io,
         allocator: std.mem.Allocator,
         request: control_protocol.Request,
     ) ![]u8 {
-        return self.round_trip(self.ctx, allocator, request);
+        return self.round_trip(self.ctx, io, allocator, request);
     }
 };
 
@@ -42,9 +44,8 @@ pub const Proxy = struct {
         method: []const u8,
         body: []const u8,
     ) ![]u8 {
-        _ = io;
         const self: *Proxy = @ptrCast(@alignCast(ctx));
-        return self.forward(allocator, .unary, method, body);
+        return self.forward(io, allocator, .unary, method, body);
     }
 
     fn serverStreaming(
@@ -54,9 +55,8 @@ pub const Proxy = struct {
         method: []const u8,
         body: []const u8,
     ) ![]u8 {
-        _ = io;
         const self: *Proxy = @ptrCast(@alignCast(ctx));
-        return self.forward(allocator, .server_streaming, method, body);
+        return self.forward(io, allocator, .server_streaming, method, body);
     }
 
     fn clientStreaming(
@@ -66,19 +66,19 @@ pub const Proxy = struct {
         method: []const u8,
         body: []const u8,
     ) ![]u8 {
-        _ = io;
         const self: *Proxy = @ptrCast(@alignCast(ctx));
-        return self.forward(allocator, .client_streaming, method, body);
+        return self.forward(io, allocator, .client_streaming, method, body);
     }
 
     fn forward(
         self: *Proxy,
+        io: std.Io,
         allocator: std.mem.Allocator,
         kind: control_protocol.CallKind,
         method: []const u8,
         body: []const u8,
     ) ![]u8 {
-        const response_frame = try self.transport.call(allocator, .{
+        const response_frame = try self.transport.call(io, allocator, .{
             .kind = kind,
             .method = method,
             .body = body,
@@ -111,9 +111,11 @@ const FakeTransport = struct {
 
     fn roundTrip(
         ctx: *anyopaque,
+        io: std.Io,
         allocator: std.mem.Allocator,
         request: control_protocol.Request,
     ) ![]u8 {
+        _ = io;
         const self: *FakeTransport = @ptrCast(@alignCast(ctx));
         try std.testing.expectEqual(self.expected_kind, request.kind);
         try std.testing.expectEqualStrings(self.expected_method, request.method);
