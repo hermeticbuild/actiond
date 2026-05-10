@@ -571,6 +571,22 @@ pub const Directory = struct {
     }
 };
 
+pub const Tree = struct {
+    root: Directory = .{},
+    children: []const Directory = &.{},
+
+    pub fn encode(self: Tree, writer: *protobuf.Writer) !void {
+        try writer.writeMessageField(1, self.root);
+        for (self.children) |child| try writer.writeMessageField(2, child);
+    }
+
+    pub fn encodedLen(self: Tree) usize {
+        var len: usize = protobuf.messageFieldLen(1, self.root.encodedLen());
+        for (self.children) |child| len += protobuf.messageFieldLen(2, child.encodedLen());
+        return len;
+    }
+};
+
 pub const ExecuteRequest = struct {
     instance_name: []const u8 = "",
     skip_cache_lookup: bool = false,
@@ -733,20 +749,17 @@ pub const OutputFile = struct {
 
 pub const OutputDirectory = struct {
     path: []const u8 = "",
-    root_directory_digest: ?Digest = null,
-    is_topologically_sorted: bool = false,
+    tree_digest: ?Digest = null,
 
     pub fn encode(self: OutputDirectory, writer: *protobuf.Writer) !void {
         if (self.path.len != 0) try writer.writeStringField(1, self.path);
-        if (self.root_directory_digest) |digest| try writer.writeMessageField(5, digest);
-        if (self.is_topologically_sorted) try writer.writeBoolField(4, true);
+        if (self.tree_digest) |digest| try writer.writeMessageField(3, digest);
     }
 
     pub fn encodedLen(self: OutputDirectory) usize {
         var len: usize = 0;
         if (self.path.len != 0) len += protobuf.stringFieldLen(1, self.path.len);
-        if (self.is_topologically_sorted) len += protobuf.boolFieldLen(4);
-        if (self.root_directory_digest) |digest| len += protobuf.messageFieldLen(5, digest.encodedLen());
+        if (self.tree_digest) |digest| len += protobuf.messageFieldLen(3, digest.encodedLen());
         return len;
     }
 
@@ -755,10 +768,9 @@ pub const OutputDirectory = struct {
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => out.path = try reader.readString(),
-                4 => out.is_topologically_sorted = try reader.readBool(),
-                5 => {
+                3 => {
                     var nested = try reader.readMessage();
-                    out.root_directory_digest = try Digest.decode(&nested);
+                    out.tree_digest = try Digest.decode(&nested);
                 },
                 else => try reader.skipField(tag.wire_type),
             }
@@ -1526,7 +1538,7 @@ test "ActionResult round-trips exit code and stream digests" {
             .{ .path = "out/app", .digest = stdout_digest, .is_executable = true },
         },
         .output_directories = &.{
-            .{ .path = "out/tree", .root_directory_digest = stderr_digest, .is_topologically_sorted = true },
+            .{ .path = "out/tree", .tree_digest = stderr_digest },
         },
         .exit_code = 7,
         .stdout_digest = stdout_digest,
@@ -1545,8 +1557,7 @@ test "ActionResult round-trips exit code and stream digests" {
     try std.testing.expect(decoded.output_files[0].digest.?.eql(stdout_digest));
     try std.testing.expectEqual(@as(usize, 1), decoded.output_directories.len);
     try std.testing.expectEqualStrings("out/tree", decoded.output_directories[0].path);
-    try std.testing.expect(decoded.output_directories[0].root_directory_digest.?.eql(stderr_digest));
-    try std.testing.expect(decoded.output_directories[0].is_topologically_sorted);
+    try std.testing.expect(decoded.output_directories[0].tree_digest.?.eql(stderr_digest));
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));

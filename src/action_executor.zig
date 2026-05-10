@@ -5,6 +5,7 @@ const cas = @import("cas.zig");
 const execroot = @import("execroot.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
+const tree_service = @import("tree_service.zig");
 
 pub const Error = error{
     MissingActionBlob,
@@ -186,8 +187,7 @@ pub fn actionResultFromOutcomeOwned(
     for (outcome.output_directories, 0..) |output_directory, i| {
         output_directories[i] = .{
             .path = output_directory.path,
-            .root_directory_digest = try appendDigest(allocator, &hash_strings, output_directory.root_digest),
-            .is_topologically_sorted = true,
+            .tree_digest = try appendDigest(allocator, &hash_strings, output_directory.tree_digest),
         };
     }
 
@@ -348,14 +348,105 @@ fn collectOutputDirectoryWithStat(
 ) !void {
     var dir = try work_root.openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
-    const digest = try putDirectoryTree(io, allocator, store, dir);
+    const root_digest = try putDirectoryTree(io, allocator, store, dir);
+    try materializeOutputTreeDirectory(io, store, work_root, path, root_digest);
+    const tree_digest = try putTreeProto(io, allocator, store, root_digest);
 
     const path_copy = try allocator.dupe(u8, path);
     errdefer allocator.free(path_copy);
     try output_directories.append(allocator, .{
         .path = path_copy,
-        .root_digest = digest,
+        .tree_digest = tree_digest,
     });
+}
+
+fn putTreeProto(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    root_digest: cas.Digest,
+) !cas.Digest {
+    var root_hash: [64]u8 = undefined;
+    var tree = try tree_service.getTree(io, allocator, store, .{
+        .root_digest = root_digest.toReapi(&root_hash),
+    });
+    defer tree.deinit(allocator);
+
+    return try putProto(io, allocator, store, reapi.Tree{
+        .root = tree.response.directories[0],
+        .children = tree.response.directories[1..],
+    });
+}
+
+fn materializeOutputTreeDirectory(
+    io: std.Io,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    output_path: []const u8,
+    root_digest: cas.Digest,
+) !void {
+    var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+    const tree_path = cas.treeSubPath(root_digest, &tree_path_buffer);
+    const stat = store.root.statFile(io, tree_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (stat) |value| {
+        if (value.kind == .directory) return;
+        return error.UnsupportedOutputDirectoryEntry;
+    }
+
+    try store.root.createDirPath(io, tree_path);
+    var src = try work_root.openDir(io, output_path, .{ .iterate = true });
+    defer src.close(io);
+    var dest = try store.root.openDir(io, tree_path, .{ .iterate = true });
+    defer dest.close(io);
+    try copyDirectoryContents(io, src, dest);
+}
+
+fn copyDirectoryContents(
+    io: std.Io,
+    src: std.Io.Dir,
+    dest: std.Io.Dir,
+) !void {
+    var it = src.iterate();
+    while (try it.next(io)) |entry| {
+        switch (entry.kind) {
+            .file => try copyFile(io, src, dest, entry.name),
+            .directory => {
+                try dest.createDirPath(io, entry.name);
+                var src_child = try src.openDir(io, entry.name, .{ .iterate = true });
+                defer src_child.close(io);
+                var dest_child = try dest.openDir(io, entry.name, .{ .iterate = true });
+                defer dest_child.close(io);
+                try copyDirectoryContents(io, src_child, dest_child);
+            },
+            else => return error.UnsupportedOutputDirectoryEntry,
+        }
+    }
+}
+
+fn copyFile(
+    io: std.Io,
+    src_dir: std.Io.Dir,
+    dest_dir: std.Io.Dir,
+    name: []const u8,
+) !void {
+    const stat = try src_dir.statFile(io, name, .{});
+    var src = try src_dir.openFile(io, name, .{});
+    defer src.close(io);
+    var dest = try dest_dir.createFile(io, name, .{
+        .truncate = true,
+        .permissions = if (isExecutable(stat)) .executable_file else .default_file,
+    });
+    defer dest.close(io);
+
+    var buffer: [128 * 1024]u8 = undefined;
+    while (true) {
+        const n = try readFd(src.handle, &buffer);
+        if (n == 0) break;
+        try writeFdAll(dest.handle, buffer[0..n]);
+    }
 }
 
 fn prepareOutputParents(
@@ -536,6 +627,33 @@ fn putProto(
     return try store.putBytes(io, bytes);
 }
 
+fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
+    while (true) {
+        const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+    }
+}
+
+fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rc = std.posix.system.write(fd, bytes[offset..].ptr, bytes.len - offset);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.WriteFailed;
+                offset += n;
+            },
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
+    }
+}
+
 test "collectInputs preserves materialized tree directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -622,20 +740,34 @@ test "collectOutputFiles uploads requested output files and directories" {
     try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
     try std.testing.expectEqualStrings("tree", outcome.output_directories[0].path);
 
-    const directory_bytes = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_directories[0].root_digest);
-    defer std.testing.allocator.free(directory_bytes);
-    var directory_reader = protobuf.Reader.init(directory_bytes);
-    var directory = try reapi.Directory.decodeOwned(std.testing.allocator, &directory_reader);
-    defer directory.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), directory.directories.len);
-    try std.testing.expectEqualStrings("sub", directory.directories[0].name);
+    const tree_bytes = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_directories[0].tree_digest);
+    defer std.testing.allocator.free(tree_bytes);
+    var tree_reader = protobuf.Reader.init(tree_bytes);
+    while (try tree_reader.next()) |tag| switch (tag.field_number) {
+        1 => {
+            var nested = try tree_reader.readMessage();
+            var directory = try reapi.Directory.decodeOwned(std.testing.allocator, &nested);
+            defer directory.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 1), directory.directories.len);
+            try std.testing.expectEqualStrings("sub", directory.directories[0].name);
+        },
+        else => try tree_reader.skipField(tag.wire_type),
+    };
+
+    var tree_dir = try work_dir.openDir(std.testing.io, "tree", .{ .iterate = true });
+    defer tree_dir.close(std.testing.io);
+    const root_digest = try putDirectoryTree(std.testing.io, std.testing.allocator, store, tree_dir);
+    var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+    const materialized_tree = cas.treeSubPath(root_digest, &tree_path_buffer);
+    const materialized_stat = try cas_dir.statFile(std.testing.io, materialized_tree, .{});
+    try std.testing.expectEqual(std.Io.File.Kind.directory, materialized_stat.kind);
 
     var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.result.output_directories.len);
     try std.testing.expectEqualStrings("tree", result.result.output_directories[0].path);
-    var root_hash: [64]u8 = undefined;
-    try std.testing.expect(result.result.output_directories[0].root_directory_digest.?.eql(outcome.output_directories[0].root_digest.toReapi(&root_hash)));
+    var tree_hash: [64]u8 = undefined;
+    try std.testing.expect(result.result.output_directories[0].tree_digest.?.eql(outcome.output_directories[0].tree_digest.toReapi(&tree_hash)));
 }
 
 test "prepareOutputParents creates parent directories for declared outputs" {

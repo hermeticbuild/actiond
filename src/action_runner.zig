@@ -66,7 +66,7 @@ pub const Outcome = struct {
 
     pub const OutputDirectory = struct {
         path: []u8,
-        root_digest: cas.Digest,
+        tree_digest: cas.Digest,
     };
 
     status: Status,
