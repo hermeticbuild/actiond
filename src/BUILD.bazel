@@ -22,6 +22,7 @@ zig_library(
         "reapi.zig",
         "reapi_dispatch.zig",
         "version.zig",
+        "vsock.zig",
     ],
     import_name = "actiond",
     visibility = ["//visibility:public"],
@@ -49,5 +50,6 @@ zig_test(
         "reapi.zig",
         "reapi_dispatch.zig",
         "version.zig",
+        "vsock.zig",
     ],
 )

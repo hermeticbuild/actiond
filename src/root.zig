@@ -16,6 +16,7 @@ pub const protobuf_wire = @import("protobuf_wire.zig");
 pub const reapi = @import("reapi.zig");
 pub const reapi_dispatch = @import("reapi_dispatch.zig");
 pub const version = @import("version.zig");
+pub const vsock = @import("vsock.zig");
 
 test {
     _ = action_executor;
@@ -36,4 +37,5 @@ test {
     _ = reapi;
     _ = reapi_dispatch;
     _ = version;
+    _ = vsock;
 }
