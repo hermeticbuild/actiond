@@ -30,9 +30,15 @@ pub const Materializer = struct {
         inputs: []const Input,
     ) !void {
         _ = allocator;
+        var last_parent: ?[]const u8 = null;
         for (inputs) |input| {
             try validatePath(input.path);
-            try createParentDirs(self.root, io, input.path);
+            if (parentDir(input.path)) |parent| {
+                if (last_parent == null or !std.mem.eql(u8, last_parent.?, parent)) {
+                    try self.root.createDirPath(io, parent);
+                    last_parent = parent;
+                }
+            }
 
             try self.store.copyToFile(
                 io,
@@ -59,8 +65,12 @@ pub fn validatePath(path: []const u8) !void {
 }
 
 fn createParentDirs(root: std.Io.Dir, io: std.Io, path: []const u8) !void {
-    const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
-    try root.createDirPath(io, path[0..last_slash]);
+    if (parentDir(path)) |parent| try root.createDirPath(io, parent);
+}
+
+fn parentDir(path: []const u8) ?[]const u8 {
+    const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
+    return path[0..last_slash];
 }
 
 test "validatePath rejects absolute and escaping paths" {

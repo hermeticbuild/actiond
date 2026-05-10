@@ -48,6 +48,10 @@ pub fn encodeRequestAlloc(allocator: std.mem.Allocator, request: Request) ![]u8 
     return encodeAlloc(allocator, @intFromEnum(request.kind), request.method, request.body);
 }
 
+pub fn encodeRequestHeader(out: *[encoded_header_len]u8, request: Request) !void {
+    try encodeHeader(out, @intFromEnum(request.kind), request.method.len, request.body.len);
+}
+
 pub fn decodeRequest(bytes: []const u8) !Request {
     const decoded = try decode(bytes);
     return .{
@@ -59,6 +63,10 @@ pub fn decodeRequest(bytes: []const u8) !Request {
 
 pub fn encodeResponseAlloc(allocator: std.mem.Allocator, response: Response) ![]u8 {
     return encodeAlloc(allocator, @intFromEnum(response.status), "", response.body);
+}
+
+pub fn encodeResponseHeader(out: *[encoded_header_len]u8, response: Response) !void {
+    try encodeHeader(out, @intFromEnum(response.status), 0, response.body.len);
 }
 
 pub fn decodeResponse(bytes: []const u8) !Response {
@@ -82,19 +90,24 @@ fn encodeAlloc(
     method: []const u8,
     body: []const u8,
 ) ![]u8 {
-    if (method.len > std.math.maxInt(u32)) return error.MessageTooLarge;
-    if (body.len > max_message_bytes) return error.MessageTooLarge;
-
     const total_len = encoded_header_len + method.len + body.len;
     var out = try allocator.alloc(u8, total_len);
-    @memcpy(out[0..4], magic);
-    out[4] = version;
-    out[5] = tag;
-    std.mem.writeInt(u32, out[6..10], @intCast(method.len), .little);
-    std.mem.writeInt(u64, out[10..18], @intCast(body.len), .little);
+    try encodeHeader(out[0..encoded_header_len], tag, method.len, body.len);
     @memcpy(out[encoded_header_len..][0..method.len], method);
     @memcpy(out[encoded_header_len + method.len ..][0..body.len], body);
     return out;
+}
+
+fn encodeHeader(out: []u8, tag: u8, method_len: usize, body_len: usize) !void {
+    std.debug.assert(out.len >= encoded_header_len);
+    if (method_len > std.math.maxInt(u32)) return error.MessageTooLarge;
+    if (body_len > max_message_bytes) return error.MessageTooLarge;
+
+    @memcpy(out[0..4], magic);
+    out[4] = version;
+    out[5] = tag;
+    std.mem.writeInt(u32, out[6..10], @intCast(method_len), .little);
+    std.mem.writeInt(u64, out[10..18], @intCast(body_len), .little);
 }
 
 const Decoded = struct {

@@ -103,22 +103,18 @@ fn handleConnectionFrame(
 
     const request = try control_protocol.decodeRequest(frame);
     const response_body = dispatchControlRequest(io, allocator, server, request) catch |err| {
-        const response_frame = try control_protocol.encodeResponseAlloc(allocator, .{
+        try writeResponse(connection, .{
             .status = .application_error,
             .body = @errorName(err),
         });
-        defer allocator.free(response_frame);
-        try connection.writeAll(response_frame);
         return;
     };
     defer allocator.free(response_body);
 
-    const response_frame = try control_protocol.encodeResponseAlloc(allocator, .{
+    try writeResponse(connection, .{
         .status = .ok,
         .body = response_body,
     });
-    defer allocator.free(response_frame);
-    try connection.writeAll(response_frame);
 }
 
 pub fn dispatchControlRequest(
@@ -132,6 +128,13 @@ pub fn dispatchControlRequest(
         .server_streaming => try server.handleServerStreaming(io, allocator, request.method, request.body),
         .client_streaming => try server.handleClientStreaming(io, allocator, request.method, request.body),
     };
+}
+
+fn writeResponse(connection: vsock.Connection, response: control_protocol.Response) !void {
+    var header: [control_protocol.encoded_header_len]u8 = undefined;
+    try control_protocol.encodeResponseHeader(&header, response);
+    try connection.writeAll(&header);
+    try connection.writeAll(response.body);
 }
 
 test "guest worker is Linux-only" {

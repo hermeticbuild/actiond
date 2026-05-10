@@ -72,9 +72,11 @@ pub const Client = struct {
     ) ![]u8 {
         _ = self;
 
-        const request_frame = try control_protocol.encodeRequestAlloc(allocator, request);
-        defer allocator.free(request_frame);
-        try writeAll(fd, request_frame);
+        var request_header: [control_protocol.encoded_header_len]u8 = undefined;
+        try control_protocol.encodeRequestHeader(&request_header, request);
+        try writeAll(fd, &request_header);
+        try writeAll(fd, request.method);
+        try writeAll(fd, request.body);
 
         var header_bytes: [control_protocol.encoded_header_len]u8 = undefined;
         try readExact(fd, &header_bytes);
