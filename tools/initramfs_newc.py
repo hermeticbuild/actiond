@@ -101,7 +101,7 @@ def main(argv):
     def add_symlink(path, target):
         add_file(path, SYMLINK_MODE, target.encode("utf-8"))
 
-    for directory in ("dev", "proc", "sys", "tmp", "work", "cas", "modules"):
+    for directory in ("dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "cas-ro", "cas", "modules"):
         add_dir(directory)
     add_file("init", FILE_MODE, actiond)
     add_file("actiond", FILE_MODE, actiond)

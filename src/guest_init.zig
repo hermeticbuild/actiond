@@ -11,12 +11,14 @@ pub const Mount = struct {
     source: [:0]const u8,
     target: [:0]const u8,
     fstype: [:0]const u8,
-    flags: usize = 0,
+    flags: u32 = 0,
+    data: ?[:0]const u8 = null,
 };
 
 pub const mounts = [_]Mount{
     .{ .source = "proc", .target = "/proc", .fstype = "proc" },
     .{ .source = "sysfs", .target = "/sys", .fstype = "sysfs" },
+    .{ .source = "cgroup2", .target = "/sys/fs/cgroup", .fstype = "cgroup2" },
     .{ .source = "devtmpfs", .target = "/dev", .fstype = "devtmpfs" },
     .{ .source = "tmpfs", .target = "/tmp", .fstype = "tmpfs" },
     .{ .source = "tmpfs", .target = "/work", .fstype = "tmpfs" },
@@ -29,7 +31,13 @@ pub const module_paths = [_][:0]const u8{
     "/modules/virtiofs.ko",
 };
 
-pub const cas_mount: Mount = .{ .source = "cas", .target = "/cas", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
+pub const cas_mount: Mount = .{ .source = "cas", .target = "/cas-ro", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
+pub const cas_overlay_mount: Mount = .{
+    .source = "overlay",
+    .target = "/cas",
+    .fstype = "overlay",
+    .data = "lowerdir=/cas-ro,upperdir=/work/cas-upper/upper,workdir=/work/cas-upper/work",
+};
 pub const worker_argv = [_][]const u8{ "/actiond", "--guest-worker" };
 
 pub fn run(io: std.Io) !void {
@@ -45,7 +53,10 @@ pub fn run(io: std.Io) !void {
     for (module_paths) |module_path| {
         try loadOptionalModule(stderr, module_path);
     }
+    try ensureDir(io, "work/cas-upper/upper");
+    try ensureDir(io, "work/cas-upper/work");
     try mount(stderr, cas_mount);
+    try mount(stderr, cas_overlay_mount);
     try stderr.writeAll("linux-actiond guest init mounted filesystems; starting worker\n");
     try stderr.flush();
 
@@ -60,7 +71,7 @@ fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {
         mount_spec.target.ptr,
         mount_spec.fstype.ptr,
         mount_spec.flags,
-        0,
+        if (mount_spec.data) |data| @intFromPtr(data.ptr) else 0,
     );
     switch (std.posix.errno(rc)) {
         .SUCCESS => {},
@@ -75,6 +86,10 @@ fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {
             return error.MountFailed;
         },
     }
+}
+
+fn ensureDir(io: std.Io, path: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(io, path);
 }
 
 fn loadOptionalModule(stderr: *std.Io.Writer, path: [:0]const u8) !void {
@@ -107,10 +122,13 @@ fn loadOptionalModule(stderr: *std.Io.Writer, path: [:0]const u8) !void {
 }
 
 test "guest init mount plan stays minimal" {
-    try std.testing.expectEqual(@as(usize, 5), mounts.len);
+    try std.testing.expectEqual(@as(usize, 6), mounts.len);
     try std.testing.expectEqualStrings("virtiofs", cas_mount.fstype);
-    try std.testing.expectEqualStrings("/cas", cas_mount.target);
+    try std.testing.expectEqualStrings("/cas-ro", cas_mount.target);
     try std.testing.expectEqual(std.os.linux.MS.RDONLY, cas_mount.flags);
+    try std.testing.expectEqualStrings("overlay", cas_overlay_mount.fstype);
+    try std.testing.expectEqualStrings("/cas", cas_overlay_mount.target);
+    try std.testing.expect(cas_overlay_mount.data != null);
     try std.testing.expectEqual(@as(usize, 4), module_paths.len);
     try std.testing.expectEqualStrings("/actiond", worker_argv[0]);
     try std.testing.expectEqualStrings("--guest-worker", worker_argv[1]);

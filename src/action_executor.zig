@@ -22,6 +22,10 @@ pub const Error = error{
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
 
+pub const ExecuteOptions = struct {
+    isolation: action_runner.Isolation = .none,
+};
+
 pub fn executeAndCacheAction(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -30,7 +34,7 @@ pub fn executeAndCacheAction(
     work_root: std.Io.Dir,
     action_digest: cas.Digest,
 ) !action_runner.Outcome {
-    var outcome = try executeAction(io, allocator, blob_store, work_root, action_digest);
+    var outcome = try executeActionWithOptions(io, allocator, blob_store, work_root, action_digest, .{});
     errdefer outcome.deinit(allocator);
 
     var result = try actionResultFromOutcomeOwned(allocator, outcome);
@@ -51,13 +55,25 @@ pub fn executeAction(
     work_root: std.Io.Dir,
     action_digest: cas.Digest,
 ) !action_runner.Outcome {
+    return executeActionWithOptions(io, allocator, store, work_root, action_digest, .{});
+}
+
+pub fn executeActionWithOptions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    action_digest: cas.Digest,
+    options: ExecuteOptions,
+) !action_runner.Outcome {
     const action_bytes = store.readAlloc(io, allocator, action_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingActionBlob,
         else => return err,
     };
     defer allocator.free(action_bytes);
     var action_reader = protobuf.Reader.init(action_bytes);
-    const action = try reapi.Action.decode(&action_reader);
+    var action = try reapi.Action.decodeOwned(allocator, &action_reader);
+    defer action.deinit(allocator);
 
     const command_digest = try cas.Digest.fromReapi(action.command_digest orelse return error.MissingCommandDigest);
     const command_bytes = store.readAlloc(io, allocator, command_digest) catch |err| switch (err) {
@@ -102,7 +118,18 @@ pub fn executeAction(
         break :cwd resolved;
     };
 
-    var outcome = try action_runner.runCommand(io, allocator, store, command, cwd);
+    const chroot_cwd = if (command.working_directory.len == 0)
+        "/"
+    else
+        try std.fmt.allocPrint(allocator, "/{s}", .{command.working_directory});
+    defer if (command.working_directory.len != 0) allocator.free(chroot_cwd);
+
+    var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, cwd, .{
+        .isolation = options.isolation,
+        .chroot_dir = if (options.isolation == .chroot) cwd_buffer[0..cwd_len] else null,
+        .chroot_cwd = chroot_cwd,
+        .cgroup_limits = action_runner.CgroupLimits.fromPlatform(action.platform),
+    });
     errdefer outcome.deinit(allocator);
     try collectOutputFiles(io, allocator, store, work_root, command, &outcome);
     return outcome;

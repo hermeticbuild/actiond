@@ -4,6 +4,7 @@ const bytestream = @import("bytestream.zig");
 const bytestream_service = @import("bytestream_service.zig");
 const action_cache = @import("action_cache.zig");
 const action_cache_service = @import("action_cache_service.zig");
+const action_executor = @import("action_executor.zig");
 const cache_service = @import("cache_service.zig");
 const capabilities_service = @import("capabilities_service.zig");
 const cas = @import("cas.zig");
@@ -34,6 +35,7 @@ pub const Server = struct {
     store: cas.Store,
     action_cache_store: ?action_cache.Store = null,
     work_root: ?std.Io.Dir = null,
+    execution_options: action_executor.ExecuteOptions = .{},
 
     pub fn init(store: cas.Store) Server {
         return .{ .store = store };
@@ -121,6 +123,7 @@ pub const Server = struct {
                 self.action_cache_store,
                 work_root,
                 request,
+                self.execution_options,
             );
             defer operation.deinit(allocator);
             return try encodeResponse(allocator, operation.operation);

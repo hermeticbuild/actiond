@@ -30,6 +30,7 @@ pub fn execute(
     result_store: ?action_cache.Store,
     work_root: std.Io.Dir,
     request: reapi.ExecuteRequest,
+    options: action_executor.ExecuteOptions,
 ) !CompletedOperation {
     const action_digest = try cas.Digest.fromReapi(request.action_digest orelse return error.MissingActionDigest);
 
@@ -55,7 +56,7 @@ pub fn execute(
     };
     defer work_dir.close(io);
 
-    var outcome = try action_executor.executeAction(io, allocator, blob_store, work_dir, action_digest);
+    var outcome = try action_executor.executeActionWithOptions(io, allocator, blob_store, work_dir, action_digest, options);
     defer outcome.deinit(allocator);
 
     var result = try action_executor.actionResultFromOutcomeOwned(allocator, outcome);
@@ -184,7 +185,7 @@ test "execute returns completed operation and populates action cache" {
     var action_hash: [64]u8 = undefined;
     var operation = try execute(std.testing.io, std.testing.allocator, blob_store, result_store, work_dir, .{
         .action_digest = action_digest.toReapi(&action_hash),
-    });
+    }, .{});
     defer operation.deinit(std.testing.allocator);
 
     try std.testing.expect(operation.operation.done);
@@ -198,7 +199,7 @@ test "execute returns completed operation and populates action cache" {
 
     var cached_operation = try execute(std.testing.io, std.testing.allocator, blob_store, result_store, work_dir, .{
         .action_digest = action_digest.toReapi(&action_hash),
-    });
+    }, .{});
     defer cached_operation.deinit(std.testing.allocator);
 
     var cached_response_reader = protobuf.Reader.init(cached_operation.operation.response.?.value);

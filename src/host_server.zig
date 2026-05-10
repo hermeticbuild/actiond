@@ -1,5 +1,7 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
+const action_executor = @import("action_executor.zig");
 const cas = @import("cas.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
@@ -61,11 +63,19 @@ pub fn serve(
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
         .work_root = work_dir,
+        .execution_options = defaultExecutionOptions(),
     };
 
     return grpc_http2_server.serve(io, allocator, .{
         .listen = options.listen,
     }, server);
+}
+
+fn defaultExecutionOptions() action_executor.ExecuteOptions {
+    return if (builtin.os.tag == .linux)
+        .{ .isolation = .chroot }
+    else
+        .{};
 }
 
 test "parseServeArgs accepts split and equals flags" {
