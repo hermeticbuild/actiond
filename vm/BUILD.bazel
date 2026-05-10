@@ -1,0 +1,37 @@
+genrule(
+    name = "initramfs",
+    srcs = ["//cmd/linux_actiond:linux-actiond-guest-aarch64"],
+    outs = ["initramfs.cpio"],
+    cmd = "python3 $(location //tools:initramfs_newc.py) $@ $(location //cmd/linux_actiond:linux-actiond-guest-aarch64)",
+    tools = ["//tools:initramfs_newc.py"],
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "linux_kernel",
+    srcs = ["linux.config"],
+    outs = ["Image"],
+    cmd = """
+set -euo pipefail
+if [ -z "$${LINUX_SRC:-}" ]; then
+  echo "Set LINUX_SRC to a Linux source checkout and build with --action_env=LINUX_SRC=/path/to/linux" >&2
+  exit 1
+fi
+mkdir -p "$(@D)/kbuild"
+cp "$(location linux.config)" "$(@D)/kbuild/.config"
+make -C "$${LINUX_SRC}" O="$(@D)/kbuild" ARCH=arm64 olddefconfig Image
+cp "$(@D)/kbuild/arch/arm64/boot/Image" "$@"
+""",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "vm_bundle",
+    srcs = [
+        ":initramfs",
+        ":linux_kernel",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
