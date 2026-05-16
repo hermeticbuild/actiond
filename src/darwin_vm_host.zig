@@ -1,5 +1,6 @@
 const std = @import("std");
-const zstd = std.compress.zstd;
+const builtin = @import("builtin");
+const zstd = if (builtin.os.tag == .macos) @import("c") else struct {};
 const cas = @import("cas.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
@@ -218,24 +219,39 @@ fn prepareBootInitramfs(
         else => return err,
     }
 
-    var input = std.Io.Reader.fixed(compressed);
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    defer output.deinit();
-
-    const window = try allocator.alloc(u8, zstd.default_window_len + zstd.block_size_max);
-    defer allocator.free(window);
-    var decompressor: zstd.Decompress = .init(&input, window, .{});
-    const raw_len = try decompressor.reader.streamRemaining(&output.writer);
-    if (raw_len > max_raw_initramfs_bytes) return error.FileTooBig;
+    const raw = try decompressZstdAlloc(allocator, compressed);
+    defer allocator.free(raw);
 
     var file = try root_dir.createFile(io, output_rel, .{ .truncate = true });
     defer file.close(io);
     var file_buffer: [128 * 1024]u8 = undefined;
     var file_writer = file.writer(io, &file_buffer);
-    try file_writer.interface.writeAll(output.writer.buffered());
+    try file_writer.interface.writeAll(raw);
     try file_writer.interface.flush();
 
     return try absoluteSubPath(io, allocator, root_dir, output_rel);
+}
+
+fn decompressZstdAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+    const content_size = zstd.ZSTD_getFrameContentSize(compressed.ptr, compressed.len);
+    if (content_size == zstdContentSizeError()) return error.InvalidCompressedInitramfs;
+    if (content_size == zstdContentSizeUnknown()) return error.UnknownCompressedInitramfsSize;
+    if (content_size > max_raw_initramfs_bytes) return error.FileTooBig;
+
+    const raw = try allocator.alloc(u8, @intCast(content_size));
+    errdefer allocator.free(raw);
+    const actual_size = zstd.ZSTD_decompress(raw.ptr, raw.len, compressed.ptr, compressed.len);
+    if (zstd.ZSTD_isError(actual_size) != 0) return error.InvalidCompressedInitramfs;
+    if (actual_size != raw.len) return error.InvalidCompressedInitramfs;
+    return raw;
+}
+
+fn zstdContentSizeUnknown() c_ulonglong {
+    return std.math.maxInt(c_ulonglong);
+}
+
+fn zstdContentSizeError() c_ulonglong {
+    return std.math.maxInt(c_ulonglong) - 1;
 }
 
 fn isZstdInitramfsPath(path: []const u8) bool {
@@ -307,4 +323,19 @@ test "prepareBootInitramfs leaves raw initramfs paths unchanged" {
 test "isZstdInitramfsPath detects zstd initramfs names" {
     try std.testing.expect(isZstdInitramfsPath("/tmp/initramfs.cpio.zst"));
     try std.testing.expect(!isZstdInitramfsPath("/tmp/initramfs.cpio"));
+}
+
+test "decompressZstdAlloc inflates libzstd frames" {
+    const plain = "initramfs payload";
+    const bound = zstd.ZSTD_compressBound(plain.len);
+    if (zstd.ZSTD_isError(bound) != 0) return error.ZstdCompressBoundFailed;
+
+    const compressed = try std.testing.allocator.alloc(u8, bound);
+    defer std.testing.allocator.free(compressed);
+    const compressed_len = zstd.ZSTD_compress(compressed.ptr, compressed.len, plain.ptr, plain.len, 19);
+    if (zstd.ZSTD_isError(compressed_len) != 0) return error.ZstdCompressFailed;
+
+    const decompressed = try decompressZstdAlloc(std.testing.allocator, compressed[0..compressed_len]);
+    defer std.testing.allocator.free(decompressed);
+    try std.testing.expectEqualStrings(plain, decompressed);
 }

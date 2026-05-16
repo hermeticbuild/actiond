@@ -1,6 +1,11 @@
-load("@darwin_sdk//:defs.bzl", "DARWIN_SDK_LINKOPTS")
 load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+MACOS_SDK = "@macos_sdk//sysroot:sysroot"
+MACOS_SDK_LINKOPTS = [
+    "-F$(execpath %s)/System/Library/Frameworks" % MACOS_SDK,
+    "-L$(execpath %s)/usr/lib" % MACOS_SDK,
+]
 
 objc_library(
     name = "vz_bridge",
@@ -18,12 +23,15 @@ objc_library(
 
 zig_binary(
     name = "darwin-actiond-bin",
-    linkopts = DARWIN_SDK_LINKOPTS,
+    data = [MACOS_SDK],
+    extra_srcs = [MACOS_SDK],
+    linkopts = MACOS_SDK_LINKOPTS,
     main = "main.zig",
     target_compatible_with = ["@platforms//os:macos"],
     deps = [
         ":vz_bridge",
         "//src:actiond",
+        "@zstd",
     ],
 )
 
@@ -49,18 +57,21 @@ zig_binary(
     name = "darwin-actiond-standalone-bin",
     data = [
         ":darwin-standalone-payload",
+        MACOS_SDK,
     ],
     extra_srcs = [
         ":darwin-standalone-payload",
+        MACOS_SDK,
     ],
     linkopts = [
         "$(location :darwin-standalone-payload)",
-    ] + DARWIN_SDK_LINKOPTS,
+    ] + MACOS_SDK_LINKOPTS,
     main = "main.zig",
     target_compatible_with = ["@platforms//os:macos"],
     deps = [
         ":vz_bridge",
         "//src:actiond",
+        "@zstd",
     ],
 )
 

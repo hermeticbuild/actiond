@@ -39,6 +39,7 @@ zig_library(
         "vsock.zig",
     ],
     import_name = "actiond",
+    deps = ["@zstd"],
     visibility = ["//visibility:public"],
 )
 
@@ -80,4 +81,5 @@ zig_test(
         "version.zig",
         "vsock.zig",
     ],
+    deps = ["@zstd"],
 )

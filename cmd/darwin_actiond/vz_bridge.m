@@ -1,5 +1,25 @@
-#import <Foundation/Foundation.h>
-#import <Virtualization/Virtualization.h>
+#import <Foundation/NSArray.h>
+#import <Foundation/NSError.h>
+#import <Foundation/NSFileHandle.h>
+#import <Foundation/NSObject.h>
+#import <Foundation/NSString.h>
+#import <Foundation/NSURL.h>
+#import <Virtualization/VZDiskImageStorageDeviceAttachment.h>
+#import <Virtualization/VZFileHandleSerialPortAttachment.h>
+#import <Virtualization/VZGenericPlatformConfiguration.h>
+#import <Virtualization/VZLinuxBootLoader.h>
+#import <Virtualization/VZSharedDirectory.h>
+#import <Virtualization/VZSingleDirectoryShare.h>
+#import <Virtualization/VZSocketDevice.h>
+#import <Virtualization/VZVirtioBlockDeviceConfiguration.h>
+#import <Virtualization/VZVirtioConsoleDeviceSerialPortConfiguration.h>
+#import <Virtualization/VZVirtioEntropyDeviceConfiguration.h>
+#import <Virtualization/VZVirtioFileSystemDeviceConfiguration.h>
+#import <Virtualization/VZVirtioSocketConnection.h>
+#import <Virtualization/VZVirtioSocketDevice.h>
+#import <Virtualization/VZVirtioSocketDeviceConfiguration.h>
+#import <Virtualization/VZVirtualMachine.h>
+#import <Virtualization/VZVirtualMachineConfiguration.h>
 
 #include <dispatch/dispatch.h>
 #include <errno.h>
