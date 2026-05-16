@@ -5,6 +5,7 @@ module(
 
 bazel_dep(name = "rules_zig", version = "0.14.0")
 bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "squashfs-tools", version = "4.7.5")
 bazel_dep(name = "platforms", version = "1.0.0")
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
@@ -29,4 +30,60 @@ filegroup(
     sha256 = "cc12a7644b4cef9e06627b29de8753e22b3d076703a9b52be84263e05c8b9830",
     strip_prefix = "linux-6.12.87",
     urls = ["https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.87.tar.xz"],
+)
+
+glibc_deb_runtime = use_repo_rule("//runtimes:glibc_runtime_repo.bzl", "glibc_deb_runtime")
+
+glibc_deb_runtime(
+    name = "glibc_2_31_aarch64",
+    arch = "aarch64",
+    interpreters = ["/lib/ld-linux-aarch64.so.1"],
+    libc = "glibc2.31",
+    sha256s = ["4ff60d84ad78f3aa598297dc6966549fa6489f57599f197562ad91547f388da0"],
+    urls = ["https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_arm64.deb"],
+)
+
+glibc_deb_runtime(
+    name = "glibc_2_31_x86_64",
+    arch = "x86_64",
+    interpreters = ["/lib64/ld-linux-x86-64.so.2"],
+    libc = "glibc2.31",
+    sha256s = ["1b2281aac4935dfea1f89dfc19e445fdbb45303202af60679ccb8bf035f081a0"],
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_amd64.deb"],
+)
+
+glibc_deb_runtime(
+    name = "glibc_2_35_aarch64",
+    arch = "aarch64",
+    interpreters = ["/lib/ld-linux-aarch64.so.1"],
+    libc = "glibc2.35",
+    sha256s = ["39268442551926cf1234a382cd0b2748d9e1db709cac1747d07bbff4b0d76a35"],
+    urls = ["https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb"],
+)
+
+glibc_deb_runtime(
+    name = "glibc_2_35_x86_64",
+    arch = "x86_64",
+    interpreters = ["/lib64/ld-linux-x86-64.so.2"],
+    libc = "glibc2.35",
+    sha256s = ["48f29742cb2096895e932c6708dfebb498e1e96f5cb09955edae42beb6f01dfa"],
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_amd64.deb"],
+)
+
+glibc_deb_runtime(
+    name = "glibc_2_39_aarch64",
+    arch = "aarch64",
+    interpreters = ["/lib/ld-linux-aarch64.so.1"],
+    libc = "glibc2.39",
+    sha256s = ["7d25b6ffc4df6deefd1a48efff5792d6a6bd89ac064a2a8b88e796d3d533e095"],
+    urls = ["https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb"],
+)
+
+glibc_deb_runtime(
+    name = "glibc_2_39_x86_64",
+    arch = "x86_64",
+    interpreters = ["/lib64/ld-linux-x86-64.so.2"],
+    libc = "glibc2.39",
+    sha256s = ["955644e8bc2930a9bf8eea5e4c2237c8a118c1e2ac2845b993b6f7f35eefd293"],
+    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_amd64.deb"],
 )
