@@ -44,6 +44,12 @@ cleanup_e2e_server() {
     kill "${e2e_server_pid}" >/dev/null 2>&1 || true
     wait "${e2e_server_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${e2e_root}" && "$(uname -s)" == "Linux" ]]; then
+    local runtime_mount="${e2e_root}/server/runtimes"
+    if [[ -d "${runtime_mount}" ]] && awk -v path="${runtime_mount}" '$5 == path { found = 1 } END { exit(found ? 0 : 1) }' /proc/self/mountinfo; then
+      umount -l "${runtime_mount}" >/dev/null 2>&1 || true
+    fi
+  fi
   if [[ -n "${e2e_root}" ]]; then
     if [[ "${ACTIOND_E2E_KEEP_TMP:-0}" == "1" ]]; then
       echo "kept e2e root: ${e2e_root}" >&2
