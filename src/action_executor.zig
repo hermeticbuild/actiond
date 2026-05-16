@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
 const action_runner = @import("action_runner.zig");
@@ -16,14 +17,19 @@ pub const Error = error{
     MissingFileDigest,
     MissingInputBlob,
     MissingInputRootDigest,
+    MissingRuntimeRoot,
     OutputParentCreateFailed,
     InvalidDirectoryEntryName,
+    UnsupportedLibcRuntime,
     UnsupportedOutputDirectoryEntry,
+    UnsupportedRuntimeArch,
 };
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
 
-pub const ExecuteOptions = struct {};
+pub const ExecuteOptions = struct {
+    runtime_root_path: ?[]const u8 = null,
+};
 
 pub fn executeAndCacheAction(
     io: std.Io,
@@ -97,37 +103,72 @@ pub fn executeActionWithOptions(
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
     const work_root_path = cwd_buffer[0..cwd_len];
 
-    const materializer = execroot.Materializer.init(store, work_root);
+    const libc_runtime = try libcRuntimeFromPlatform(action.platform);
+    const use_workspace_chroot = libc_runtime != null;
+    var exec_root_dir = work_root;
+    var workspace_dir: ?std.Io.Dir = null;
+    defer if (workspace_dir) |*dir| dir.close(io);
+
+    var exec_root_path_owned: ?[]u8 = null;
+    defer if (exec_root_path_owned) |path| allocator.free(path);
+    const exec_root_path = if (use_workspace_chroot) path: {
+        try work_root.createDirPath(io, "workspace");
+        workspace_dir = try work_root.openDir(io, "workspace", .{});
+        exec_root_dir = workspace_dir.?;
+        const value = try std.fmt.allocPrint(allocator, "{s}/workspace", .{work_root_path});
+        exec_root_path_owned = value;
+        break :path value;
+    } else work_root_path;
+
+    const materializer = execroot.Materializer.init(store, exec_root_dir);
     var materialization = materializer.materializeInputs(io, allocator, inputs.items, .{
-        .chroot_root_path = work_root_path,
+        .chroot_root_path = exec_root_path,
         .directory_inputs = directory_inputs.items,
     }) catch |err| switch (err) {
         error.FileNotFound, error.MissingInputTree => return error.MissingInputBlob,
         else => return err,
     };
     defer materialization.deinit(allocator);
-    prepareOutputParents(io, work_root, command) catch |err| switch (err) {
+    prepareOutputParents(io, exec_root_dir, command) catch |err| switch (err) {
         error.FileNotFound => return error.OutputParentCreateFailed,
         else => return err,
     };
 
-    const chroot_cwd = if (command.working_directory.len == 0)
-        "/"
-    else cwd: {
+    const chroot_cwd_prefix = if (use_workspace_chroot) "/workspace" else "";
+    var chroot_cwd_owned: ?[]u8 = null;
+    defer if (chroot_cwd_owned) |path| allocator.free(path);
+    const chroot_cwd = if (command.working_directory.len == 0) cwd: {
+        break :cwd if (use_workspace_chroot) "/workspace" else "/";
+    } else cwd: {
         try execroot.validatePath(command.working_directory);
-        break :cwd try std.fmt.allocPrint(allocator, "/{s}", .{command.working_directory});
+        const value = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ chroot_cwd_prefix, command.working_directory });
+        chroot_cwd_owned = value;
+        break :cwd value;
     };
-    defer if (command.working_directory.len != 0) allocator.free(chroot_cwd);
 
-    _ = options;
+    var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
+    const borrowed_bind_mount_count = materialization.bind_mounts.len;
+    defer {
+        for (bind_mounts.items[borrowed_bind_mount_count..]) |mount| {
+            allocator.free(mount.source);
+            allocator.free(mount.target);
+        }
+        bind_mounts.deinit(allocator);
+    }
+    try bind_mounts.appendSlice(allocator, materialization.bind_mounts);
+    if (libc_runtime) |libc| {
+        const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
+        try appendLibcRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, libc, &bind_mounts);
+    }
+
     var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, .{
         .chroot_dir = work_root_path,
         .chroot_cwd = chroot_cwd,
-        .bind_mounts = materialization.bind_mounts,
+        .bind_mounts = bind_mounts.items,
         .cgroup_limits = action_runner.CgroupLimits.fromPlatform(action.platform),
     });
     errdefer outcome.deinit(allocator);
-    try collectOutputFiles(io, allocator, store, work_root, command, &outcome);
+    try collectOutputFiles(io, allocator, store, exec_root_dir, command, &outcome);
     return outcome;
 }
 
@@ -145,6 +186,91 @@ pub fn actionResultFromOutcome(
         .stdout_digest = if (outcome.stdout_digest) |digest| digest.toReapi(stdout_hash) else null,
         .stderr_digest = if (outcome.stderr_digest) |digest| digest.toReapi(stderr_hash) else null,
     };
+}
+
+fn libcRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
+    const value = platform orelse return null;
+    for (value.properties) |property| {
+        if (!std.mem.eql(u8, property.name, "libc")) continue;
+        if (property.value.len == 0 or std.mem.eql(u8, property.value, "none")) return null;
+        if (std.mem.eql(u8, property.value, "glibc2.31")) return "glibc2.31";
+        if (std.mem.eql(u8, property.value, "glibc2.35")) return "glibc2.35";
+        if (std.mem.eql(u8, property.value, "glibc2.39")) return "glibc2.39";
+        return error.UnsupportedLibcRuntime;
+    }
+    return null;
+}
+
+fn runtimeArch() ![]const u8 {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => "aarch64",
+        .x86_64 => "x86_64",
+        else => error.UnsupportedRuntimeArch,
+    };
+}
+
+fn appendLibcRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    runtime_root_path: []const u8,
+    libc: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    const arch = try runtimeArch();
+    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/libc/{s}/{s}/root", .{ runtime_root_path, libc, arch });
+    defer allocator.free(runtime_root);
+
+    try appendFirstExistingRuntimeMount(io, allocator, chroot_dir, chroot_path, runtime_root, &.{ "lib", "usr/lib" }, "lib", bind_mounts);
+    try appendFirstExistingRuntimeMount(io, allocator, chroot_dir, chroot_path, runtime_root, &.{ "lib64", "usr/lib64" }, "lib64", bind_mounts);
+    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "usr/lib", "usr/lib", bind_mounts);
+    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "etc", "etc", bind_mounts);
+}
+
+fn appendFirstExistingRuntimeMount(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    runtime_root: []const u8,
+    source_candidates: []const []const u8,
+    target_rel: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    for (source_candidates) |source_rel| {
+        if (try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, source_rel, target_rel, bind_mounts)) return;
+    }
+}
+
+fn appendRuntimeMountIfExists(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    runtime_root: []const u8,
+    source_rel: []const u8,
+    target_rel: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !bool {
+    const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ runtime_root, source_rel }, 0);
+    errdefer allocator.free(source);
+    std.Io.Dir.cwd().access(io, source, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            allocator.free(source);
+            return false;
+        },
+        else => |e| return e,
+    };
+
+    try chroot_dir.createDirPath(io, target_rel);
+    const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ chroot_path, target_rel }, 0);
+    errdefer allocator.free(target);
+    try bind_mounts.append(allocator, .{
+        .source = source,
+        .target = target,
+    });
+    return true;
 }
 
 pub const OwnedActionResult = struct {
@@ -652,6 +778,67 @@ fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
             else => return error.WriteFailed,
         }
     }
+}
+
+test "libc runtime platform property accepts pinned runtimes" {
+    try std.testing.expectEqualStrings("glibc2.31", (try libcRuntimeFromPlatform(.{
+        .properties = &.{.{ .name = "libc", .value = "glibc2.31" }},
+    })).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), try libcRuntimeFromPlatform(.{
+        .properties = &.{.{ .name = "libc", .value = "none" }},
+    }));
+    try std.testing.expectError(error.UnsupportedLibcRuntime, libcRuntimeFromPlatform(.{
+        .properties = &.{.{ .name = "libc", .value = "glibc2.17" }},
+    }));
+}
+
+test "appendLibcRuntimeMounts maps runtime directories into chroot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const arch = try runtimeArch();
+    const runtime_usr_lib = try std.fmt.allocPrint(std.testing.allocator, "runtimes/libc/glibc2.35/{s}/root/usr/lib", .{arch});
+    defer std.testing.allocator.free(runtime_usr_lib);
+    const runtime_etc = try std.fmt.allocPrint(std.testing.allocator, "runtimes/libc/glibc2.35/{s}/root/etc", .{arch});
+    defer std.testing.allocator.free(runtime_etc);
+    try tmp.dir.createDirPath(std.testing.io, runtime_usr_lib);
+    try tmp.dir.createDirPath(std.testing.io, runtime_etc);
+    try tmp.dir.createDirPath(std.testing.io, "chroot");
+
+    var chroot_dir = try tmp.dir.openDir(std.testing.io, "chroot", .{});
+    defer chroot_dir.close(std.testing.io);
+
+    var base_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buffer);
+    const base_path = base_buffer[0..base_len];
+    const runtime_root_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/runtimes", .{base_path});
+    defer std.testing.allocator.free(runtime_root_path);
+    const chroot_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/chroot", .{base_path});
+    defer std.testing.allocator.free(chroot_path);
+
+    var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
+    defer {
+        for (bind_mounts.items) |mount| {
+            std.testing.allocator.free(mount.source);
+            std.testing.allocator.free(mount.target);
+        }
+        bind_mounts.deinit(std.testing.allocator);
+    }
+
+    try appendLibcRuntimeMounts(
+        std.testing.io,
+        std.testing.allocator,
+        chroot_dir,
+        chroot_path,
+        runtime_root_path,
+        "glibc2.35",
+        &bind_mounts,
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), bind_mounts.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].target, "/chroot/lib"));
+    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[1].target, "/chroot/usr/lib"));
+    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[2].target, "/chroot/etc"));
 }
 
 test "collectInputs preserves materialized tree directories" {
