@@ -22,6 +22,7 @@ Environment:
   ACTIOND_E2E_BARE_COUNT=160
   ACTIOND_E2E_SOURCE_DIRS=8
   ACTIOND_E2E_SOURCE_FILES_PER_DIR=32
+  ACTIOND_E2E_STANDALONE=1
 EOF
 }
 
@@ -148,20 +149,27 @@ run_linux_e2e() {
   arch="$(host_arch)"
   prepare_stress_workspace "${arch}"
 
-  run_bazel build //cmd/linux_actiond:linux-actiond
-  run_bazel build //runtimes:runtimes_squashfs
-  local server
-  server="$(bazel_output //cmd/linux_actiond:linux-actiond)"
-  local runtimes
-  runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
-  local root
+  local server root
   root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-e2e.XXXXXX")"
+  local -a server_args
+  server_args=(
+    --listen="${endpoint}"
+    --root="${root}/server"
+  )
+  if [[ "${ACTIOND_E2E_STANDALONE:-0}" == "1" ]]; then
+    run_bazel build //cmd/linux_actiond:linux-actiond-standalone
+    server="$(bazel_output //cmd/linux_actiond:linux-actiond-standalone)"
+  else
+    run_bazel build //cmd/linux_actiond:linux-actiond
+    run_bazel build //runtimes:runtimes_squashfs
+    server="$(bazel_output //cmd/linux_actiond:linux-actiond)"
+    local runtimes
+    runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
+    server_args+=(--runtime-image="${runtimes}")
+  fi
   local log="${root}/linux-actiond.log"
 
-  "${server}" serve \
-    --listen="${endpoint}" \
-    --root="${root}/server" \
-    --runtime-image="${runtimes}" >"${log}" 2>&1 &
+  "${server}" serve "${server_args[@]}" >"${log}" 2>&1 &
   e2e_server_pid="$!"
   e2e_root="${root}"
   e2e_log="${log}"
@@ -186,24 +194,36 @@ run_vm_e2e() {
   fi
 
   prepare_stress_workspace aarch64
-  run_bazel build //cmd/darwin_actiond:darwin-actiond-signed //vm:initramfs //runtimes:runtimes_squashfs
 
-  local kernel initramfs runtimes server root log
-  kernel="$(kernel_path)"
-  initramfs="$(bazel_output //vm:initramfs)"
-  runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
-  server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
+  local server root log
+  local -a server_args
   root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-vm-e2e.XXXXXX")"
   log="${root}/darwin-actiond-vm.log"
+  server_args=(
+    --listen="${endpoint}"
+    --root="${root}/server"
+    --memory-mib="${ACTIOND_VM_MEMORY_MIB:-1024}"
+    --cpus="${ACTIOND_VM_CPUS:-4}"
+  )
 
-  "${server}" serve-vm \
-    --listen="${endpoint}" \
-    --root="${root}/server" \
-    --kernel="${kernel}" \
-    --initramfs="${initramfs}" \
-    --runtime-image="${runtimes}" \
-    --memory-mib="${ACTIOND_VM_MEMORY_MIB:-1024}" \
-    --cpus="${ACTIOND_VM_CPUS:-4}" >"${log}" 2>&1 &
+  if [[ "${ACTIOND_E2E_STANDALONE:-0}" == "1" ]]; then
+    run_bazel build //cmd/darwin_actiond:darwin-actiond-standalone
+    server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-standalone)"
+  else
+    run_bazel build //cmd/darwin_actiond:darwin-actiond-signed //vm:initramfs //runtimes:runtimes_squashfs
+    local kernel initramfs runtimes
+    kernel="$(kernel_path)"
+    initramfs="$(bazel_output //vm:initramfs)"
+    runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
+    server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
+    server_args+=(
+      --kernel="${kernel}"
+      --initramfs="${initramfs}"
+      --runtime-image="${runtimes}"
+    )
+  fi
+
+  "${server}" serve-vm "${server_args[@]}" >"${log}" 2>&1 &
   e2e_server_pid="$!"
   e2e_root="${root}"
   e2e_log="${log}"

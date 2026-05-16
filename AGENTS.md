@@ -27,6 +27,14 @@ For the Virtualization.framework path on macOS, run:
 tools/e2e.sh vm
 ```
 
+To exercise single-binary embedded artifacts instead of passing the runtime,
+kernel, and initramfs paths explicitly, set:
+
+```bash
+ACTIOND_E2E_STANDALONE=1 tools/docker/run_linux_e2e.sh
+ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
+```
+
 Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.
 
 The VM guest mounts the host CAS share read-only at `/cas-ro` and uses a tmpfs
