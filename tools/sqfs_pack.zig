@@ -77,6 +77,11 @@ const Super = struct {
     directory_table_start: u64,
 };
 
+const FileDataRef = struct {
+    data_start: u64,
+    block_sizes: []u32,
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = std.heap.smp_allocator;
@@ -251,10 +256,28 @@ fn writeFileData(
     var buffer = try allocator.alloc(u8, block_size);
     defer allocator.free(buffer);
 
+    var file_data_cache: std.StringHashMapUnmanaged(FileDataRef) = .empty;
+    defer {
+        var it = file_data_cache.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.block_sizes);
+        }
+        file_data_cache.deinit(allocator);
+    }
+
     for (nodes.items) |*node| {
         if (node.kind != .file) continue;
         node.data_start = @intCast(writer.end);
         if (node.size == 0) continue;
+
+        const digest = try hashFile(io, root, node.path, node.size, buffer);
+        const digest_hex = std.fmt.bytesToHex(digest, .lower);
+        if (file_data_cache.get(digest_hex[0..])) |cached| {
+            node.data_start = cached.data_start;
+            try node.block_sizes.appendSlice(allocator, cached.block_sizes);
+            continue;
+        }
 
         var file = try root.openFile(io, node.path, .{});
         defer file.close(io);
@@ -267,7 +290,40 @@ fn writeFileData(
             try node.block_sizes.append(allocator, disk_size);
             remaining -= want;
         }
+
+        const cache_key = try allocator.dupe(u8, digest_hex[0..]);
+        errdefer allocator.free(cache_key);
+        const cache_blocks = try allocator.dupe(u32, node.block_sizes.items);
+        errdefer allocator.free(cache_blocks);
+        try file_data_cache.put(allocator, cache_key, .{
+            .data_start = node.data_start,
+            .block_sizes = cache_blocks,
+        });
     }
+}
+
+fn hashFile(
+    io: std.Io,
+    root: std.Io.Dir,
+    path: []const u8,
+    size: u64,
+    buffer: []u8,
+) ![32]u8 {
+    var file = try root.openFile(io, path, .{});
+    defer file.close(io);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var remaining = size;
+    while (remaining != 0) {
+        const want: usize = @intCast(@min(@as(u64, block_size), remaining));
+        try readFull(file.handle, buffer[0..want]);
+        hasher.update(buffer[0..want]);
+        remaining -= want;
+    }
+
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
 }
 
 fn readFull(fd: std.Io.File.Handle, buffer: []u8) !void {
@@ -567,6 +623,41 @@ test "zstd max compression round trips" {
 
     try std.testing.expectEqual(plain.len, n);
     try std.testing.expectEqualStrings(plain, output.writer.buffered());
+}
+
+test "writeFileData reuses duplicate file payloads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "same payload" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b", .data = "same payload" });
+
+    var nodes: std.ArrayListUnmanaged(Node) = .empty;
+    defer {
+        for (nodes.items) |*node| node.deinit(std.testing.allocator);
+        nodes.deinit(std.testing.allocator);
+    }
+
+    try nodes.append(std.testing.allocator, .{
+        .name = try std.testing.allocator.dupe(u8, ""),
+        .path = try std.testing.allocator.dupe(u8, ""),
+        .kind = .directory,
+        .mode = 0o755,
+        .parent = null,
+        .inode_number = 1,
+    });
+    try scanDirectory(std.testing.io, std.testing.allocator, tmp.dir, &nodes, 0, "");
+
+    var image: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer image.deinit();
+    try writeFileData(std.testing.io, std.testing.allocator, tmp.dir, &nodes, &image.writer);
+
+    const a = nodes.items[1];
+    const b = nodes.items[2];
+    try std.testing.expectEqualStrings("a", a.name);
+    try std.testing.expectEqualStrings("b", b.name);
+    try std.testing.expectEqual(a.data_start, b.data_start);
+    try std.testing.expectEqualSlices(u32, a.block_sizes.items, b.block_sizes.items);
 }
 
 test "padTo extends to alignment without touching aligned writers" {
