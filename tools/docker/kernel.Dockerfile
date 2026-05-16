@@ -16,6 +16,7 @@ RUN apt-get update \
         libssl-dev \
         make \
         perl \
+        rsync \
         xz-utils \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu; \

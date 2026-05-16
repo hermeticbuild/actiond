@@ -16,14 +16,29 @@ run_kbuild() {
   local jobs
   jobs="${ACTIOND_KERNEL_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
+  local config_abs
+  case "${config}" in
+    /*) config_abs="${config}" ;;
+    *) config_abs="$(pwd)/${config}" ;;
+  esac
+
   rm -rf "${kbuild_out}"
   mkdir -p "${kbuild_out}"
-  cp "${config}" "${kbuild_out}/.config"
-  "${make_bin}" -C "${kernel_src}" O="${kbuild_out}" ARCH=arm64 "${cross_compile_arg[@]}" olddefconfig
+  KCONFIG_ALLCONFIG="${config_abs}" "${make_bin}" -C "${kernel_src}" O="${kbuild_out}" ARCH=arm64 "${cross_compile_arg[@]}" allnoconfig
   "${make_bin}" -C "${kernel_src}" O="${kbuild_out}" ARCH=arm64 "${cross_compile_arg[@]}" "-j${jobs}" Image
   rm -f "${out}.tmp" "${out}"
   cp "${kbuild_out}/arch/arm64/boot/Image" "${out}.tmp"
   mv -f "${out}.tmp" "${out}"
+}
+
+localize_kernel_src() {
+  local src="$1"
+  local dst="$2"
+
+  rm -rf "${dst}"
+  mkdir -p "${dst}"
+  src="$(cd "${src}" && pwd -P)"
+  rsync -a --delete --exclude .git "${src}/" "${dst}/"
 }
 
 run_with_timeout() {
@@ -74,8 +89,13 @@ docker_command() {
 }
 
 if [[ "${1:-}" == "--inside-docker" ]]; then
+  kernel_src="${ACTIOND_KERNEL_SRC:?}"
+  if [[ -n "${ACTIOND_KERNEL_LOCAL_SRC:-}" ]]; then
+    localize_kernel_src "${kernel_src}" "${ACTIOND_KERNEL_LOCAL_SRC}"
+    kernel_src="${ACTIOND_KERNEL_LOCAL_SRC}"
+  fi
   run_kbuild \
-    "${ACTIOND_KERNEL_SRC:?}" \
+    "${kernel_src}" \
     "${ACTIOND_KERNEL_CONFIG:?}" \
     "${ACTIOND_KBUILD_OUT:?}" \
     "${ACTIOND_KERNEL_OUT:?}"
@@ -116,8 +136,9 @@ case "$(uname -s)" in
       -w /work
       -e "ACTIOND_KERNEL_SRC=/work/${kernel_src}"
       -e "ACTIOND_KERNEL_CONFIG=/work/${config}"
-      -e "ACTIOND_KBUILD_OUT=/work/$(dirname "${out}")/kbuild"
+      -e "ACTIOND_KBUILD_OUT=/tmp/actiond-kbuild"
       -e "ACTIOND_KERNEL_OUT=/work/${out}"
+      -e "ACTIOND_KERNEL_LOCAL_SRC=/tmp/actiond-kernel-src"
     )
     if [[ -n "${ACTIOND_KERNEL_DOCKER_PLATFORM:-}" ]]; then
       docker_run_args=(--platform="${ACTIOND_KERNEL_DOCKER_PLATFORM}" "${docker_run_args[@]}")
