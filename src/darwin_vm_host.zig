@@ -1,4 +1,5 @@
 const std = @import("std");
+const zstd = std.compress.zstd;
 const cas = @import("cas.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
@@ -12,6 +13,9 @@ pub const Error = error{
     MissingVmKernel,
     UnknownServeArgument,
 };
+
+const max_compressed_initramfs_bytes = 128 * 1024 * 1024;
+const max_raw_initramfs_bytes = 512 * 1024 * 1024;
 
 pub const ServeVmOptions = struct {
     listen: []const u8 = "127.0.0.1:8980",
@@ -131,6 +135,9 @@ pub fn serve(
         null;
     defer if (embedded_initramfs) |path| allocator.free(path);
     const initramfs_path = options.initramfs orelse embedded_initramfs orelse return error.MissingVmInitramfs;
+    const raw_initramfs = try prepareBootInitramfs(io, allocator, root_dir, initramfs_path);
+    defer if (raw_initramfs) |path| allocator.free(path);
+    const boot_initramfs_path = raw_initramfs orelse initramfs_path;
 
     const embedded_runtime_image = if (options.runtime_image == null)
         try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.runtimes_name)
@@ -144,7 +151,7 @@ pub fn serve(
     const stderr = &stderr_writer.interface;
     try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas={s}\n", .{
         kernel_path,
-        initramfs_path,
+        boot_initramfs_path,
         runtime_image_path orelse "<none>",
         cas_path,
     });
@@ -152,7 +159,7 @@ pub fn serve(
 
     var vm = try darwin_vm.Machine.start(allocator, .{
         .kernel_path = kernel_path,
-        .initramfs_path = initramfs_path,
+        .initramfs_path = boot_initramfs_path,
         .runtime_image_path = runtime_image_path,
         .cas_path = cas_path,
         .memory_mib = options.memory_mib,
@@ -181,6 +188,71 @@ fn parseU64(value: []const u8) !u64 {
     return std.fmt.parseInt(u64, value, 10);
 }
 
+fn prepareBootInitramfs(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    initramfs_path: []const u8,
+) !?[]u8 {
+    if (!isZstdInitramfsPath(initramfs_path)) return null;
+
+    const compressed = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        initramfs_path,
+        allocator,
+        .limited(max_compressed_initramfs_bytes),
+    );
+    defer allocator.free(compressed);
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(compressed, &digest, .{});
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    const output_rel = try std.fmt.allocPrint(allocator, "boot/initramfs-{s}.cpio", .{digest_hex});
+    defer allocator.free(output_rel);
+
+    try root_dir.createDirPath(io, "boot");
+    if (root_dir.statFile(io, output_rel, .{})) |stat| {
+        if (stat.kind == .file) return try absoluteSubPath(io, allocator, root_dir, output_rel);
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    var input = std.Io.Reader.fixed(compressed);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+
+    const window = try allocator.alloc(u8, zstd.default_window_len + zstd.block_size_max);
+    defer allocator.free(window);
+    var decompressor: zstd.Decompress = .init(&input, window, .{});
+    const raw_len = try decompressor.reader.streamRemaining(&output.writer);
+    if (raw_len > max_raw_initramfs_bytes) return error.FileTooBig;
+
+    var file = try root_dir.createFile(io, output_rel, .{ .truncate = true });
+    defer file.close(io);
+    var file_buffer: [128 * 1024]u8 = undefined;
+    var file_writer = file.writer(io, &file_buffer);
+    try file_writer.interface.writeAll(output.writer.buffered());
+    try file_writer.interface.flush();
+
+    return try absoluteSubPath(io, allocator, root_dir, output_rel);
+}
+
+fn isZstdInitramfsPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".zst");
+}
+
+fn absoluteSubPath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    sub_path: []const u8,
+) ![]u8 {
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try root_dir.realPath(io, &root_buffer);
+    return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root_buffer[0..root_len], sub_path });
+}
+
 test "parseServeVmArgs accepts VM flags" {
     const options = try parseServeVmArgs(&.{
         "--listen=127.0.0.1:9999",
@@ -188,7 +260,7 @@ test "parseServeVmArgs accepts VM flags" {
         "/tmp/actiond-vm-test",
         "--kernel",
         "/tmp/Image",
-        "--initramfs=/tmp/initramfs.cpio",
+        "--initramfs=/tmp/initramfs.cpio.zst",
         "--runtime-image=/tmp/runtimes.sqfs",
         "--cas",
         "/tmp/actiond-cas",
@@ -203,7 +275,7 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqualStrings("127.0.0.1:9999", options.listen);
     try std.testing.expectEqualStrings("/tmp/actiond-vm-test", options.root);
     try std.testing.expectEqualStrings("/tmp/Image", options.kernel.?);
-    try std.testing.expectEqualStrings("/tmp/initramfs.cpio", options.initramfs.?);
+    try std.testing.expectEqualStrings("/tmp/initramfs.cpio.zst", options.initramfs.?);
     try std.testing.expectEqualStrings("/tmp/runtimes.sqfs", options.runtime_image.?);
     try std.testing.expectEqualStrings("/tmp/actiond-cas", options.cas.?);
     try std.testing.expectEqual(@as(u64, 768), options.memory_mib);
@@ -218,4 +290,21 @@ test "parseServeVmArgs permits embedded VM artifacts" {
     try std.testing.expectEqual(@as(?[]const u8, null), options.initramfs);
     try std.testing.expectError(error.MissingServeArgumentValue, parseServeVmArgs(&.{ "--kernel", "/tmp/Image", "--initramfs" }));
     try std.testing.expectError(error.UnknownServeArgument, parseServeVmArgs(&.{ "--kernel=/tmp/Image", "--initramfs=/tmp/initramfs", "--bad" }));
+}
+
+test "prepareBootInitramfs leaves raw initramfs paths unchanged" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectEqual(@as(?[]u8, null), try prepareBootInitramfs(
+        std.testing.io,
+        std.testing.allocator,
+        tmp.dir,
+        "/tmp/initramfs.cpio",
+    ));
+}
+
+test "isZstdInitramfsPath detects zstd initramfs names" {
+    try std.testing.expect(isZstdInitramfsPath("/tmp/initramfs.cpio.zst"));
+    try std.testing.expect(!isZstdInitramfsPath("/tmp/initramfs.cpio"));
 }

@@ -10,7 +10,7 @@ pub const Error = error{
 
 pub const runtimes_name = "runtimes.sqfs";
 pub const kernel_name = "linux_kernel";
-pub const initramfs_name = "initramfs.cpio";
+pub const initramfs_name = "initramfs.cpio.zst";
 
 const magic = "ACTIOND_PAYLOAD_V1";
 const trailer_len = 8 + magic.len;

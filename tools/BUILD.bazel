@@ -9,6 +9,7 @@ zig_binary(
     name = "initramfs_newc",
     main = "initramfs_newc.zig",
     visibility = ["//visibility:public"],
+    deps = ["@zstd"],
 )
 
 zig_binary(
@@ -50,6 +51,7 @@ zig_configure_binary(
 zig_test(
     name = "initramfs_newc_tests",
     main = "initramfs_newc.zig",
+    deps = ["@zstd"],
 )
 
 zig_test(

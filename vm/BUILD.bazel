@@ -1,7 +1,7 @@
 genrule(
     name = "initramfs",
     srcs = ["//cmd/linux_actiond_guest:linux-actiond-guest-aarch64"],
-    outs = ["initramfs.cpio"],
+    outs = ["initramfs.cpio.zst"],
     cmd = "$(execpath //tools:initramfs_newc) $@ $(location //cmd/linux_actiond_guest:linux-actiond-guest-aarch64)",
     tools = ["//tools:initramfs_newc"],
     visibility = ["//visibility:public"],

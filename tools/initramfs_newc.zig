@@ -1,4 +1,9 @@
 const std = @import("std");
+const zstd = std.compress.zstd;
+const c = @cImport({
+    @cDefine("ZSTD_STATIC_LINKING_ONLY", "1");
+    @cInclude("zstd.h");
+});
 
 const dir_mode: u32 = 0o040755;
 const file_mode: u32 = 0o100755;
@@ -61,11 +66,16 @@ pub fn main(init: std.process.Init) !void {
         .mode = 0,
     });
 
+    const payload = if (isZstdPath(out_path))
+        try compressZstd(arena, out.writer.buffered(), initramfsZstdLevel())
+    else
+        out.writer.buffered();
+
     var file = try std.Io.Dir.cwd().createFile(io, out_path, .{ .truncate = true });
     defer file.close(io);
     var file_buffer: [64 * 1024]u8 = undefined;
     var file_writer = file.writer(io, &file_buffer);
-    try file_writer.interface.writeAll(out.writer.buffered());
+    try file_writer.interface.writeAll(payload);
     try file_writer.interface.flush();
 }
 
@@ -177,6 +187,37 @@ fn align4(writer: *std.Io.Writer) !void {
     try writer.splatByteAll(0, pad);
 }
 
+fn isZstdPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".zst");
+}
+
+fn initramfsZstdLevel() c_int {
+    return c.ZSTD_maxCLevel();
+}
+
+fn compressZstd(allocator: std.mem.Allocator, plain: []const u8, level: c_int) ![]u8 {
+    const bound = c.ZSTD_compressBound(plain.len);
+    if (c.ZSTD_isError(bound) != 0) return error.ZstdCompressBoundFailed;
+
+    const output_buffer = try allocator.alloc(u8, bound);
+    defer allocator.free(output_buffer);
+
+    const context = c.ZSTD_createCCtx() orelse return error.OutOfMemory;
+    defer _ = c.ZSTD_freeCCtx(context);
+
+    const compressed_len = c.ZSTD_compressCCtx(
+        context,
+        output_buffer.ptr,
+        output_buffer.len,
+        plain.ptr,
+        plain.len,
+        level,
+    );
+    if (c.ZSTD_isError(compressed_len) != 0) return error.ZstdCompressFailed;
+
+    return try allocator.dupe(u8, output_buffer[0..compressed_len]);
+}
+
 test "addSymlink creates parent directory and records target" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -191,4 +232,26 @@ test "addSymlink creates parent directory and records target" {
     try std.testing.expectEqualStrings("bin/touch", entries.items[1].name);
     try std.testing.expectEqual(symlink_mode, entries.items[1].mode);
     try std.testing.expectEqualStrings("/usr/bin/busybox", entries.items[1].data);
+}
+
+test "zstd compression round trips initramfs payload" {
+    const plain = "070701 initramfs payload payload payload TRAILER!!!";
+    const compressed = try compressZstd(std.testing.allocator, plain, initramfsZstdLevel());
+    defer std.testing.allocator.free(compressed);
+
+    var input = std.Io.Reader.fixed(compressed);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+
+    var window: [zstd.default_window_len + zstd.block_size_max]u8 = undefined;
+    var decompressor: zstd.Decompress = .init(&input, &window, .{});
+    const n = try decompressor.reader.streamRemaining(&output.writer);
+
+    try std.testing.expectEqual(plain.len, n);
+    try std.testing.expectEqualStrings(plain, output.written());
+}
+
+test "zstd compression is selected by output suffix" {
+    try std.testing.expect(isZstdPath("initramfs.cpio.zst"));
+    try std.testing.expect(!isZstdPath("initramfs.cpio"));
 }
