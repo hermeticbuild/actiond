@@ -1,7 +1,14 @@
 const std = @import("std");
+const action_cache = @import("action_cache.zig");
 const body_sink = @import("body_sink.zig");
+const bytestream = @import("bytestream.zig");
+const cas = @import("cas.zig");
 const control_protocol = @import("control_protocol.zig");
+const grpc_record = @import("grpc_record.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
+const protobuf = @import("protobuf_wire.zig");
+const reapi = @import("reapi.zig");
+const reapi_dispatch = @import("reapi_dispatch.zig");
 
 pub const Error = error{
     GuestApplicationError,
@@ -106,6 +113,7 @@ pub const Transport = struct {
 
 pub const Proxy = struct {
     transport: Transport,
+    local_server: ?*reapi_dispatch.Server = null,
 
     pub fn dispatcher(self: *Proxy) grpc_http2_server.Dispatcher {
         return .{
@@ -126,6 +134,9 @@ pub const Proxy = struct {
         body: []const u8,
     ) ![]u8 {
         const self: *Proxy = @ptrCast(@alignCast(ctx));
+        if (self.localDispatcher()) |local_dispatcher| {
+            return local_dispatcher.handleUnary(io, allocator, method, body);
+        }
         return self.forward(io, allocator, .unary, method, body);
     }
 
@@ -137,6 +148,11 @@ pub const Proxy = struct {
         body: []const u8,
     ) ![]u8 {
         const self: *Proxy = @ptrCast(@alignCast(ctx));
+        if (!std.mem.eql(u8, method, reapi_dispatch.execution_execute)) {
+            if (self.localDispatcher()) |local_dispatcher| {
+                return local_dispatcher.handleServerStreaming(io, allocator, method, body);
+            }
+        }
         return self.forward(io, allocator, .server_streaming, method, body);
     }
 
@@ -149,6 +165,12 @@ pub const Proxy = struct {
         writer: body_sink.Writer,
     ) !void {
         const self: *Proxy = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, method, reapi_dispatch.execution_execute)) {
+            return self.executeAndImport(io, allocator, body, writer);
+        }
+        if (self.localDispatcher()) |local_dispatcher| {
+            return local_dispatcher.handleServerStreamingResponse(io, allocator, method, body, writer);
+        }
         return self.transport.streamServerResponse(io, allocator, method, body, writer);
     }
 
@@ -160,6 +182,9 @@ pub const Proxy = struct {
         body: []const u8,
     ) ![]u8 {
         const self: *Proxy = @ptrCast(@alignCast(ctx));
+        if (self.localDispatcher()) |local_dispatcher| {
+            return local_dispatcher.handleClientStreaming(io, allocator, method, body);
+        }
         return self.forward(io, allocator, .client_streaming, method, body);
     }
 
@@ -170,6 +195,9 @@ pub const Proxy = struct {
         method: []const u8,
     ) !grpc_http2_server.ClientStream {
         const self: *Proxy = @ptrCast(@alignCast(ctx));
+        if (self.localDispatcher()) |local_dispatcher| {
+            return local_dispatcher.startClientStreaming(io, allocator, method);
+        }
         var inner = try self.transport.startClientStreaming(io, allocator, method);
         errdefer inner.deinit(io, allocator);
 
@@ -212,6 +240,292 @@ pub const Proxy = struct {
                 return err;
             },
         };
+    }
+
+    fn localDispatcher(self: *Proxy) ?grpc_http2_server.Dispatcher {
+        const server = self.local_server orelse return null;
+        return grpc_http2_server.Dispatcher.fromReapiServer(server);
+    }
+
+    fn executeAndImport(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        request_record: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        const response_record = try self.forward(io, allocator, .server_streaming, reapi_dispatch.execution_execute, request_record);
+        defer allocator.free(response_record);
+        if (self.local_server) |local_server| {
+            try self.importExecuteOutputs(io, allocator, local_server.*, request_record, response_record);
+        }
+        try writer.writeAll(io, allocator, response_record);
+    }
+
+    fn importExecuteOutputs(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        local_server: reapi_dispatch.Server,
+        request_record: []const u8,
+        response_record: []const u8,
+    ) !void {
+        const action_digest = try executeRequestActionDigest(request_record);
+        try self.importExecuteResponseBlobs(
+            io,
+            allocator,
+            local_server.store,
+            local_server.action_cache_store,
+            action_digest,
+            response_record,
+        );
+    }
+
+    fn importExecuteResponseBlobs(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        host_store: cas.Store,
+        host_action_cache: ?action_cache.Store,
+        action_digest: cas.Digest,
+        response_record: []const u8,
+    ) !void {
+        var it = grpc_record.Iterator.init(response_record);
+        const do_not_cache = if (host_action_cache != null)
+            try actionDoNotCache(io, allocator, host_store, action_digest)
+        else
+            true;
+
+        while (try it.next()) |message| {
+            var operation_reader = protobuf.Reader.init(message.payload);
+            const operation = try reapi.Operation.decode(&operation_reader);
+            const response_any = operation.response orelse continue;
+            if (!std.mem.eql(u8, response_any.type_url, reapi.execute_response_type_url)) continue;
+
+            var execute_response = try decodeExecuteResponseOwned(allocator, response_any.value);
+            defer deinitExecuteResponseOwned(allocator, &execute_response);
+            const result = execute_response.result orelse continue;
+
+            try self.importActionResultBlobs(io, allocator, host_store, result);
+            if (!do_not_cache) {
+                try host_action_cache.?.put(io, allocator, action_digest, result);
+            }
+        }
+    }
+
+    fn importActionResultBlobs(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        host_store: cas.Store,
+        result: reapi.ActionResult,
+    ) !void {
+        if (result.stdout_digest) |digest| try self.importReapiBlob(io, allocator, host_store, digest);
+        if (result.stderr_digest) |digest| try self.importReapiBlob(io, allocator, host_store, digest);
+        for (result.output_files) |file| {
+            if (file.digest) |digest| try self.importReapiBlob(io, allocator, host_store, digest);
+        }
+        for (result.output_directories) |directory| {
+            if (directory.tree_digest) |digest| try self.importTreeBlob(io, allocator, host_store, digest);
+        }
+    }
+
+    fn importTreeBlob(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        host_store: cas.Store,
+        tree_digest: reapi.Digest,
+    ) !void {
+        const local_tree_digest = try cas.Digest.fromReapi(tree_digest);
+        try self.importBlob(io, allocator, host_store, local_tree_digest);
+
+        const tree_bytes = try host_store.readAlloc(io, allocator, local_tree_digest);
+        defer allocator.free(tree_bytes);
+
+        var tree_reader = protobuf.Reader.init(tree_bytes);
+        while (try tree_reader.next()) |tag| {
+            switch (tag.field_number) {
+                1, 2 => {
+                    var nested = try tree_reader.readMessage();
+                    _ = try host_store.putBytes(io, nested.bytes);
+                    var directory = try reapi.Directory.decodeOwned(allocator, &nested);
+                    defer directory.deinit(allocator);
+                    for (directory.files) |file| {
+                        if (file.digest) |digest| try self.importReapiBlob(io, allocator, host_store, digest);
+                    }
+                    for (directory.directories) |child| {
+                        if (child.digest) |digest| try self.importReapiBlob(io, allocator, host_store, digest);
+                    }
+                },
+                else => try tree_reader.skipField(tag.wire_type),
+            }
+        }
+    }
+
+    fn importReapiBlob(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        host_store: cas.Store,
+        digest: reapi.Digest,
+    ) !void {
+        return self.importBlob(io, allocator, host_store, try cas.Digest.fromReapi(digest));
+    }
+
+    fn importBlob(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        host_store: cas.Store,
+        digest: cas.Digest,
+    ) !void {
+        if (try host_store.has(io, digest)) return;
+
+        var hash: [64]u8 = undefined;
+        const resource_name = try std.fmt.allocPrint(allocator, "blobs/{s}/{d}", .{ digest.formatHex(&hash), digest.size_bytes });
+        defer allocator.free(resource_name);
+        const request_proto = try reapi.encodeAlloc(allocator, bytestream.ReadRequest{ .resource_name = resource_name });
+        defer allocator.free(request_proto);
+        const request_record = try grpc_record.encodeAlloc(allocator, .{ .payload = request_proto });
+        defer allocator.free(request_record);
+
+        var importer = try GuestBlobImporter.init(io, host_store, digest);
+        defer importer.deinit(io, allocator);
+        try self.transport.streamServerResponse(
+            io,
+            allocator,
+            reapi_dispatch.bytestream_read,
+            request_record,
+            importer.writer(),
+        );
+        try importer.finish(io);
+    }
+};
+
+fn singlePayload(request_record: []const u8) ![]const u8 {
+    var it = grpc_record.Iterator.init(request_record);
+    const message = (try it.next()) orelse return error.MissingGrpcMessage;
+    if ((try it.next()) != null) return error.ExtraGrpcMessage;
+    return message.payload;
+}
+
+fn executeRequestActionDigest(request_record: []const u8) !cas.Digest {
+    var reader = protobuf.Reader.init(try singlePayload(request_record));
+    const request = try reapi.ExecuteRequest.decode(&reader);
+    return cas.Digest.fromReapi(request.action_digest orelse return error.MissingActionDigest);
+}
+
+fn actionDoNotCache(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    action_digest: cas.Digest,
+) !bool {
+    const action_bytes = try store.readAlloc(io, allocator, action_digest);
+    defer allocator.free(action_bytes);
+    var reader = protobuf.Reader.init(action_bytes);
+    return (try reapi.Action.decode(&reader)).do_not_cache;
+}
+
+fn decodeExecuteResponseOwned(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !reapi.ExecuteResponse {
+    var reader = protobuf.Reader.init(bytes);
+    var out: reapi.ExecuteResponse = .{};
+    errdefer deinitExecuteResponseOwned(allocator, &out);
+    while (try reader.next()) |tag| {
+        switch (tag.field_number) {
+            1 => {
+                var nested = try reader.readMessage();
+                out.result = try reapi.ActionResult.decodeOwned(allocator, &nested);
+            },
+            2 => out.cached_result = try reader.readBool(),
+            3 => {
+                var nested = try reader.readMessage();
+                out.status = try reapi.Status.decode(&nested);
+            },
+            5 => out.message = try reader.readString(),
+            else => try reader.skipField(tag.wire_type),
+        }
+    }
+    return out;
+}
+
+fn deinitExecuteResponseOwned(allocator: std.mem.Allocator, response: *reapi.ExecuteResponse) void {
+    if (response.result) |*result| result.deinit(allocator);
+    response.* = .{};
+}
+
+const GuestBlobImporter = struct {
+    expected: cas.Digest,
+    writer_impl: cas.BlobWriter,
+    pending: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn init(io: std.Io, store: cas.Store, expected: cas.Digest) !GuestBlobImporter {
+        return .{
+            .expected = expected,
+            .writer_impl = try store.beginBlobWriter(io),
+        };
+    }
+
+    fn writer(self: *GuestBlobImporter) body_sink.Writer {
+        return .{
+            .ctx = self,
+            .write_all = writeAll,
+        };
+    }
+
+    fn writeAll(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !void {
+        _ = io;
+        const self: *GuestBlobImporter = @ptrCast(@alignCast(ctx));
+        try self.pending.appendSlice(allocator, bytes);
+
+        var offset: usize = 0;
+        while (self.pending.items.len - offset >= grpc_record.header_len) {
+            const header = self.pending.items[offset..][0..grpc_record.header_len];
+            const compressed = switch (header[0]) {
+                0 => false,
+                1 => true,
+                else => return error.InvalidCompressionFlag,
+            };
+            if (compressed) return error.UnsupportedCompression;
+
+            const payload_len = std.mem.readInt(u32, header[1..grpc_record.header_len], .big);
+            const record_len = try grpc_record.encodedLen(payload_len);
+            if (self.pending.items.len - offset < record_len) break;
+
+            const payload_start = offset + grpc_record.header_len;
+            var reader = protobuf.Reader.init(self.pending.items[payload_start..][0..payload_len]);
+            const response = try bytestream.ReadResponse.decode(&reader);
+            try self.writer_impl.writeAll(response.data);
+            offset += record_len;
+        }
+
+        if (offset != 0) {
+            const remaining_len = self.pending.items.len - offset;
+            if (remaining_len != 0) {
+                std.mem.copyForwards(u8, self.pending.items[0..remaining_len], self.pending.items[offset..]);
+            }
+            self.pending.shrinkRetainingCapacity(remaining_len);
+        }
+    }
+
+    fn finish(self: *GuestBlobImporter, io: std.Io) !void {
+        if (self.pending.items.len != 0) return error.UnexpectedEof;
+        _ = try self.writer_impl.finish(io, self.expected);
+    }
+
+    fn deinit(self: *GuestBlobImporter, io: std.Io, allocator: std.mem.Allocator) void {
+        self.writer_impl.deinit(io);
+        self.pending.deinit(allocator);
+        self.* = undefined;
     }
 };
 
@@ -344,6 +658,58 @@ test "Proxy forwards unary requests over control transport" {
     defer std.testing.allocator.free(response);
 
     try std.testing.expectEqualStrings("response", response);
+}
+
+test "Proxy handles FindMissingBlobs against the host CAS" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = cas.Store.init(tmp.dir);
+    const present = try store.putBytes(std.testing.io, "present");
+    const absent = cas.Digest.fromBytes("absent");
+    var local_server = reapi_dispatch.Server.init(store);
+
+    var fake = FakeTransport{
+        .expected_kind = .unary,
+        .expected_method = "/not-called",
+        .expected_body = "",
+        .response_body = "",
+    };
+    var proxy = Proxy{
+        .transport = fake.transport(),
+        .local_server = &local_server,
+    };
+    const dispatcher = proxy.dispatcher();
+
+    var present_hash: [64]u8 = undefined;
+    var absent_hash: [64]u8 = undefined;
+    const request_proto = try reapi.encodeAlloc(std.testing.allocator, reapi.FindMissingBlobsRequest{
+        .blob_digests = &.{
+            present.toReapi(&present_hash),
+            absent.toReapi(&absent_hash),
+        },
+    });
+    defer std.testing.allocator.free(request_proto);
+    const request_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = request_proto });
+    defer std.testing.allocator.free(request_record);
+
+    const response_record = try dispatcher.handleUnary(
+        std.testing.io,
+        std.testing.allocator,
+        reapi_dispatch.cas_find_missing_blobs,
+        request_record,
+    );
+    defer std.testing.allocator.free(response_record);
+
+    var records = grpc_record.Iterator.init(response_record);
+    const message = (try records.next()).?;
+    try std.testing.expect((try records.next()) == null);
+
+    var response_reader = protobuf.Reader.init(message.payload);
+    var response = try reapi.FindMissingBlobsResponse.decodeOwned(std.testing.allocator, &response_reader);
+    defer response.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), response.missing_blob_digests.len);
+    try std.testing.expect(response.missing_blob_digests[0].eql(absent.toReapi(&absent_hash)));
 }
 
 const FakeStreamingTransport = struct {

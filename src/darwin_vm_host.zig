@@ -1,12 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zstd = if (builtin.os.tag == .macos) @import("c") else struct {};
+const action_cache = @import("action_cache.zig");
 const cas = @import("cas.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
 const embedded_payload = @import("embedded_payload.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 const guest_proxy = @import("guest_proxy.zig");
+const reapi_dispatch = @import("reapi_dispatch.zig");
 
 pub const Error = error{
     MissingServeArgumentValue,
@@ -120,8 +122,12 @@ pub fn serve(
     const cas_path = options.cas orelse owned_cas_path;
 
     var cas_dir = try std.Io.Dir.cwd().createDirPathOpen(io, cas_path, .{});
+    defer cas_dir.close(io);
     try cas.Store.init(cas_dir).ensureLayout(io);
-    cas_dir.close(io);
+
+    var ac_dir = try root_dir.createDirPathOpen(io, "ac", .{});
+    defer ac_dir.close(io);
+    try action_cache.Store.init(ac_dir).ensureLayout(io);
 
     const embedded_kernel = if (options.kernel == null)
         try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.kernel_name)
@@ -175,7 +181,14 @@ pub fn serve(
 
     var fd_client = control_transport_fd.Client{ .opener = vm.opener() };
     defer fd_client.deinit(io);
-    var proxy = guest_proxy.Proxy{ .transport = fd_client.transport() };
+    var local_server = reapi_dispatch.Server{
+        .store = cas.Store.initReady(cas_dir),
+        .action_cache_store = action_cache.Store.initReady(ac_dir),
+    };
+    var proxy = guest_proxy.Proxy{
+        .transport = fd_client.transport(),
+        .local_server = &local_server,
+    };
     return grpc_http2_server.serveDispatcher(io, allocator, .{
         .listen = options.listen,
     }, proxy.dispatcher());

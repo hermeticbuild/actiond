@@ -31,7 +31,7 @@ pub const module_paths = [_][:0]const u8{
     "/modules/virtiofs.ko",
 };
 
-pub const cas_mount: Mount = .{ .source = "cas", .target = "/cas-ro", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
+pub const host_cas_mount: Mount = .{ .source = "cas", .target = "/host-cas", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
 pub const runtime_block_devices = [_][:0]const u8{
     "/dev/vda",
     "/dev/vdb",
@@ -42,7 +42,7 @@ pub const cas_overlay_mount: Mount = .{
     .source = "overlay",
     .target = "/cas",
     .fstype = "overlay",
-    .data = "lowerdir=/cas-ro,upperdir=/work/cas-upper/upper,workdir=/work/cas-upper/work",
+    .data = "lowerdir=/host-cas,upperdir=/work/cas-upper/upper,workdir=/work/cas-upper/work",
 };
 pub const worker_argv = [_][]const u8{ "/actiond", "--guest-worker" };
 
@@ -61,11 +61,11 @@ pub fn run(io: std.Io) !void {
     }
     try ensureDir(io, "work/cas-upper/upper");
     try ensureDir(io, "work/cas-upper/work");
-    try mount(stderr, cas_mount);
+    try mount(stderr, host_cas_mount);
     try mount(stderr, cas_overlay_mount);
     try mountRuntimeImage(stderr);
-    try stderr.writeAll("linux-actiond guest init mounted filesystems; starting worker\n");
-    try stderr.flush();
+    stderr.writeAll("linux-actiond guest init mounted filesystems; starting worker\n") catch {};
+    stderr.flush() catch {};
 
     return std.process.replace(io, .{ .argv = &worker_argv });
 }
@@ -105,13 +105,13 @@ fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {
     switch (std.posix.errno(rc)) {
         .SUCCESS => {},
         else => |errno| {
-            try stderr.print("mount {s} on {s} type {s} failed: {s}\n", .{
+            stderr.print("mount {s} on {s} type {s} failed: {s}\n", .{
                 mount_spec.source,
                 mount_spec.target,
                 mount_spec.fstype,
                 @tagName(errno),
-            });
-            try stderr.flush();
+            }) catch {};
+            stderr.flush() catch {};
             return error.MountFailed;
         },
     }
@@ -130,8 +130,8 @@ fn loadOptionalModule(stderr: *std.Io.Writer, path: [:0]const u8) !void {
         .SUCCESS => {},
         .NOENT => return,
         else => |errno| {
-            try stderr.print("open module {s} failed: {s}\n", .{ path, @tagName(errno) });
-            try stderr.flush();
+            stderr.print("open module {s} failed: {s}\n", .{ path, @tagName(errno) }) catch {};
+            stderr.flush() catch {};
             return error.ModuleLoadFailed;
         },
     }
@@ -143,8 +143,8 @@ fn loadOptionalModule(stderr: *std.Io.Writer, path: [:0]const u8) !void {
     switch (std.posix.errno(load_rc)) {
         .SUCCESS, .EXIST => {},
         else => |errno| {
-            try stderr.print("load module {s} failed: {s}\n", .{ path, @tagName(errno) });
-            try stderr.flush();
+            stderr.print("load module {s} failed: {s}\n", .{ path, @tagName(errno) }) catch {};
+            stderr.flush() catch {};
             return error.ModuleLoadFailed;
         },
     }
@@ -152,9 +152,9 @@ fn loadOptionalModule(stderr: *std.Io.Writer, path: [:0]const u8) !void {
 
 test "guest init mount plan stays minimal" {
     try std.testing.expectEqual(@as(usize, 6), mounts.len);
-    try std.testing.expectEqualStrings("virtiofs", cas_mount.fstype);
-    try std.testing.expectEqualStrings("/cas-ro", cas_mount.target);
-    try std.testing.expectEqual(std.os.linux.MS.RDONLY, cas_mount.flags);
+    try std.testing.expectEqualStrings("virtiofs", host_cas_mount.fstype);
+    try std.testing.expectEqualStrings("/host-cas", host_cas_mount.target);
+    try std.testing.expectEqual(std.os.linux.MS.RDONLY, host_cas_mount.flags);
     try std.testing.expectEqualStrings("overlay", cas_overlay_mount.fstype);
     try std.testing.expectEqualStrings("/cas", cas_overlay_mount.target);
     try std.testing.expect(cas_overlay_mount.data != null);
