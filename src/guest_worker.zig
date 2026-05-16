@@ -45,8 +45,8 @@ pub fn run(io: std.Io) !void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("linux-actiond guest worker listening on vsock:{d}\n", .{vsock.control_port});
-    try stderr.flush();
+    stderr.print("linux-actiond guest worker listening on vsock:{d}\n", .{vsock.control_port}) catch {};
+    stderr.flush() catch {};
 
     while (true) {
         const connection = try listener.accept();

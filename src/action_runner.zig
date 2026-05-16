@@ -422,30 +422,31 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childClose(action.stderr_pipe[0]);
     childClose(action.stderr_pipe[1]);
 
-    childSyscall(linux.setpgid(0, 0));
+    childSyscallName(linux.setpgid(0, 0), "setpgid");
     if (action.cgroup_procs_path) |path| childWriteFile(path, "0\n");
-    childSyscall(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
+    childSyscallName(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "prctl_no_new_privs");
     childCloseExtraFds();
-    childSyscall(linux.unshare(linux.CLONE.NEWNS));
-    childSyscall(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0));
+    childSyscallName(linux.unshare(linux.CLONE.NEWNS), "unshare_newns");
+    childSyscallName(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0), "mount_private");
     for (action.bind_mounts) |mount| childBindMountReadOnly(mount);
-    childSyscall(linux.chroot(action.chroot_dir.ptr));
-    childSyscall(linux.chdir(action.cwd.ptr));
+    childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
+    childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
     _ = linux.execve(action.exec_path.ptr, action.argv, action.envp);
+    childWriteLiteral("actiond child setup failed: execve\n");
     linux.exit(127);
 }
 
 fn childBindMountReadOnly(mount: BindMount) void {
     const linux = std.os.linux;
-    childSyscall(linux.mount(mount.source.ptr, mount.target.ptr, null, linux.MS.BIND, 0));
-    childSyscall(linux.mount(
+    childSyscallName(linux.mount(mount.source.ptr, mount.target.ptr, null, linux.MS.BIND, 0), "mount_bind");
+    childSyscallName(linux.mount(
         null,
         mount.target.ptr,
         null,
         linux.MS.BIND | linux.MS.REMOUNT | linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV,
         0,
-    ));
+    ), "mount_bind_ro");
 }
 
 const linux_capability_version_3: u32 = 0x20080522;
@@ -453,9 +454,9 @@ const linux_capability_version_3: u32 = 0x20080522;
 fn childDropPrivileges(uid: u32, gid: u32) void {
     const linux = std.os.linux;
     var empty_groups = [_]linux.gid_t{0};
-    childSyscall(linux.setgroups(0, &empty_groups));
-    childSyscall(linux.setresgid(@intCast(gid), @intCast(gid), @intCast(gid)));
-    childSyscall(linux.setresuid(@intCast(uid), @intCast(uid), @intCast(uid)));
+    childSyscallName(linux.setgroups(0, &empty_groups), "setgroups");
+    childSyscallName(linux.setresgid(@intCast(gid), @intCast(gid), @intCast(gid)), "setresgid");
+    childSyscallName(linux.setresuid(@intCast(uid), @intCast(uid), @intCast(uid)), "setresuid");
 
     var header = linux.cap_user_header_t{
         .version = linux_capability_version_3,
@@ -469,7 +470,7 @@ fn childDropPrivileges(uid: u32, gid: u32) void {
 }
 
 fn childDup2(old: std.posix.fd_t, new: std.posix.fd_t) void {
-    childSyscall(std.os.linux.dup2(old, new));
+    childSyscallName(std.os.linux.dup2(old, new), "dup2");
 }
 
 fn childClose(fd: std.posix.fd_t) void {
@@ -494,7 +495,7 @@ fn childCloseExtraFds() void {
 fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
     const linux = std.os.linux;
     const fd_rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
-    childSyscall(fd_rc);
+    childSyscallName(fd_rc, "open_cgroup");
     const fd: std.posix.fd_t = @intCast(fd_rc);
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -514,6 +515,16 @@ fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
 
 fn childSyscall(rc: usize) void {
     if (std.posix.errno(rc) != .SUCCESS) std.os.linux.exit(127);
+}
+
+fn childSyscallName(rc: usize, comptime name: []const u8) void {
+    if (std.posix.errno(rc) == .SUCCESS) return;
+    childWriteLiteral("actiond child setup failed: " ++ name ++ "\n");
+    std.os.linux.exit(127);
+}
+
+fn childWriteLiteral(comptime bytes: []const u8) void {
+    _ = std.os.linux.write(std.posix.STDERR_FILENO, bytes.ptr, bytes.len);
 }
 
 fn linuxPipe() ![2]std.posix.fd_t {

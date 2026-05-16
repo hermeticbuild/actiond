@@ -9,12 +9,15 @@ const dir_mode: u32 = 0o040755;
 const file_mode: u32 = 0o100755;
 const module_mode: u32 = 0o100644;
 const symlink_mode: u32 = 0o120777;
+const char_device_mode: u32 = 0o020666;
 const max_input_file_bytes = 512 * 1024 * 1024;
 
 const Entry = struct {
     name: []const u8,
     mode: u32,
     data: []const u8 = "",
+    rdev_major: u32 = 0,
+    rdev_minor: u32 = 0,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -28,9 +31,12 @@ pub fn main(init: std.process.Init) !void {
     const actiond = try std.Io.Dir.cwd().readFileAlloc(io, actiond_path, arena, .limited(max_input_file_bytes));
 
     var entries: std.ArrayListUnmanaged(Entry) = .empty;
-    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "cas-ro", "cas", "modules", "runtimes" }) |path| {
+    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "host-cas", "cas", "modules", "runtimes" }) |path| {
         try addDir(arena, &entries, path);
     }
+    try addCharDevice(arena, &entries, "dev/console", 5, 1);
+    try addCharDevice(arena, &entries, "dev/null", 1, 3);
+    try addCharDevice(arena, &entries, "dev/zero", 1, 5);
     try addFile(arena, &entries, "init", file_mode, actiond);
     try addFile(arena, &entries, "actiond", file_mode, actiond);
 
@@ -138,6 +144,25 @@ fn addSymlink(
     });
 }
 
+fn addCharDevice(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayListUnmanaged(Entry),
+    raw_path: []const u8,
+    major: u32,
+    minor: u32,
+) !void {
+    const path = stripSlashes(raw_path);
+    if (path.len == 0) return error.InvalidFileSpec;
+    if (std.fs.path.dirname(path)) |parent| try addDir(allocator, entries, parent);
+    if (containsName(entries.items, path)) return;
+    try entries.append(allocator, .{
+        .name = try allocator.dupe(u8, path),
+        .mode = char_device_mode,
+        .rdev_major = major,
+        .rdev_minor = minor,
+    });
+}
+
 fn containsName(entries: []const Entry, name: []const u8) bool {
     for (entries) |entry| {
         if (std.mem.eql(u8, entry.name, name)) return true;
@@ -167,8 +192,8 @@ fn writeEntry(writer: *std.Io.Writer, ino: u32, entry: Entry) !void {
     try writeHex(writer, @intCast(entry.data.len));
     try writeHex(writer, 0);
     try writeHex(writer, 0);
-    try writeHex(writer, 0);
-    try writeHex(writer, 0);
+    try writeHex(writer, entry.rdev_major);
+    try writeHex(writer, entry.rdev_minor);
     try writeHex(writer, @intCast(namesize));
     try writeHex(writer, 0);
     try writer.writeAll(entry.name);
@@ -232,6 +257,22 @@ test "addSymlink creates parent directory and records target" {
     try std.testing.expectEqualStrings("bin/touch", entries.items[1].name);
     try std.testing.expectEqual(symlink_mode, entries.items[1].mode);
     try std.testing.expectEqualStrings("/usr/bin/busybox", entries.items[1].data);
+}
+
+test "addCharDevice records device numbers" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var entries: std.ArrayListUnmanaged(Entry) = .empty;
+
+    try addCharDevice(allocator, &entries, "/dev/console", 5, 1);
+
+    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+    try std.testing.expectEqualStrings("dev", entries.items[0].name);
+    try std.testing.expectEqualStrings("dev/console", entries.items[1].name);
+    try std.testing.expectEqual(char_device_mode, entries.items[1].mode);
+    try std.testing.expectEqual(@as(u32, 5), entries.items[1].rdev_major);
+    try std.testing.expectEqual(@as(u32, 1), entries.items[1].rdev_minor);
 }
 
 test "zstd compression round trips initramfs payload" {

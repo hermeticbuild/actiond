@@ -74,6 +74,14 @@ pub fn execute(
         return err;
     };
     defer outcome.deinit(allocator);
+    if (!statusOk(outcome.status)) {
+        std.log.err("execute {s}/{d}: non-zero result status={any} stderr={s}", .{
+            action_hex,
+            action_digest.size_bytes,
+            outcome.status,
+            truncateForLog(outcome.stderr),
+        });
+    }
 
     var result = try action_executor.actionResultFromOutcomeOwned(allocator, outcome);
     defer result.deinit(allocator);
@@ -82,6 +90,17 @@ pub fn execute(
     }
 
     return try completedOperation(allocator, action_digest, result.result, false);
+}
+
+fn truncateForLog(bytes: []const u8) []const u8 {
+    return bytes[0..@min(bytes.len, 512)];
+}
+
+fn statusOk(status: @import("action_runner.zig").Status) bool {
+    return switch (status) {
+        .exited => |code| code == 0,
+        .signaled, .stopped, .unknown => false,
+    };
 }
 
 fn readDoNotCache(
