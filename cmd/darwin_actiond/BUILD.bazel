@@ -38,3 +38,45 @@ chmod +x "$@"
     target_compatible_with = ["@platforms//os:macos"],
     visibility = ["//visibility:public"],
 )
+
+genrule(
+    name = "darwin-actiond-standalone-unsigned_pkg",
+    srcs = [
+        ":darwin-actiond-bin",
+        "//runtimes:runtimes_squashfs",
+        "//vm:initramfs",
+        "//vm:linux_kernel",
+    ],
+    outs = ["darwin-actiond-standalone-unsigned"],
+    cmd = """
+set -euo pipefail
+$(execpath //tools:embed_payload) "$@" "$(location :darwin-actiond-bin)" \
+  linux_kernel="$(location //vm:linux_kernel)" \
+  initramfs.cpio="$(location //vm:initramfs)" \
+  runtimes.sqfs="$(location //runtimes:runtimes_squashfs)"
+chmod +x "$@"
+""",
+    executable = True,
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:macos"],
+    tools = ["//tools:embed_payload"],
+)
+
+genrule(
+    name = "darwin-actiond-standalone_pkg",
+    srcs = [
+        ":darwin-actiond-standalone-unsigned",
+        "darwin-actiond.entitlements",
+    ],
+    outs = ["darwin-actiond-standalone"],
+    cmd = """
+set -euo pipefail
+cp "$(location :darwin-actiond-standalone-unsigned)" "$@"
+chmod +x "$@"
+/usr/bin/codesign --force --sign - --entitlements "$(location darwin-actiond.entitlements)" "$@"
+""",
+    executable = True,
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:macos"],
+    visibility = ["//visibility:public"],
+)

@@ -1,8 +1,75 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary")
 
 zig_binary(
     name = "linux-actiond",
     main = "main.zig",
     deps = ["//src:actiond"],
+    visibility = ["//visibility:public"],
+)
+
+zig_configure_binary(
+    name = "linux-actiond-linux-aarch64",
+    actual = ":linux-actiond",
+    target = "//platforms:linux_aarch64",
+    zig_version = "0.16.0",
+    visibility = ["//visibility:public"],
+)
+
+zig_configure_binary(
+    name = "linux-actiond-linux-x86_64",
+    actual = ":linux-actiond",
+    target = "//platforms:linux_x86_64",
+    zig_version = "0.16.0",
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "linux-actiond-standalone_pkg",
+    srcs = [
+        ":linux-actiond",
+        "//runtimes:runtimes_squashfs",
+    ],
+    outs = ["linux-actiond-standalone"],
+    cmd = """
+set -euo pipefail
+$(execpath //tools:embed_payload) "$@" "$(location :linux-actiond)" runtimes.sqfs="$(location //runtimes:runtimes_squashfs)"
+chmod +x "$@"
+""",
+    executable = True,
+    tools = ["//tools:embed_payload"],
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "linux-actiond-standalone-aarch64_pkg",
+    srcs = [
+        ":linux-actiond-linux-aarch64",
+        "//runtimes:runtimes_squashfs",
+    ],
+    outs = ["linux-actiond-standalone-aarch64"],
+    cmd = """
+set -euo pipefail
+$(execpath //tools:embed_payload) "$@" "$(location :linux-actiond-linux-aarch64)" runtimes.sqfs="$(location //runtimes:runtimes_squashfs)"
+chmod +x "$@"
+""",
+    executable = True,
+    tools = ["//tools:embed_payload"],
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "linux-actiond-standalone-x86_64_pkg",
+    srcs = [
+        ":linux-actiond-linux-x86_64",
+        "//runtimes:runtimes_squashfs",
+    ],
+    outs = ["linux-actiond-standalone-x86_64"],
+    cmd = """
+set -euo pipefail
+$(execpath //tools:embed_payload) "$@" "$(location :linux-actiond-linux-x86_64)" runtimes.sqfs="$(location //runtimes:runtimes_squashfs)"
+chmod +x "$@"
+""",
+    executable = True,
+    tools = ["//tools:embed_payload"],
     visibility = ["//visibility:public"],
 )
