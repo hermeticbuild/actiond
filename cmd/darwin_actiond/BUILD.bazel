@@ -27,6 +27,7 @@ zig_binary(
     extra_srcs = [MACOS_SDK],
     linkopts = MACOS_SDK_LINKOPTS,
     main = "main.zig",
+    strip_debug_symbols = True,
     target_compatible_with = ["@platforms//os:macos"],
     deps = [
         ":vz_bridge",
@@ -67,6 +68,7 @@ zig_binary(
         "$(location :darwin-standalone-payload)",
     ] + MACOS_SDK_LINKOPTS,
     main = "main.zig",
+    strip_debug_symbols = True,
     target_compatible_with = ["@platforms//os:macos"],
     deps = [
         ":vz_bridge",

@@ -3,23 +3,54 @@ load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary")
 zig_binary(
     name = "linux-actiond",
     main = "main.zig",
+    strip_debug_symbols = True,
     deps = ["//src:actiond"],
     visibility = ["//visibility:public"],
 )
 
 zig_configure_binary(
-    name = "linux-actiond-linux-aarch64",
+    name = "linux-actiond-linux-aarch64-raw",
     actual = ":linux-actiond",
     target = "//platforms:linux_aarch64",
     zig_version = "0.16.0",
+)
+
+genrule(
+    name = "linux-actiond-linux-aarch64",
+    srcs = [":linux-actiond-linux-aarch64-raw"],
+    outs = ["linux-actiond-linux-aarch64.bin"],
+    cmd = """
+set -euo pipefail
+cp "$(location :linux-actiond-linux-aarch64-raw)" "$@"
+chmod +w "$@"
+"$(execpath @llvm//tools:llvm-strip)" --strip-all "$@"
+chmod +x "$@"
+""",
+    executable = True,
+    tools = ["@llvm//tools:llvm-strip"],
     visibility = ["//visibility:public"],
 )
 
 zig_configure_binary(
-    name = "linux-actiond-linux-x86_64",
+    name = "linux-actiond-linux-x86_64-raw",
     actual = ":linux-actiond",
     target = "//platforms:linux_x86_64",
     zig_version = "0.16.0",
+)
+
+genrule(
+    name = "linux-actiond-linux-x86_64",
+    srcs = [":linux-actiond-linux-x86_64-raw"],
+    outs = ["linux-actiond-linux-x86_64.bin"],
+    cmd = """
+set -euo pipefail
+cp "$(location :linux-actiond-linux-x86_64-raw)" "$@"
+chmod +w "$@"
+"$(execpath @llvm//tools:llvm-strip)" --strip-all "$@"
+chmod +x "$@"
+""",
+    executable = True,
+    tools = ["@llvm//tools:llvm-strip"],
     visibility = ["//visibility:public"],
 )
 

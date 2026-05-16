@@ -3,14 +3,30 @@ load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary")
 zig_binary(
     name = "linux-actiond-guest",
     main = "main.zig",
+    strip_debug_symbols = True,
     deps = ["//src:actiond"],
     visibility = ["//visibility:public"],
 )
 
 zig_configure_binary(
-    name = "linux-actiond-guest-aarch64",
+    name = "linux-actiond-guest-aarch64-raw",
     actual = ":linux-actiond-guest",
     target = "//platforms:linux_aarch64",
     zig_version = "0.16.0",
+)
+
+genrule(
+    name = "linux-actiond-guest-aarch64",
+    srcs = [":linux-actiond-guest-aarch64-raw"],
+    outs = ["linux-actiond-guest-aarch64.bin"],
+    cmd = """
+set -euo pipefail
+cp "$(location :linux-actiond-guest-aarch64-raw)" "$@"
+chmod +w "$@"
+"$(execpath @llvm//tools:llvm-strip)" --strip-all "$@"
+chmod +x "$@"
+""",
+    executable = True,
+    tools = ["@llvm//tools:llvm-strip"],
     visibility = ["//visibility:public"],
 )

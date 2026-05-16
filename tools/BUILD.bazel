@@ -8,6 +8,7 @@ exports_files([
 zig_binary(
     name = "initramfs_newc",
     main = "initramfs_newc.zig",
+    strip_debug_symbols = True,
     visibility = ["//visibility:public"],
     deps = ["@zstd"],
 )
@@ -15,12 +16,14 @@ zig_binary(
 zig_binary(
     name = "e2e_action_tool",
     main = "e2e_action_tool.zig",
+    strip_debug_symbols = True,
     visibility = ["//visibility:public"],
 )
 
 zig_binary(
     name = "embed_payload",
     main = "embed_payload.zig",
+    strip_debug_symbols = True,
     visibility = ["//visibility:public"],
     deps = ["//src:actiond"],
 )
@@ -28,6 +31,7 @@ zig_binary(
 zig_binary(
     name = "sqfs_pack",
     main = "sqfs_pack.zig",
+    strip_debug_symbols = True,
     visibility = ["//visibility:public"],
     deps = ["@zstd"],
 )
