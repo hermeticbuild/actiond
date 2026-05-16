@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
 const cas = @import("cas.zig");
@@ -73,8 +74,11 @@ pub fn serve(
     try cas.Store.init(cas_dir).ensureLayout(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
 
-    const embedded_runtime_image = if (options.runtime_image == null and options.runtime_root == null)
-        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.runtimes_name)
+    const embedded_runtime_image = if (comptime builtin.os.tag == .linux)
+        if (options.runtime_image == null and options.runtime_root == null)
+            try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.runtimes_name)
+        else
+            null
     else
         null;
     defer if (embedded_runtime_image) |path| allocator.free(path);
