@@ -26,6 +26,53 @@ run_kbuild() {
   mv -f "${out}.tmp" "${out}"
 }
 
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  "$@" &
+  local pid="$!"
+  (
+    sleep "${seconds}"
+    kill "${pid}" 2>/dev/null || true
+  ) &
+  local watchdog="$!"
+
+  local status=0
+  if wait "${pid}"; then
+    status=0
+  else
+    status="$?"
+  fi
+
+  kill "${watchdog}" 2>/dev/null || true
+  wait "${watchdog}" 2>/dev/null || true
+  return "${status}"
+}
+
+docker_command() {
+  if [[ -n "${ACTIOND_KERNEL_DOCKER_CONTEXT:-}" ]]; then
+    printf '%s\n' docker --context "${ACTIOND_KERNEL_DOCKER_CONTEXT}"
+    return 0
+  fi
+
+  if run_with_timeout "${ACTIOND_DOCKER_PING_TIMEOUT_SECONDS:-5}" docker info >/dev/null 2>&1; then
+    printf '%s\n' docker
+    return 0
+  fi
+
+  local context
+  for context in colima desktop-linux default; do
+    if run_with_timeout "${ACTIOND_DOCKER_PING_TIMEOUT_SECONDS:-5}" docker --context "${context}" info >/dev/null 2>&1; then
+      printf '%s\n' docker --context "${context}"
+      return 0
+    fi
+  done
+
+  echo "no responsive Docker context found for Darwin kernel build" >&2
+  return 1
+}
+
 if [[ "${1:-}" == "--inside-docker" ]]; then
   run_kbuild \
     "${ACTIOND_KERNEL_SRC:?}" \
@@ -50,10 +97,14 @@ kbuild_out="$(pwd)/$(dirname "${out}")/kbuild"
 case "$(uname -s)" in
   Darwin)
     image="${ACTIOND_KERNEL_DOCKER_IMAGE:-actiond-kernel-builder:24.04}"
+    docker_cmd=()
+    while IFS= read -r part; do
+      docker_cmd+=("${part}")
+    done < <(docker_command)
     if [[ -n "${ACTIOND_KERNEL_DOCKER_PLATFORM:-}" ]]; then
-      docker build --platform="${ACTIOND_KERNEL_DOCKER_PLATFORM}" -f "${dockerfile}" -t "${image}" "$(dirname "${dockerfile}")"
+      "${docker_cmd[@]}" build --platform="${ACTIOND_KERNEL_DOCKER_PLATFORM}" -f "${dockerfile}" -t "${image}" "$(dirname "${dockerfile}")"
     else
-      docker build -f "${dockerfile}" -t "${image}" "$(dirname "${dockerfile}")"
+      "${docker_cmd[@]}" build -f "${dockerfile}" -t "${image}" "$(dirname "${dockerfile}")"
     fi
     mount_args=(-v "$(pwd):/work")
     if [[ -d /Users ]]; then
@@ -71,7 +122,7 @@ case "$(uname -s)" in
     if [[ -n "${ACTIOND_KERNEL_DOCKER_PLATFORM:-}" ]]; then
       docker_run_args=(--platform="${ACTIOND_KERNEL_DOCKER_PLATFORM}" "${docker_run_args[@]}")
     fi
-    docker run "${docker_run_args[@]}" "${image}" bash tools/build_linux_kernel.sh --inside-docker
+    "${docker_cmd[@]}" run "${docker_run_args[@]}" "${image}" bash tools/build_linux_kernel.sh --inside-docker
     ;;
   *)
     run_kbuild "${kernel_src}" "${config}" "${kbuild_out}" "${out}"
