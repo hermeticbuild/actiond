@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Error = error{
     CorruptEmbeddedPayload,
@@ -15,6 +16,15 @@ const magic = "ACTIOND_PAYLOAD_V1";
 const trailer_len = 8 + magic.len;
 const copy_buffer_len = 128 * 1024;
 const hex_chars = "0123456789abcdef";
+const mach_o_segment_name = "__ACTIOND";
+const mach_o_kernel_section = "__kernel";
+const mach_o_initramfs_section = "__initramfs";
+const mach_o_runtimes_section = "__runtimes";
+const mh_magic_64: u32 = 0xfeedfacf;
+const lc_segment_64: u32 = 0x19;
+const mach_header_64_len = 32;
+const segment_command_64_len = 72;
+const section_64_len = 80;
 
 pub const PayloadSpec = struct {
     name: []const u8,
@@ -111,13 +121,76 @@ pub fn extractFromExecutablePath(
     defer executable.close(io);
 
     const manifest = readManifest(io, allocator, executable) catch |err| switch (err) {
-        error.NoEmbeddedPayload => return null,
+        error.NoEmbeddedPayload => return try extractMachOSection(io, allocator, root_dir, executable, name),
         else => return err,
     };
     defer allocator.free(manifest);
 
     const entry = findEntry(manifest, name) orelse return null;
     return try extractEntry(io, allocator, root_dir, executable, entry);
+}
+
+const Range = struct {
+    offset: u64,
+    size: u64,
+};
+
+fn extractMachOSection(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    executable: std.Io.File,
+    name: []const u8,
+) !?[]u8 {
+    if (builtin.os.tag != .macos) return null;
+    const section_name = machOSectionNameForPayload(name) orelse return null;
+    const range = try findMachOSection(io, executable, mach_o_segment_name, section_name) orelse return null;
+    return try extractRange(io, allocator, root_dir, executable, name, range);
+}
+
+fn machOSectionNameForPayload(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, kernel_name)) return mach_o_kernel_section;
+    if (std.mem.eql(u8, name, initramfs_name)) return mach_o_initramfs_section;
+    if (std.mem.eql(u8, name, runtimes_name)) return mach_o_runtimes_section;
+    return null;
+}
+
+fn extractRange(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    executable: std.Io.File,
+    name: []const u8,
+    range: Range,
+) ![]u8 {
+    try root_dir.createDirPath(io, "embedded");
+
+    const hash = try hashFileRange(io, executable, range.offset, range.size);
+    const hash_hex = std.fmt.bytesToHex(hash, .lower);
+    const output_rel = try std.fmt.allocPrint(allocator, "embedded/{s}-{s}", .{ name, hash_hex });
+    defer allocator.free(output_rel);
+
+    if (root_dir.statFile(io, output_rel, .{})) |stat| {
+        if (stat.kind == .file and stat.size == range.size) {
+            return try absoluteSubPath(io, allocator, root_dir, output_rel);
+        }
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    var output = try root_dir.createFile(io, output_rel, .{
+        .read = true,
+        .truncate = true,
+        .permissions = .default_file,
+    });
+    defer output.close(io);
+
+    var write_offset: u64 = 0;
+    try copyFileRange(io, executable, output, range.offset, range.size, &write_offset, null);
+    try output.sync(io);
+
+    return try absoluteSubPath(io, allocator, root_dir, output_rel);
 }
 
 fn extractEntry(
@@ -238,6 +311,102 @@ fn copyFileRange(
         copied += n;
         dest_offset.* += n;
     }
+}
+
+fn hashFileRange(
+    io: std.Io,
+    file: std.Io.File,
+    offset: u64,
+    size: u64,
+) ![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buffer: [copy_buffer_len]u8 = undefined;
+    var read_total: u64 = 0;
+    while (read_total < size) {
+        const remaining = size - read_total;
+        const chunk_len: usize = @intCast(@min(remaining, buffer.len));
+        const n = try file.readPositionalAll(io, buffer[0..chunk_len], offset + read_total);
+        if (n == 0) return error.CorruptEmbeddedPayload;
+        hasher.update(buffer[0..n]);
+        read_total += n;
+    }
+
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+    return hash;
+}
+
+fn findMachOSection(
+    io: std.Io,
+    file: std.Io.File,
+    segment_name: []const u8,
+    section_name: []const u8,
+) !?Range {
+    const file_len = try file.length(io);
+    if (file_len < mach_header_64_len) return null;
+
+    var header: [mach_header_64_len]u8 = undefined;
+    if (try file.readPositionalAll(io, &header, 0) != header.len) return error.CorruptEmbeddedPayload;
+    if (std.mem.readInt(u32, header[0..4], .little) != mh_magic_64) return null;
+
+    const ncmds = std.mem.readInt(u32, header[16..20], .little);
+    const sizeofcmds = std.mem.readInt(u32, header[20..24], .little);
+    if (@as(u64, mach_header_64_len) + sizeofcmds > file_len) return error.CorruptEmbeddedPayload;
+
+    var command_offset: u64 = mach_header_64_len;
+    var i: u32 = 0;
+    while (i < ncmds) : (i += 1) {
+        if (command_offset + 8 > file_len) return error.CorruptEmbeddedPayload;
+
+        var command_header: [8]u8 = undefined;
+        if (try file.readPositionalAll(io, &command_header, command_offset) != command_header.len) {
+            return error.CorruptEmbeddedPayload;
+        }
+        const cmd = std.mem.readInt(u32, command_header[0..4], .little);
+        const cmdsize = std.mem.readInt(u32, command_header[4..8], .little);
+        if (cmdsize < 8) return error.CorruptEmbeddedPayload;
+        const next_command_offset = command_offset + cmdsize;
+        if (next_command_offset > @as(u64, mach_header_64_len) + sizeofcmds) return error.CorruptEmbeddedPayload;
+
+        if (cmd == lc_segment_64) {
+            if (cmdsize < segment_command_64_len) return error.CorruptEmbeddedPayload;
+
+            var segment: [segment_command_64_len]u8 = undefined;
+            if (try file.readPositionalAll(io, &segment, command_offset) != segment.len) {
+                return error.CorruptEmbeddedPayload;
+            }
+            const nsects = std.mem.readInt(u32, segment[64..68], .little);
+            const sections_len = @as(u64, nsects) * section_64_len;
+            if (@as(u64, segment_command_64_len) + sections_len > cmdsize) return error.CorruptEmbeddedPayload;
+
+            if (fixedMachONameEquals(segment[8..24], segment_name)) {
+                var section_offset = command_offset + segment_command_64_len;
+                var section_index: u32 = 0;
+                while (section_index < nsects) : (section_index += 1) {
+                    var section: [section_64_len]u8 = undefined;
+                    if (try file.readPositionalAll(io, &section, section_offset) != section.len) {
+                        return error.CorruptEmbeddedPayload;
+                    }
+                    if (fixedMachONameEquals(section[0..16], section_name)) {
+                        const size = std.mem.readInt(u64, section[40..48], .little);
+                        const offset = std.mem.readInt(u32, section[48..52], .little);
+                        if (@as(u64, offset) + size > file_len) return error.CorruptEmbeddedPayload;
+                        return .{ .offset = offset, .size = size };
+                    }
+                    section_offset += section_64_len;
+                }
+            }
+        }
+
+        command_offset = next_command_offset;
+    }
+
+    return null;
+}
+
+fn fixedMachONameEquals(field: []const u8, name: []const u8) bool {
+    const zero = std.mem.indexOfScalar(u8, field, 0) orelse field.len;
+    return std.mem.eql(u8, field[0..zero], name);
 }
 
 fn parseHash(text: []const u8) ![32]u8 {

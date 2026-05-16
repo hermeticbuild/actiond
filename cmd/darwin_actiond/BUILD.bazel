@@ -39,39 +39,68 @@ chmod +x "$@"
     visibility = ["//visibility:public"],
 )
 
+zig_binary(
+    name = "darwin-actiond-standalone-bin",
+    main = "main.zig",
+    csrcs = ["vz_bridge.m"],
+    copts = [
+        "-fblocks",
+        "-fobjc-arc",
+        "-isystem/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
+    ],
+    data = [
+        ":darwin-standalone-payload",
+    ],
+    extra_srcs = [
+        ":darwin-standalone-payload",
+    ],
+    deps = ["//src:actiond"],
+    linkopts = [
+        "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
+        "-L/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib",
+        "-framework",
+        "Foundation",
+        "-framework",
+        "Virtualization",
+        "$(location :darwin-standalone-payload)",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
 genrule(
-    name = "darwin-actiond-standalone-unsigned_pkg",
+    name = "darwin-standalone-payload",
     srcs = [
-        ":darwin-actiond-bin",
         "//runtimes:runtimes_squashfs",
         "//vm:initramfs",
         "//vm:linux_kernel",
     ],
-    outs = ["darwin-actiond-standalone-unsigned"],
+    outs = ["darwin-standalone-payload.o"],
     cmd = """
 set -euo pipefail
-$(execpath //tools:embed_payload) "$@" "$(location :darwin-actiond-bin)" \
-  linux_kernel="$(location //vm:linux_kernel)" \
-  initramfs.cpio="$(location //vm:initramfs)" \
-  runtimes.sqfs="$(location //runtimes:runtimes_squashfs)"
-chmod +x "$@"
+anchor_c="$(@D)/darwin-standalone-payload-anchor.c"
+anchor_o="$(@D)/darwin-standalone-payload-anchor.o"
+printf '%s\n' 'void actiond_standalone_payload_anchor(void) {}' > "$${anchor_c}"
+/usr/bin/clang -c -arch arm64 "$${anchor_c}" -o "$${anchor_o}"
+/usr/bin/ld -r -arch arm64 "$${anchor_o}" \
+  -sectcreate __ACTIOND __kernel "$(location //vm:linux_kernel)" \
+  -sectcreate __ACTIOND __initramfs "$(location //vm:initramfs)" \
+  -sectcreate __ACTIOND __runtimes "$(location //runtimes:runtimes_squashfs)" \
+  -o "$@"
 """,
-    executable = True,
     tags = ["manual"],
     target_compatible_with = ["@platforms//os:macos"],
-    tools = ["//tools:embed_payload"],
 )
 
 genrule(
     name = "darwin-actiond-standalone_pkg",
     srcs = [
-        ":darwin-actiond-standalone-unsigned",
+        ":darwin-actiond-standalone-bin",
         "darwin-actiond.entitlements",
     ],
     outs = ["darwin-actiond-standalone"],
     cmd = """
 set -euo pipefail
-cp "$(location :darwin-actiond-standalone-unsigned)" "$@"
+cp "$(location :darwin-actiond-standalone-bin)" "$@"
 chmod +x "$@"
 /usr/bin/codesign --force --sign - --entitlements "$(location darwin-actiond.entitlements)" "$@"
 """,
