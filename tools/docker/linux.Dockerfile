@@ -15,6 +15,7 @@ RUN apt-get update \
         flex \
         gcc \
         gcc-aarch64-linux-gnu \
+        g++ \
         git \
         libc6-dev \
         libelf-dev \
