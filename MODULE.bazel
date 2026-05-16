@@ -8,6 +8,13 @@ bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "squashfs-tools", version = "4.7.5")
 bazel_dep(name = "platforms", version = "1.0.0")
 
+single_version_override(
+    module_name = "squashfs-tools",
+    patch_strip = 1,
+    patches = ["//third_party/patches:squashfs-tools-no-xz-bin.patch"],
+    version = "4.7.5",
+)
+
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.toolchain(zig_version = "0.16.0")
 use_repo(zig, "zig_toolchains")

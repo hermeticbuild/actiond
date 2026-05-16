@@ -1,0 +1,11 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -52,7 +52,6 @@ cc_library(
+     deps = [
+         "@lz4",
+         "@lz4//:lz4_hc",
+-        "@xz",
+         "@xz//:lzma",
+         "@zlib",
+         "@zstd",
