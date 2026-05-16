@@ -1,0 +1,18 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -53,15 +53,10 @@ cc_library(
+         "lib/zstd_errors.h",
+     ],
+     includes = ["lib"],
+-    linkopts = select({
+-        "@platforms//os:windows": [],
+-        "//conditions:default": ["-pthread"],
+-    }),
+     linkstatic = True,
+     local_defines = [
+         "XXH_NAMESPACE=ZSTD_",
+-        "ZSTD_MULTITHREAD",
+         "ZSTD_BUILD_SHARED=OFF",
+         "ZSTD_BUILD_STATIC=ON",
+     ] + select({
+         "@platforms//os:windows": ["ZSTD_DISABLE_ASM"],

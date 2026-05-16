@@ -1,0 +1,1 @@
+exports_files(["zstd_no_pthread.patch"])

@@ -4,8 +4,18 @@ module(
 )
 
 bazel_dep(name = "rules_zig", version = "0.14.0")
+bazel_dep(name = "apple_support", version = "2.5.4")
+bazel_dep(name = "rules_cc", version = "0.2.18")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "toolchains_llvm", version = "1.7.0")
+bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
+single_version_override(
+    module_name = "zstd",
+    patch_strip = 1,
+    patches = ["//third_party/patches:zstd_no_pthread.patch"],
+    version = "1.5.7.bcr.1",
+)
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.toolchain(zig_version = "0.16.0")
@@ -13,7 +23,18 @@ use_repo(zig, "zig_toolchains")
 
 register_toolchains("@zig_toolchains//:all")
 
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    name = "llvm_toolchain",
+    llvm_version = "20.1.8",
+)
+use_repo(llvm, "llvm_toolchain")
+
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+darwin_sdk_repository = use_repo_rule("//tools:darwin_sdk_repo.bzl", "darwin_sdk_repository")
+
+darwin_sdk_repository(name = "darwin_sdk")
 
 http_archive(
     name = "linux_kernel_src",
