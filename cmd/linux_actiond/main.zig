@@ -7,15 +7,6 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
 
-    if (args.len > 0 and std.mem.eql(u8, std.fs.path.basename(args[0]), "init")) {
-        return actiond.guest_init.run(io);
-    }
-    if (args.len > 1 and std.mem.eql(u8, args[1], "--guest-init")) {
-        return actiond.guest_init.run(io);
-    }
-    if (args.len > 1 and std.mem.eql(u8, args[1], "--guest-worker")) {
-        return actiond.guest_worker.run(io);
-    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "serve")) {
         const options = try actiond.host_server.parseServeArgs(args[2..]);
         return actiond.host_server.serve(io, std.heap.smp_allocator, options);

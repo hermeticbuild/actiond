@@ -1,16 +1,8 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "linux-actiond",
     main = "main.zig",
     deps = ["//src:actiond"],
-    visibility = ["//visibility:public"],
-)
-
-zig_configure_binary(
-    name = "linux-actiond-guest-aarch64",
-    actual = ":linux-actiond",
-    target = "//platforms:linux_aarch64",
-    zig_version = "0.16.0",
     visibility = ["//visibility:public"],
 )

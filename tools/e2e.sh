@@ -129,7 +129,7 @@ run_stress_workspace() {
 
 run_build_checks() {
   run_bazel test //src:unit_tests
-  run_bazel build //cmd/linux_actiond:linux-actiond-guest-aarch64
+  run_bazel build //cmd/linux_actiond_guest:linux-actiond-guest-aarch64
   run_bazel build //vm:initramfs
   run_bazel build //vm:linux_kernel --nobuild
   run_bazel build //tools:e2e_action_tool_linux_aarch64 //tools:e2e_action_tool_linux_x86_64
