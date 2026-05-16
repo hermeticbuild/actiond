@@ -1,6 +1,7 @@
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
 const cas = @import("cas.zig");
+const embedded_payload = @import("embedded_payload.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
 const runtime_mount = @import("runtime_mount.zig");
@@ -72,11 +73,17 @@ pub fn serve(
     try cas.Store.init(cas_dir).ensureLayout(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
 
+    const embedded_runtime_image = if (options.runtime_image == null and options.runtime_root == null)
+        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.runtimes_name)
+    else
+        null;
+    defer if (embedded_runtime_image) |path| allocator.free(path);
+
     var mounted_runtime = try runtime_mount.prepare(
         io,
         allocator,
         root_dir,
-        options.runtime_image,
+        options.runtime_image orelse embedded_runtime_image,
         options.runtime_root,
     );
     defer mounted_runtime.deinit(allocator);

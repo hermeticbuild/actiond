@@ -17,6 +17,13 @@ zig_binary(
     visibility = ["//visibility:public"],
 )
 
+zig_binary(
+    name = "embed_payload",
+    main = "embed_payload.zig",
+    deps = ["//src:actiond"],
+    visibility = ["//visibility:public"],
+)
+
 zig_configure_binary(
     name = "e2e_action_tool_linux_aarch64",
     actual = ":e2e_action_tool",

@@ -12,6 +12,7 @@ pub const control_protocol = @import("control_protocol.zig");
 pub const control_transport_fd = @import("control_transport_fd.zig");
 pub const darwin_vm = @import("darwin_vm.zig");
 pub const darwin_vm_host = @import("darwin_vm_host.zig");
+pub const embedded_payload = @import("embedded_payload.zig");
 pub const execroot = @import("execroot.zig");
 pub const execution_service = @import("execution_service.zig");
 pub const guest_init = @import("guest_init.zig");
@@ -46,6 +47,7 @@ test {
     _ = control_transport_fd;
     _ = darwin_vm;
     _ = darwin_vm_host;
+    _ = embedded_payload;
     _ = execroot;
     _ = execution_service;
     _ = guest_init;

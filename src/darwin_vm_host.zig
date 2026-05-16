@@ -2,6 +2,7 @@ const std = @import("std");
 const cas = @import("cas.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
+const embedded_payload = @import("embedded_payload.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 const guest_proxy = @import("guest_proxy.zig");
 
@@ -95,8 +96,6 @@ pub fn parseServeVmArgs(args: []const []const u8) !ServeVmOptions {
         }
         i += 1;
     }
-    if (options.kernel == null) return error.MissingVmKernel;
-    if (options.initramfs == null) return error.MissingVmInitramfs;
     return options;
 }
 
@@ -119,21 +118,42 @@ pub fn serve(
     try cas.Store.init(cas_dir).ensureLayout(io);
     cas_dir.close(io);
 
+    const embedded_kernel = if (options.kernel == null)
+        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.kernel_name)
+    else
+        null;
+    defer if (embedded_kernel) |path| allocator.free(path);
+    const kernel_path = options.kernel orelse embedded_kernel orelse return error.MissingVmKernel;
+
+    const embedded_initramfs = if (options.initramfs == null)
+        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.initramfs_name)
+    else
+        null;
+    defer if (embedded_initramfs) |path| allocator.free(path);
+    const initramfs_path = options.initramfs orelse embedded_initramfs orelse return error.MissingVmInitramfs;
+
+    const embedded_runtime_image = if (options.runtime_image == null)
+        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.runtimes_name)
+    else
+        null;
+    defer if (embedded_runtime_image) |path| allocator.free(path);
+    const runtime_image_path = options.runtime_image orelse embedded_runtime_image;
+
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
     try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas={s}\n", .{
-        options.kernel.?,
-        options.initramfs.?,
-        options.runtime_image orelse "<none>",
+        kernel_path,
+        initramfs_path,
+        runtime_image_path orelse "<none>",
         cas_path,
     });
     try stderr.flush();
 
     var vm = try darwin_vm.Machine.start(allocator, .{
-        .kernel_path = options.kernel.?,
-        .initramfs_path = options.initramfs.?,
-        .runtime_image_path = options.runtime_image,
+        .kernel_path = kernel_path,
+        .initramfs_path = initramfs_path,
+        .runtime_image_path = runtime_image_path,
         .cas_path = cas_path,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
@@ -192,9 +212,10 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqual(@as(u32, 5678), options.connect_timeout_ms);
 }
 
-test "parseServeVmArgs requires kernel and initramfs" {
-    try std.testing.expectError(error.MissingVmKernel, parseServeVmArgs(&.{}));
-    try std.testing.expectError(error.MissingVmInitramfs, parseServeVmArgs(&.{"--kernel=/tmp/Image"}));
+test "parseServeVmArgs permits embedded VM artifacts" {
+    const options = try parseServeVmArgs(&.{});
+    try std.testing.expectEqual(@as(?[]const u8, null), options.kernel);
+    try std.testing.expectEqual(@as(?[]const u8, null), options.initramfs);
     try std.testing.expectError(error.MissingServeArgumentValue, parseServeVmArgs(&.{ "--kernel", "/tmp/Image", "--initramfs" }));
     try std.testing.expectError(error.UnknownServeArgument, parseServeVmArgs(&.{ "--kernel=/tmp/Image", "--initramfs=/tmp/initramfs", "--bad" }));
 }
