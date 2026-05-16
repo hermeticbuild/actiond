@@ -22,6 +22,7 @@ def _stress_tree_impl(ctx):
         inputs = inputs,
         outputs = [out_file, out_dir],
         arguments = [args],
+        execution_requirements = ctx.attr.execution_requirements,
         mnemonic = "ActiondStressTree",
         progress_message = "Generating stress tree %{label}",
     )
@@ -33,6 +34,7 @@ stress_tree = rule(
         "srcs": attr.label_list(allow_files = True),
         "trees": attr.label_list(),
         "files": attr.int(default = 16),
+        "execution_requirements": attr.string_dict(),
         "tool": attr.label(
             allow_single_file = True,
             executable = True,
@@ -54,6 +56,7 @@ def _stress_consumer_impl(ctx):
         inputs = inputs,
         outputs = [out_file, out_dir],
         arguments = [args],
+        execution_requirements = ctx.attr.execution_requirements,
         mnemonic = "ActiondStressConsume",
         progress_message = "Consuming stress inputs %{label}",
     )
@@ -65,6 +68,7 @@ stress_consumer = rule(
         "srcs": attr.label_list(allow_files = True),
         "trees": attr.label_list(),
         "files": attr.int(default = 16),
+        "execution_requirements": attr.string_dict(),
         "tool": attr.label(
             allow_single_file = True,
             executable = True,
@@ -72,4 +76,3 @@ stress_consumer = rule(
         ),
     },
 )
-

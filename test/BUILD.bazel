@@ -19,6 +19,7 @@ stress_tree(
 
 stress_tree(
     name = "tree_mixed",
+    execution_requirements = {"libc": "glibc2.35"},
     srcs = [":source_dir_inputs"],
     trees = [":tree_seed"],
     files = 48,
@@ -27,6 +28,7 @@ stress_tree(
 
 stress_consumer(
     name = "stress_all",
+    execution_requirements = {"libc": "glibc2.35"},
     srcs = [
         ":bare_inputs",
         ":source_dir_inputs",
@@ -38,4 +40,3 @@ stress_consumer(
     files = 64,
     tool = "//tool:action-tool",
 )
-
