@@ -4,6 +4,7 @@ const Options = struct {
     out_file: ?[]const u8 = null,
     out_dir: ?[]const u8 = null,
     out_count: usize = 16,
+    expect_network_blocked: bool = false,
     scans: std.ArrayListUnmanaged([]const u8) = .empty,
 
     fn deinit(self: *Options, allocator: std.mem.Allocator) void {
@@ -21,6 +22,8 @@ pub fn main(init: std.process.Init) !void {
 
     var options = try parseArgs(allocator, args.items);
     defer options.deinit(allocator);
+
+    if (options.expect_network_blocked) try expectNetworkBlocked();
 
     const cwd = std.Io.Dir.cwd();
     var hash = std.hash.Wyhash.init(0xaca1_0d5eed);
@@ -77,11 +80,55 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
             i += 1;
             if (i >= args.len) return error.MissingArgumentValue;
             try options.scans.append(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--expect-network-blocked")) {
+            options.expect_network_blocked = true;
         } else {
             return error.UnknownArgument;
         }
     }
     return options;
+}
+
+fn expectNetworkBlocked() !void {
+    const linux = std.os.linux;
+    if (@import("builtin").os.tag != .linux) return;
+
+    const socket_rc = linux.socket(
+        linux.AF.INET,
+        linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        linux.IPPROTO.TCP,
+    );
+    switch (std.posix.errno(socket_rc)) {
+        .SUCCESS => {},
+        .AFNOSUPPORT, .PROTONOSUPPORT => return,
+        else => |err| {
+            std.debug.print("network block check could not create socket: {s}\n", .{@tagName(err)});
+            return error.NetworkCheckFailed;
+        },
+    }
+    const fd: i32 = @intCast(socket_rc);
+    defer _ = linux.close(fd);
+
+    var addr = linux.sockaddr.in{
+        .port = std.mem.nativeToBig(u16, 80),
+        .addr = std.mem.nativeToBig(u32, 0x01010101),
+    };
+    const connect_rc = linux.connect(
+        fd,
+        @as(*const linux.sockaddr, @ptrCast(&addr)),
+        @sizeOf(linux.sockaddr.in),
+    );
+    switch (std.posix.errno(connect_rc)) {
+        .NETUNREACH, .HOSTUNREACH, .NETDOWN, .ADDRNOTAVAIL, .ACCES, .PERM => return,
+        .SUCCESS, .INPROGRESS, .ALREADY, .ISCONN => {
+            std.debug.print("network block check found a reachable TCP path\n", .{});
+            return error.NetworkReachable;
+        },
+        else => |err| {
+            std.debug.print("network block check returned unexpected connect errno: {s}\n", .{@tagName(err)});
+            return error.NetworkCheckFailed;
+        },
+    }
 }
 
 fn hashPath(
@@ -200,4 +247,10 @@ fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
             else => return error.ReadFailed,
         }
     }
+}
+
+test "parseArgs accepts network block check" {
+    var options = try parseArgs(std.testing.allocator, &.{"--expect-network-blocked"});
+    defer options.deinit(std.testing.allocator);
+    try std.testing.expect(options.expect_network_blocked);
 }

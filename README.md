@@ -6,7 +6,7 @@ actions in a Linux sandbox.
 It has two execution modes:
 
 - `linux-actiond`: runs actions directly on a Linux host using chroot, private
-  mount namespaces, read-only bind mounts, and best-effort cgroups.
+  mount/network namespaces, read-only bind mounts, and best-effort cgroups.
 - `darwin-actiond serve-vm`: runs on macOS and proxies execution into a tiny
   Linux VM built with Apple's Virtualization.framework.
 

@@ -21,6 +21,11 @@ zig_binary(
     visibility = ["//visibility:public"],
 )
 
+zig_test(
+    name = "e2e_action_tool_tests",
+    main = "e2e_action_tool.zig",
+)
+
 zig_binary(
     name = "embed_payload",
     main = "embed_payload.zig",

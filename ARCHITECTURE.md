@@ -68,7 +68,8 @@ The VM is intentionally small:
 - no SSH, package manager, systemd, graphics, audio, or user login
 
 The VM is a long-lived worker. Per-action isolation happens inside Linux with a
-fresh chroot and mount namespace rather than by cold-booting a VM per action.
+fresh chroot, mount namespace, and network namespace rather than by cold-booting
+a VM per action.
 
 ## Why the Kernel Is Inflated Before Boot
 
@@ -205,7 +206,7 @@ For each action:
    - join cgroup if one was created
    - set `PR_SET_NO_NEW_PRIVS`
    - close extra file descriptors
-   - unshare the mount namespace
+   - unshare the mount and network namespaces
    - make mounts private
    - apply read-only bind mounts
    - chroot into the work root
@@ -224,7 +225,7 @@ The isolation boundary differs by host:
 `linux-actiond` relies on Linux kernel primitives:
 
 - chroot
-- private mount namespace
+- private mount and network namespaces
 - read-only bind mounts
 - dropped uid/gid
 - `PR_SET_NO_NEW_PRIVS`
@@ -243,7 +244,8 @@ macOS only exposes:
 - virtio-vsock control channel
 - serial stderr for logs
 
-There is no guest network device. Root inside the guest is not host root.
+There is no guest network device, and each action still gets its own Linux
+network namespace inside the VM. Root inside the guest is not host root.
 
 ## Cgroups
 
@@ -314,7 +316,10 @@ Unit tests cover protocol encoding/decoding, CAS behavior, HTTP/2 dispatch,
 execroot construction, runtime mount mapping, initramfs creation, SquashFS
 packing, and zstd packaging.
 
-End-to-end tests use `tools/e2e.sh` and the standalone `test/` workspace.
+End-to-end tests use `tools/e2e.sh` and the standalone `test/` workspace. The
+stress action graph covers bare files, source directories, tree artifact inputs,
+output directories, and an action-level probe that fails if the sandbox can open
+an outbound TCP path.
 
 Useful commands:
 

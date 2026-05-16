@@ -11,6 +11,11 @@ pub const Error = error{
 const max_stream_bytes = 16 * 1024 * 1024;
 const cgroup_period_us: u64 = 100_000;
 
+fn actionNamespaceFlags() usize {
+    const linux = std.os.linux;
+    return linux.CLONE.NEWNS | linux.CLONE.NEWNET;
+}
+
 pub const CgroupLimits = struct {
     memory_max_bytes: ?u64 = null,
     cpu_max_cores: ?u32 = null,
@@ -426,7 +431,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     if (action.cgroup_procs_path) |path| childWriteFile(path, "0\n");
     childSyscallName(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "prctl_no_new_privs");
     childCloseExtraFds();
-    childSyscallName(linux.unshare(linux.CLONE.NEWNS), "unshare_newns");
+    childSyscallName(linux.unshare(actionNamespaceFlags()), "unshare_namespaces");
     childSyscallName(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0), "mount_private");
     for (action.bind_mounts) |mount| childBindMountReadOnly(mount);
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
@@ -718,6 +723,13 @@ test "CgroupLimits ignores invalid execution property values" {
     });
 
     try std.testing.expect(!limits.any());
+}
+
+test "action namespace flags isolate mounts and networking" {
+    const linux = std.os.linux;
+    const flags = actionNamespaceFlags();
+    try std.testing.expect((flags & linux.CLONE.NEWNS) != 0);
+    try std.testing.expect((flags & linux.CLONE.NEWNET) != 0);
 }
 
 test "runCommandWithOptions rejects chroot execution on non-Linux hosts" {
