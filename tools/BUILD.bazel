@@ -24,6 +24,12 @@ zig_binary(
     visibility = ["//visibility:public"],
 )
 
+zig_binary(
+    name = "sqfs_pack",
+    main = "sqfs_pack.zig",
+    visibility = ["//visibility:public"],
+)
+
 zig_configure_binary(
     name = "e2e_action_tool_linux_aarch64",
     actual = ":e2e_action_tool",
@@ -43,4 +49,9 @@ zig_configure_binary(
 zig_test(
     name = "initramfs_newc_tests",
     main = "initramfs_newc.zig",
+)
+
+zig_test(
+    name = "sqfs_pack_tests",
+    main = "sqfs_pack.zig",
 )

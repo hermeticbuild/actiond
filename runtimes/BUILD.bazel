@@ -38,14 +38,8 @@ copy_runtime "$$(dirname "$(location @glibc_2_35_x86_64//:runtime_manifest.json)
 copy_runtime "$$(dirname "$(location @glibc_2_39_aarch64//:runtime_manifest.json)")" glibc2.39 aarch64
 copy_runtime "$$(dirname "$(location @glibc_2_39_x86_64//:runtime_manifest.json)")" glibc2.39 x86_64
 
-"$(execpath @squashfs-tools//:mksquashfs)" "$${tree}" "$@" \
-  -noappend \
-  -comp gzip \
-  -all-root \
-  -mkfs-time 0 \
-  -no-xattrs \
-  -no-progress
+"$(execpath //tools:sqfs_pack)" "$${tree}" "$@"
 """,
-    tools = ["@squashfs-tools//:mksquashfs"],
+    tools = ["//tools:sqfs_pack"],
     visibility = ["//visibility:public"],
 )
