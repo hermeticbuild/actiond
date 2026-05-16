@@ -1,5 +1,9 @@
 const std = @import("std");
-const flate = std.compress.flate;
+const zstd = std.compress.zstd;
+const c = @cImport({
+    @cDefine("ZSTD_STATIC_LINKING_ONLY", "1");
+    @cInclude("zstd.h");
+});
 
 const superblock_size = 96;
 const metadata_size = 8192;
@@ -8,7 +12,7 @@ const block_log = 17;
 const max_input_file_bytes = 8 * 1024 * 1024 * 1024;
 
 const squashfs_magic = 0x7371_7368;
-const zlib_compression = 1;
+const zstd_compression = 6;
 const invalid_u32 = 0xffff_ffff;
 const invalid_u64 = 0xffff_ffff_ffff_ffff;
 const uncompressed_metadata_bit = 1 << 15;
@@ -290,7 +294,7 @@ fn writeDataBlock(
     writer: *std.Io.Writer,
     plain: []const u8,
 ) !u32 {
-    const compressed = try compressZlib(allocator, plain);
+    const compressed = try compressZstdMax(allocator, plain);
     defer allocator.free(compressed);
 
     if (compressed.len < plain.len) {
@@ -436,19 +440,28 @@ fn writeMetadataStream(writer: *std.Io.Writer, payload: []const u8) !void {
     }
 }
 
-fn compressZlib(allocator: std.mem.Allocator, plain: []const u8) ![]u8 {
-    const output_capacity = plain.len + plain.len / 8 + 4096;
-    const output_buffer = try allocator.alloc(u8, output_capacity);
+fn compressZstdMax(allocator: std.mem.Allocator, plain: []const u8) ![]u8 {
+    const bound = c.ZSTD_compressBound(plain.len);
+    if (c.ZSTD_isError(bound) != 0) return error.ZstdCompressBoundFailed;
+
+    const output_buffer = try allocator.alloc(u8, bound);
     defer allocator.free(output_buffer);
 
-    var output = std.Io.Writer.fixed(output_buffer);
-    const work = try allocator.alloc(u8, flate.max_window_len);
-    defer allocator.free(work);
+    const context = c.ZSTD_createCCtx() orelse return error.OutOfMemory;
+    defer _ = c.ZSTD_freeCCtx(context);
 
-    var compressor = try flate.Compress.init(&output, work, .zlib, flate.Compress.Options.level_6);
-    try compressor.writer.writeAll(plain);
-    try compressor.finish();
-    return try allocator.dupe(u8, output.buffered());
+    const level = c.ZSTD_maxCLevel();
+    const compressed_len = c.ZSTD_compressCCtx(
+        context,
+        output_buffer.ptr,
+        output_buffer.len,
+        plain.ptr,
+        plain.len,
+        level,
+    );
+    if (c.ZSTD_isError(compressed_len) != 0) return error.ZstdCompressFailed;
+
+    return try allocator.dupe(u8, output_buffer[0..compressed_len]);
 }
 
 fn metadataRef(offset: usize) Ref {
@@ -471,7 +484,7 @@ fn writeSuperblock(dest: []u8, super: Super) void {
     writeU32(writer, super.mkfs_time) catch unreachable;
     writeU32(writer, block_size) catch unreachable;
     writeU32(writer, super.fragments) catch unreachable;
-    writeU16(writer, zlib_compression) catch unreachable;
+    writeU16(writer, zstd_compression) catch unreachable;
     writeU16(writer, block_log) catch unreachable;
     writeU16(writer, flag_uncompressed_inodes | flag_no_fragments) catch unreachable;
     writeU16(writer, 1) catch unreachable;
@@ -533,22 +546,23 @@ test "superblock writer emits squashfs v4 magic and table pointers" {
 
     try std.testing.expectEqual(squashfs_magic, std.mem.readInt(u32, bytes[0..4], .little));
     try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, bytes[4..8], .little));
+    try std.testing.expectEqual(zstd_compression, std.mem.readInt(u16, bytes[20..22], .little));
     try std.testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, bytes[28..30], .little));
     try std.testing.expectEqual(@as(u64, 4096), std.mem.readInt(u64, bytes[40..48], .little));
     try std.testing.expectEqual(@as(u64, 128), std.mem.readInt(u64, bytes[64..72], .little));
 }
 
-test "zlib compression round trips" {
+test "zstd max compression round trips" {
     const plain = "actiond runtime squashfs payload payload payload";
-    const compressed = try compressZlib(std.testing.allocator, plain);
+    const compressed = try compressZstdMax(std.testing.allocator, plain);
     defer std.testing.allocator.free(compressed);
 
     var input = std.Io.Reader.fixed(compressed);
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
 
-    var window: [flate.max_window_len]u8 = undefined;
-    var decompressor: flate.Decompress = .init(&input, .zlib, &window);
+    var window: [zstd.default_window_len + zstd.block_size_max]u8 = undefined;
+    var decompressor: zstd.Decompress = .init(&input, &window, .{});
     const n = try decompressor.reader.streamRemaining(&output.writer);
 
     try std.testing.expectEqual(plain.len, n);

@@ -20,30 +20,31 @@ zig_binary(
 zig_binary(
     name = "embed_payload",
     main = "embed_payload.zig",
-    deps = ["//src:actiond"],
     visibility = ["//visibility:public"],
+    deps = ["//src:actiond"],
 )
 
 zig_binary(
     name = "sqfs_pack",
     main = "sqfs_pack.zig",
     visibility = ["//visibility:public"],
+    deps = ["@zstd"],
 )
 
 zig_configure_binary(
     name = "e2e_action_tool_linux_aarch64",
     actual = ":e2e_action_tool",
     target = "//platforms:linux_aarch64",
-    zig_version = "0.16.0",
     visibility = ["//visibility:public"],
+    zig_version = "0.16.0",
 )
 
 zig_configure_binary(
     name = "e2e_action_tool_linux_x86_64",
     actual = ":e2e_action_tool",
     target = "//platforms:linux_x86_64",
-    zig_version = "0.16.0",
     visibility = ["//visibility:public"],
+    zig_version = "0.16.0",
 )
 
 zig_test(
@@ -54,4 +55,5 @@ zig_test(
 zig_test(
     name = "sqfs_pack_tests",
     main = "sqfs_pack.zig",
+    deps = ["@zstd"],
 )
