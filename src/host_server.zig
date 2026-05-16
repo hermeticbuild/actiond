@@ -3,6 +3,7 @@ const action_cache = @import("action_cache.zig");
 const cas = @import("cas.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
+const runtime_mount = @import("runtime_mount.zig");
 
 pub const Error = error{
     UnknownServeArgument,
@@ -12,6 +13,8 @@ pub const Error = error{
 pub const ServeOptions = struct {
     listen: []const u8 = "127.0.0.1:8980",
     root: []const u8 = "/tmp/actiond",
+    runtime_image: ?[]const u8 = null,
+    runtime_root: ?[]const u8 = null,
 };
 
 pub fn parseServeArgs(args: []const []const u8) !ServeOptions {
@@ -31,6 +34,18 @@ pub fn parseServeArgs(args: []const []const u8) !ServeOptions {
             options.root = args[i];
         } else if (std.mem.startsWith(u8, arg, "--root=")) {
             options.root = arg["--root=".len..];
+        } else if (std.mem.eql(u8, arg, "--runtime-image")) {
+            i += 1;
+            if (i >= args.len) return error.MissingServeArgumentValue;
+            options.runtime_image = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--runtime-image=")) {
+            options.runtime_image = arg["--runtime-image=".len..];
+        } else if (std.mem.eql(u8, arg, "--runtime-root")) {
+            i += 1;
+            if (i >= args.len) return error.MissingServeArgumentValue;
+            options.runtime_root = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--runtime-root=")) {
+            options.runtime_root = arg["--runtime-root=".len..];
         } else {
             return error.UnknownServeArgument;
         }
@@ -57,10 +72,22 @@ pub fn serve(
     try cas.Store.init(cas_dir).ensureLayout(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
 
+    var mounted_runtime = try runtime_mount.prepare(
+        io,
+        allocator,
+        root_dir,
+        options.runtime_image,
+        options.runtime_root,
+    );
+    defer mounted_runtime.deinit(allocator);
+
     const server: reapi_dispatch.Server = .{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
         .work_root = work_dir,
+        .execution_options = .{
+            .runtime_root_path = mounted_runtime.path(),
+        },
     };
 
     return grpc_http2_server.serve(io, allocator, .{
@@ -79,7 +106,24 @@ test "parseServeArgs accepts split and equals flags" {
     try std.testing.expectEqualStrings("/tmp/actiond-test", options.root);
 }
 
+test "parseServeArgs accepts runtime image and runtime root flags" {
+    const image_options = try parseServeArgs(&.{
+        "--runtime-image",
+        "/tmp/runtimes.sqfs",
+    });
+    try std.testing.expectEqualStrings("/tmp/runtimes.sqfs", image_options.runtime_image.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), image_options.runtime_root);
+
+    const root_options = try parseServeArgs(&.{
+        "--runtime-root=/mnt/actiond-runtimes",
+    });
+    try std.testing.expectEqualStrings("/mnt/actiond-runtimes", root_options.runtime_root.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), root_options.runtime_image);
+}
+
 test "parseServeArgs rejects unknown flags" {
     try std.testing.expectError(error.UnknownServeArgument, parseServeArgs(&.{"--bad"}));
     try std.testing.expectError(error.MissingServeArgumentValue, parseServeArgs(&.{"--root"}));
+    try std.testing.expectError(error.MissingServeArgumentValue, parseServeArgs(&.{"--runtime-image"}));
+    try std.testing.expectError(error.MissingServeArgumentValue, parseServeArgs(&.{"--runtime-root"}));
 }

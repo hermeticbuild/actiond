@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("linux-actiond zig={s} bazel={s}\nusage: linux-actiond serve [--listen=127.0.0.1:8980] [--root=/tmp/actiond]\n", .{
+    try stdout.print("linux-actiond zig={s} bazel={s}\nusage: linux-actiond serve [--listen=127.0.0.1:8980] [--root=/tmp/actiond] [--runtime-image=/path/runtimes.sqfs|--runtime-root=/mnt/runtimes]\n", .{
         actiond.version.zig,
         actiond.version.bazel,
     });

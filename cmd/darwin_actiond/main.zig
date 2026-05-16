@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print(
         \\darwin-actiond zig={s} bazel={s}
         \\usage:
-        \\  darwin-actiond serve [--listen=127.0.0.1:8980] [--root=/tmp/actiond]
+        \\  darwin-actiond serve [--listen=127.0.0.1:8980] [--root=/tmp/actiond] [--runtime-root=/mnt/runtimes]
         \\  darwin-actiond serve-vm --kernel=/path/Image --initramfs=/path/initramfs.cpio [--runtime-image=/path/runtimes.sqfs] [--listen=127.0.0.1:8980] [--root=/tmp/actiond-vm]
         \\
     , .{

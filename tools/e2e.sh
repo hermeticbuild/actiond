@@ -149,13 +149,19 @@ run_linux_e2e() {
   prepare_stress_workspace "${arch}"
 
   run_bazel build //cmd/linux_actiond:linux-actiond
+  run_bazel build //runtimes:runtimes_squashfs
   local server
   server="$(bazel_output //cmd/linux_actiond:linux-actiond)"
+  local runtimes
+  runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
   local root
   root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-e2e.XXXXXX")"
   local log="${root}/linux-actiond.log"
 
-  "${server}" serve --listen="${endpoint}" --root="${root}/server" >"${log}" 2>&1 &
+  "${server}" serve \
+    --listen="${endpoint}" \
+    --root="${root}/server" \
+    --runtime-image="${runtimes}" >"${log}" 2>&1 &
   e2e_server_pid="$!"
   e2e_root="${root}"
   e2e_log="${log}"
