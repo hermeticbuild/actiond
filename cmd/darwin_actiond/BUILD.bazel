@@ -67,7 +67,7 @@ zig_binary(
 genrule(
     name = "darwin-standalone-payload",
     srcs = [
-        "//runtimes:runtimes_squashfs",
+        "//runtimes:runtimes_squashfs_aarch64",
         "//vm:initramfs",
         "//vm:linux_kernel",
     ],
@@ -81,7 +81,7 @@ printf '%s\n' 'void actiond_standalone_payload_anchor(void) {}' > "$${anchor_c}"
 /usr/bin/ld -r -arch arm64 "$${anchor_o}" \
   -sectcreate __ACTIOND __kernel "$(location //vm:linux_kernel)" \
   -sectcreate __ACTIOND __initramfs "$(location //vm:initramfs)" \
-  -sectcreate __ACTIOND __runtimes "$(location //runtimes:runtimes_squashfs)" \
+  -sectcreate __ACTIOND __runtimes "$(location //runtimes:runtimes_squashfs_aarch64)" \
   -o "$@"
 """,
     tags = ["manual"],

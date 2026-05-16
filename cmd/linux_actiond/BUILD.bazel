@@ -44,12 +44,12 @@ genrule(
     name = "linux-actiond-standalone-aarch64_pkg",
     srcs = [
         ":linux-actiond-linux-aarch64",
-        "//runtimes:runtimes_squashfs",
+        "//runtimes:runtimes_squashfs_aarch64",
     ],
     outs = ["linux-actiond-standalone-aarch64"],
     cmd = """
 set -euo pipefail
-$(execpath //tools:embed_payload) "$@" "$(location :linux-actiond-linux-aarch64)" runtimes.sqfs="$(location //runtimes:runtimes_squashfs)"
+$(execpath //tools:embed_payload) "$@" "$(location :linux-actiond-linux-aarch64)" runtimes.sqfs="$(location //runtimes:runtimes_squashfs_aarch64)"
 chmod +x "$@"
 """,
     executable = True,
@@ -61,12 +61,12 @@ genrule(
     name = "linux-actiond-standalone-x86_64_pkg",
     srcs = [
         ":linux-actiond-linux-x86_64",
-        "//runtimes:runtimes_squashfs",
+        "//runtimes:runtimes_squashfs_x86_64",
     ],
     outs = ["linux-actiond-standalone-x86_64"],
     cmd = """
 set -euo pipefail
-$(execpath //tools:embed_payload) "$@" "$(location :linux-actiond-linux-x86_64)" runtimes.sqfs="$(location //runtimes:runtimes_squashfs)"
+$(execpath //tools:embed_payload) "$@" "$(location :linux-actiond-linux-x86_64)" runtimes.sqfs="$(location //runtimes:runtimes_squashfs_x86_64)"
 chmod +x "$@"
 """,
     executable = True,

@@ -38,6 +38,7 @@ rm -rf \
   root/usr/share/locale \
   root/usr/share/man \
   root/var
+find root -path '*/gconv' -type d -prune -exec rm -rf '{}' +
 mkdir -p root/etc
 cat > root/etc/nsswitch.conf <<'EOF'
 passwd: files
