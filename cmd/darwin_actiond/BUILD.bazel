@@ -82,7 +82,7 @@ genrule(
     srcs = [
         "//runtimes:runtimes_squashfs_aarch64",
         "//vm:initramfs",
-        "//vm:linux_kernel",
+        "//vm:linux_kernel_zst",
     ],
     outs = ["darwin-standalone-payload.o"],
     cmd = """
@@ -92,7 +92,7 @@ anchor_o="$(@D)/darwin-standalone-payload-anchor.o"
 printf '%s\n' 'void actiond_standalone_payload_anchor(void) {}' > "$${anchor_c}"
 /usr/bin/clang -c -arch arm64 "$${anchor_c}" -o "$${anchor_o}"
 /usr/bin/ld -r -arch arm64 "$${anchor_o}" \
-  -sectcreate __ACTIOND __kernel "$(location //vm:linux_kernel)" \
+  -sectcreate __ACTIOND __kernel "$(location //vm:linux_kernel_zst)" \
   -sectcreate __ACTIOND __initramfs "$(location //vm:initramfs)" \
   -sectcreate __ACTIOND __runtimes "$(location //runtimes:runtimes_squashfs_aarch64)" \
   -o "$@"

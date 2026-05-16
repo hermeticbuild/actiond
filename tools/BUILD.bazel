@@ -36,6 +36,14 @@ zig_binary(
     deps = ["@zstd"],
 )
 
+zig_binary(
+    name = "zstd_file",
+    main = "zstd_file.zig",
+    strip_debug_symbols = True,
+    visibility = ["//visibility:public"],
+    deps = ["@zstd"],
+)
+
 zig_configure_binary(
     name = "e2e_action_tool_linux_aarch64",
     actual = ":e2e_action_tool",
@@ -61,5 +69,11 @@ zig_test(
 zig_test(
     name = "sqfs_pack_tests",
     main = "sqfs_pack.zig",
+    deps = ["@zstd"],
+)
+
+zig_test(
+    name = "zstd_file_tests",
+    main = "zstd_file.zig",
     deps = ["@zstd"],
 )

@@ -26,11 +26,25 @@ genrule(
     visibility = ["//visibility:public"],
 )
 
+genrule(
+    name = "linux_kernel_zst",
+    srcs = [":linux_kernel"],
+    outs = ["Image.zst"],
+    cmd = "$(execpath //tools:zstd_file) $(location :linux_kernel) $@",
+    tags = [
+        "local",
+        "manual",
+        "no-sandbox",
+    ],
+    tools = ["//tools:zstd_file"],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "vm_bundle",
     srcs = [
         ":initramfs",
-        ":linux_kernel",
+        ":linux_kernel_zst",
         "//runtimes:runtimes_squashfs",
     ],
     tags = ["manual"],

@@ -19,6 +19,9 @@ pub const Error = error{
 
 const max_compressed_initramfs_bytes = 128 * 1024 * 1024;
 const max_raw_initramfs_bytes = 512 * 1024 * 1024;
+const max_compressed_kernel_bytes = 128 * 1024 * 1024;
+const max_raw_kernel_bytes = 512 * 1024 * 1024;
+const zstd_magic = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd };
 
 pub const ServeVmOptions = struct {
     listen: []const u8 = "127.0.0.1:8980",
@@ -135,6 +138,9 @@ pub fn serve(
         null;
     defer if (embedded_kernel) |path| allocator.free(path);
     const kernel_path = options.kernel orelse embedded_kernel orelse return error.MissingVmKernel;
+    const raw_kernel = try prepareBootKernel(io, allocator, root_dir, kernel_path);
+    defer if (raw_kernel) |path| allocator.free(path);
+    const boot_kernel_path = raw_kernel orelse kernel_path;
 
     const embedded_initramfs = if (options.initramfs == null)
         try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.initramfs_name)
@@ -157,7 +163,7 @@ pub fn serve(
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
     try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas={s}\n", .{
-        kernel_path,
+        boot_kernel_path,
         boot_initramfs_path,
         runtime_image_path orelse "<none>",
         cas_path,
@@ -165,7 +171,7 @@ pub fn serve(
     try stderr.flush();
 
     var vm = try darwin_vm.Machine.start(allocator, .{
-        .kernel_path = kernel_path,
+        .kernel_path = boot_kernel_path,
         .initramfs_path = boot_initramfs_path,
         .runtime_image_path = runtime_image_path,
         .cas_path = cas_path,
@@ -208,20 +214,65 @@ fn prepareBootInitramfs(
     root_dir: std.Io.Dir,
     initramfs_path: []const u8,
 ) !?[]u8 {
-    if (!isZstdInitramfsPath(initramfs_path)) return null;
+    return try prepareZstdBootFile(
+        io,
+        allocator,
+        root_dir,
+        initramfs_path,
+        "initramfs",
+        "cpio",
+        max_compressed_initramfs_bytes,
+        max_raw_initramfs_bytes,
+    );
+}
 
+fn prepareBootKernel(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    kernel_path: []const u8,
+) !?[]u8 {
+    return try prepareZstdBootFile(
+        io,
+        allocator,
+        root_dir,
+        kernel_path,
+        "kernel",
+        "Image",
+        max_compressed_kernel_bytes,
+        max_raw_kernel_bytes,
+    );
+}
+
+fn prepareZstdBootFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    path: []const u8,
+    artifact_name: []const u8,
+    raw_extension: []const u8,
+    max_compressed_bytes: u64,
+    max_raw_bytes: u64,
+) !?[]u8 {
+    const read_limit = if (max_raw_bytes > max_compressed_bytes) max_raw_bytes else max_compressed_bytes;
     const compressed = try std.Io.Dir.cwd().readFileAlloc(
         io,
-        initramfs_path,
+        path,
         allocator,
-        .limited(max_compressed_initramfs_bytes),
+        .limited(read_limit),
     );
     defer allocator.free(compressed);
+
+    if (!isZstdFrame(compressed)) {
+        if (std.mem.endsWith(u8, path, ".zst")) return error.InvalidCompressedBootArtifact;
+        return null;
+    }
+    if (compressed.len > max_compressed_bytes) return error.FileTooBig;
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(compressed, &digest, .{});
     const digest_hex = std.fmt.bytesToHex(digest, .lower);
-    const output_rel = try std.fmt.allocPrint(allocator, "boot/initramfs-{s}.cpio", .{digest_hex});
+    const output_rel = try std.fmt.allocPrint(allocator, "boot/{s}-{s}.{s}", .{ artifact_name, digest_hex, raw_extension });
     defer allocator.free(output_rel);
 
     try root_dir.createDirPath(io, "boot");
@@ -232,7 +283,7 @@ fn prepareBootInitramfs(
         else => return err,
     }
 
-    const raw = try decompressZstdAlloc(allocator, compressed);
+    const raw = try decompressZstdAlloc(allocator, compressed, max_raw_bytes);
     defer allocator.free(raw);
 
     var file = try root_dir.createFile(io, output_rel, .{ .truncate = true });
@@ -245,17 +296,17 @@ fn prepareBootInitramfs(
     return try absoluteSubPath(io, allocator, root_dir, output_rel);
 }
 
-fn decompressZstdAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+fn decompressZstdAlloc(allocator: std.mem.Allocator, compressed: []const u8, max_raw_bytes: u64) ![]u8 {
     const content_size = zstd.ZSTD_getFrameContentSize(compressed.ptr, compressed.len);
-    if (content_size == zstdContentSizeError()) return error.InvalidCompressedInitramfs;
-    if (content_size == zstdContentSizeUnknown()) return error.UnknownCompressedInitramfsSize;
-    if (content_size > max_raw_initramfs_bytes) return error.FileTooBig;
+    if (content_size == zstdContentSizeError()) return error.InvalidCompressedBootArtifact;
+    if (content_size == zstdContentSizeUnknown()) return error.UnknownCompressedBootArtifactSize;
+    if (content_size > max_raw_bytes) return error.FileTooBig;
 
     const raw = try allocator.alloc(u8, @intCast(content_size));
     errdefer allocator.free(raw);
     const actual_size = zstd.ZSTD_decompress(raw.ptr, raw.len, compressed.ptr, compressed.len);
-    if (zstd.ZSTD_isError(actual_size) != 0) return error.InvalidCompressedInitramfs;
-    if (actual_size != raw.len) return error.InvalidCompressedInitramfs;
+    if (zstd.ZSTD_isError(actual_size) != 0) return error.InvalidCompressedBootArtifact;
+    if (actual_size != raw.len) return error.InvalidCompressedBootArtifact;
     return raw;
 }
 
@@ -267,8 +318,8 @@ fn zstdContentSizeError() c_ulonglong {
     return std.math.maxInt(c_ulonglong) - 1;
 }
 
-fn isZstdInitramfsPath(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".zst");
+fn isZstdFrame(bytes: []const u8) bool {
+    return bytes.len >= zstd_magic.len and std.mem.eql(u8, bytes[0..zstd_magic.len], &zstd_magic);
 }
 
 fn absoluteSubPath(
@@ -325,30 +376,71 @@ test "prepareBootInitramfs leaves raw initramfs paths unchanged" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "initramfs.cpio",
+        .data = "raw initramfs",
+    });
+    const raw_path = try absoluteSubPath(std.testing.io, std.testing.allocator, tmp.dir, "initramfs.cpio");
+    defer std.testing.allocator.free(raw_path);
+
     try std.testing.expectEqual(@as(?[]u8, null), try prepareBootInitramfs(
         std.testing.io,
         std.testing.allocator,
         tmp.dir,
-        "/tmp/initramfs.cpio",
+        raw_path,
     ));
 }
 
-test "isZstdInitramfsPath detects zstd initramfs names" {
-    try std.testing.expect(isZstdInitramfsPath("/tmp/initramfs.cpio.zst"));
-    try std.testing.expect(!isZstdInitramfsPath("/tmp/initramfs.cpio"));
+test "prepareBootKernel inflates zstd payloads without relying on filename suffix" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const plain = "raw arm64 Image";
+    const compressed = try compressZstdForTest(std.testing.allocator, plain);
+    defer std.testing.allocator.free(compressed);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "embedded-linux-kernel",
+        .data = compressed,
+    });
+    const compressed_path = try absoluteSubPath(std.testing.io, std.testing.allocator, tmp.dir, "embedded-linux-kernel");
+    defer std.testing.allocator.free(compressed_path);
+
+    const raw_path = (try prepareBootKernel(
+        std.testing.io,
+        std.testing.allocator,
+        tmp.dir,
+        compressed_path,
+    )).?;
+    defer std.testing.allocator.free(raw_path);
+
+    const raw = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, raw_path, std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(raw);
+    try std.testing.expectEqualStrings(plain, raw);
+}
+
+test "isZstdFrame detects zstd magic" {
+    try std.testing.expect(isZstdFrame(&zstd_magic));
+    try std.testing.expect(!isZstdFrame("not zstd"));
 }
 
 test "decompressZstdAlloc inflates libzstd frames" {
     const plain = "initramfs payload";
+    const compressed = try compressZstdForTest(std.testing.allocator, plain);
+    defer std.testing.allocator.free(compressed);
+
+    const decompressed = try decompressZstdAlloc(std.testing.allocator, compressed, max_raw_initramfs_bytes);
+    defer std.testing.allocator.free(decompressed);
+    try std.testing.expectEqualStrings(plain, decompressed);
+}
+
+fn compressZstdForTest(allocator: std.mem.Allocator, plain: []const u8) ![]u8 {
     const bound = zstd.ZSTD_compressBound(plain.len);
     if (zstd.ZSTD_isError(bound) != 0) return error.ZstdCompressBoundFailed;
 
-    const compressed = try std.testing.allocator.alloc(u8, bound);
-    defer std.testing.allocator.free(compressed);
+    const compressed = try allocator.alloc(u8, bound);
+    defer allocator.free(compressed);
     const compressed_len = zstd.ZSTD_compress(compressed.ptr, compressed.len, plain.ptr, plain.len, 19);
     if (zstd.ZSTD_isError(compressed_len) != 0) return error.ZstdCompressFailed;
 
-    const decompressed = try decompressZstdAlloc(std.testing.allocator, compressed[0..compressed_len]);
-    defer std.testing.allocator.free(decompressed);
-    try std.testing.expectEqualStrings(plain, decompressed);
+    return try allocator.dupe(u8, compressed[0..compressed_len]);
 }
