@@ -1,24 +1,30 @@
+load("@darwin_sdk//:defs.bzl", "DARWIN_SDK_LINKOPTS")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_binary(
-    name = "darwin-actiond-bin",
-    main = "main.zig",
-    csrcs = ["vz_bridge.m"],
+objc_library(
+    name = "vz_bridge",
+    srcs = ["vz_bridge.m"],
     copts = [
         "-fblocks",
         "-fobjc-arc",
-        "-isystem/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
     ],
-    deps = ["//src:actiond"],
-    linkopts = [
-        "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
-        "-L/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib",
-        "-framework",
+    sdk_frameworks = [
         "Foundation",
-        "-framework",
         "Virtualization",
     ],
     target_compatible_with = ["@platforms//os:macos"],
+)
+
+zig_binary(
+    name = "darwin-actiond-bin",
+    linkopts = DARWIN_SDK_LINKOPTS,
+    main = "main.zig",
+    target_compatible_with = ["@platforms//os:macos"],
+    deps = [
+        ":vz_bridge",
+        "//src:actiond",
+    ],
 )
 
 genrule(
@@ -41,30 +47,21 @@ chmod +x "$@"
 
 zig_binary(
     name = "darwin-actiond-standalone-bin",
-    main = "main.zig",
-    csrcs = ["vz_bridge.m"],
-    copts = [
-        "-fblocks",
-        "-fobjc-arc",
-        "-isystem/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
-    ],
     data = [
         ":darwin-standalone-payload",
     ],
     extra_srcs = [
         ":darwin-standalone-payload",
     ],
-    deps = ["//src:actiond"],
     linkopts = [
-        "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
-        "-L/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib",
-        "-framework",
-        "Foundation",
-        "-framework",
-        "Virtualization",
         "$(location :darwin-standalone-payload)",
-    ],
+    ] + DARWIN_SDK_LINKOPTS,
+    main = "main.zig",
     target_compatible_with = ["@platforms//os:macos"],
+    deps = [
+        ":vz_bridge",
+        "//src:actiond",
+    ],
 )
 
 genrule(
