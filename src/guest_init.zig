@@ -32,6 +32,12 @@ pub const module_paths = [_][:0]const u8{
 };
 
 pub const cas_mount: Mount = .{ .source = "cas", .target = "/cas-ro", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
+pub const runtime_block_devices = [_][:0]const u8{
+    "/dev/vda",
+    "/dev/vdb",
+    "/dev/vdc",
+};
+pub const runtimes_mount_target: [:0]const u8 = "/runtimes";
 pub const cas_overlay_mount: Mount = .{
     .source = "overlay",
     .target = "/cas",
@@ -57,10 +63,33 @@ pub fn run(io: std.Io) !void {
     try ensureDir(io, "work/cas-upper/work");
     try mount(stderr, cas_mount);
     try mount(stderr, cas_overlay_mount);
+    try mountRuntimeImage(stderr);
     try stderr.writeAll("linux-actiond guest init mounted filesystems; starting worker\n");
     try stderr.flush();
 
     return std.process.replace(io, .{ .argv = &worker_argv });
+}
+
+fn mountRuntimeImage(stderr: *std.Io.Writer) !void {
+    if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+
+    const linux = std.os.linux;
+    for (runtime_block_devices) |device| {
+        const fd_rc = linux.open(device.ptr, .{ .CLOEXEC = true }, 0);
+        switch (std.posix.errno(fd_rc)) {
+            .SUCCESS => {
+                _ = linux.close(@intCast(fd_rc));
+                return mount(stderr, .{
+                    .source = device,
+                    .target = runtimes_mount_target,
+                    .fstype = "squashfs",
+                    .flags = linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV,
+                });
+            },
+            .NOENT => continue,
+            else => continue,
+        }
+    }
 }
 
 fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {

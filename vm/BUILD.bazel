@@ -31,6 +31,7 @@ filegroup(
     srcs = [
         ":initramfs",
         ":linux_kernel",
+        "//runtimes:runtimes_squashfs",
     ],
     tags = ["manual"],
     visibility = ["//visibility:public"],

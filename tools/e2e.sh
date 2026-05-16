@@ -131,6 +131,7 @@ run_build_checks() {
   run_bazel test //src:unit_tests
   run_bazel build //cmd/linux_actiond_guest:linux-actiond-guest-aarch64
   run_bazel build //vm:initramfs
+  run_bazel build //runtimes:runtimes_squashfs
   run_bazel build //vm:linux_kernel --nobuild
   run_bazel build //tools:e2e_action_tool_linux_aarch64 //tools:e2e_action_tool_linux_x86_64
   run_bazel build //...
@@ -179,11 +180,12 @@ run_vm_e2e() {
   fi
 
   prepare_stress_workspace aarch64
-  run_bazel build //cmd/darwin_actiond:darwin-actiond-signed //vm:initramfs
+  run_bazel build //cmd/darwin_actiond:darwin-actiond-signed //vm:initramfs //runtimes:runtimes_squashfs
 
-  local kernel initramfs server root log
+  local kernel initramfs runtimes server root log
   kernel="$(kernel_path)"
   initramfs="$(bazel_output //vm:initramfs)"
+  runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
   server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
   root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-vm-e2e.XXXXXX")"
   log="${root}/darwin-actiond-vm.log"
@@ -193,6 +195,7 @@ run_vm_e2e() {
     --root="${root}/server" \
     --kernel="${kernel}" \
     --initramfs="${initramfs}" \
+    --runtime-image="${runtimes}" \
     --memory-mib="${ACTIOND_VM_MEMORY_MIB:-1024}" \
     --cpus="${ACTIOND_VM_CPUS:-4}" >"${log}" 2>&1 &
   e2e_server_pid="$!"

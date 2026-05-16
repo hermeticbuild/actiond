@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     const actiond = try std.Io.Dir.cwd().readFileAlloc(io, actiond_path, arena, .limited(max_input_file_bytes));
 
     var entries: std.ArrayListUnmanaged(Entry) = .empty;
-    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "cas-ro", "cas", "modules" }) |path| {
+    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "cas-ro", "cas", "modules", "runtimes" }) |path| {
         try addDir(arena, &entries, path);
     }
     try addFile(arena, &entries, "init", file_mode, actiond);

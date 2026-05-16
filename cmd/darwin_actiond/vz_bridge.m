@@ -42,6 +42,7 @@ static dispatch_time_t actiond_timeout_from_ms(uint32_t timeout_ms) {
 void *actiond_vm_start(
     const char *kernel_path,
     const char *initramfs_path,
+    const char *runtime_image_path,
     const char *cas_path,
     uint64_t memory_mib,
     uint32_t cpu_count,
@@ -77,6 +78,19 @@ void *actiond_vm_start(
         configuration.entropyDevices = @[ [[VZVirtioEntropyDeviceConfiguration alloc] init] ];
         configuration.socketDevices = @[ [[VZVirtioSocketDeviceConfiguration alloc] init] ];
         configuration.networkDevices = @[];
+        if (runtime_image_path != NULL && runtime_image_path[0] != '\0') {
+            NSURL *runtimeURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:runtime_image_path]];
+            NSError *runtimeError = nil;
+            VZDiskImageStorageDeviceAttachment *runtimeAttachment =
+                [[VZDiskImageStorageDeviceAttachment alloc] initWithURL:runtimeURL readOnly:YES error:&runtimeError];
+            if (runtimeAttachment == nil) {
+                actiond_set_nserror(errbuf, errbuf_len, runtimeError);
+                return NULL;
+            }
+            VZVirtioBlockDeviceConfiguration *runtimeBlock =
+                [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:runtimeAttachment];
+            configuration.storageDevices = @[ runtimeBlock ];
+        }
 
         VZVirtioConsoleDeviceSerialPortConfiguration *serial = [[VZVirtioConsoleDeviceSerialPortConfiguration alloc] init];
         serial.attachment = [[VZFileHandleSerialPortAttachment alloc]

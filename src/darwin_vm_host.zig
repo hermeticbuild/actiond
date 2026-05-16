@@ -18,6 +18,7 @@ pub const ServeVmOptions = struct {
     cas: ?[]const u8 = null,
     kernel: ?[]const u8 = null,
     initramfs: ?[]const u8 = null,
+    runtime_image: ?[]const u8 = null,
     memory_mib: u64 = 512,
     cpus: u32 = 2,
     start_timeout_ms: u32 = 30_000,
@@ -59,6 +60,12 @@ pub fn parseServeVmArgs(args: []const []const u8) !ServeVmOptions {
             options.initramfs = args[i];
         } else if (std.mem.startsWith(u8, arg, "--initramfs=")) {
             options.initramfs = arg["--initramfs=".len..];
+        } else if (std.mem.eql(u8, arg, "--runtime-image")) {
+            i += 1;
+            if (i >= args.len) return error.MissingServeArgumentValue;
+            options.runtime_image = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--runtime-image=")) {
+            options.runtime_image = arg["--runtime-image=".len..];
         } else if (std.mem.eql(u8, arg, "--memory-mib")) {
             i += 1;
             if (i >= args.len) return error.MissingServeArgumentValue;
@@ -115,9 +122,10 @@ pub fn serve(
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("starting actiond VM kernel={s} initramfs={s} cas={s}\n", .{
+    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas={s}\n", .{
         options.kernel.?,
         options.initramfs.?,
+        options.runtime_image orelse "<none>",
         cas_path,
     });
     try stderr.flush();
@@ -125,6 +133,7 @@ pub fn serve(
     var vm = try darwin_vm.Machine.start(allocator, .{
         .kernel_path = options.kernel.?,
         .initramfs_path = options.initramfs.?,
+        .runtime_image_path = options.runtime_image,
         .cas_path = cas_path,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
@@ -160,6 +169,7 @@ test "parseServeVmArgs accepts VM flags" {
         "--kernel",
         "/tmp/Image",
         "--initramfs=/tmp/initramfs.cpio",
+        "--runtime-image=/tmp/runtimes.sqfs",
         "--cas",
         "/tmp/actiond-cas",
         "--memory-mib=768",
@@ -174,6 +184,7 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqualStrings("/tmp/actiond-vm-test", options.root);
     try std.testing.expectEqualStrings("/tmp/Image", options.kernel.?);
     try std.testing.expectEqualStrings("/tmp/initramfs.cpio", options.initramfs.?);
+    try std.testing.expectEqualStrings("/tmp/runtimes.sqfs", options.runtime_image.?);
     try std.testing.expectEqualStrings("/tmp/actiond-cas", options.cas.?);
     try std.testing.expectEqual(@as(u64, 768), options.memory_mib);
     try std.testing.expectEqual(@as(u32, 3), options.cpus);

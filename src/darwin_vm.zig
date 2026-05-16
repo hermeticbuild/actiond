@@ -13,6 +13,7 @@ pub const Error = error{
 pub const Options = struct {
     kernel_path: []const u8,
     initramfs_path: []const u8,
+    runtime_image_path: ?[]const u8 = null,
     cas_path: []const u8,
     memory_mib: u64 = 512,
     cpu_count: u32 = 2,
@@ -33,6 +34,8 @@ pub const Machine = struct {
         defer allocator.free(kernel_path);
         const initramfs_path = try allocator.dupeZ(u8, options.initramfs_path);
         defer allocator.free(initramfs_path);
+        const runtime_image_path = if (options.runtime_image_path) |path| try allocator.dupeZ(u8, path) else null;
+        defer if (runtime_image_path) |path| allocator.free(path);
         const cas_path = try allocator.dupeZ(u8, options.cas_path);
         defer allocator.free(cas_path);
 
@@ -40,6 +43,7 @@ pub const Machine = struct {
         const handle = actiond_vm_start(
             kernel_path.ptr,
             initramfs_path.ptr,
+            if (runtime_image_path) |path| path.ptr else null,
             cas_path.ptr,
             options.memory_mib,
             options.cpu_count,
@@ -127,6 +131,7 @@ fn errorMessage(buffer: *const [1024]u8) []const u8 {
 extern fn actiond_vm_start(
     kernel_path: [*:0]const u8,
     initramfs_path: [*:0]const u8,
+    runtime_image_path: ?[*:0]const u8,
     cas_path: [*:0]const u8,
     memory_mib: u64,
     cpu_count: u32,
