@@ -23,6 +23,7 @@
 #include <linux/namei.h>
 #include <linux/pagemap.h>
 #include <linux/parser.h>
+#include <linux/path.h>
 #include <linux/slab.h>
 #include <linux/statfs.h>
 #include <linux/string.h>
@@ -47,6 +48,8 @@ struct actiondfs_node {
 struct actiondfs_sb_info {
 	char *manifest_path;
 	char *cas_root;
+	struct path cas_path;
+	bool cas_path_valid;
 	struct actiondfs_node *root;
 	u64 next_ino;
 };
@@ -552,19 +555,12 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	return 0;
 }
 
-static char *actiondfs_blob_path(struct actiondfs_sb_info *sbi,
-				 struct actiondfs_node *node)
-{
-	return kasprintf(GFP_KERNEL, "%s/%s", sbi->cas_root, node->hash);
-}
-
 static int actiondfs_read_folio(struct file *file, struct folio *folio)
 {
 	struct inode *inode = file_inode(file);
 	struct actiondfs_node *node = inode->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 	struct file *blob = NULL;
-	char *blob_path = NULL;
 	void *addr;
 	loff_t offset = folio_pos(folio);
 	size_t folio_len = folio_size(folio);
@@ -581,13 +577,7 @@ static int actiondfs_read_folio(struct file *file, struct folio *folio)
 	if (wanted) {
 		loff_t pos = offset;
 
-		blob_path = actiondfs_blob_path(sbi, node);
-		if (!blob_path) {
-			err = -ENOMEM;
-			goto out;
-		}
-
-		blob = filp_open(blob_path, O_RDONLY, 0);
+		blob = file_open_root(&sbi->cas_path, node->hash, O_RDONLY, 0);
 		if (IS_ERR(blob)) {
 			err = PTR_ERR(blob);
 			blob = NULL;
@@ -611,7 +601,6 @@ out:
 	kunmap_local(addr);
 	if (blob)
 		filp_close(blob, NULL);
-	kfree(blob_path);
 	folio_unlock(folio);
 	return err;
 }
@@ -649,6 +638,8 @@ static void actiondfs_put_super(struct super_block *sb)
 	if (!sbi)
 		return;
 	actiondfs_free_tree(sbi->root);
+	if (sbi->cas_path_valid)
+		path_put(&sbi->cas_path);
 	kfree(sbi->manifest_path);
 	kfree(sbi->cas_root);
 	kfree(sbi);
@@ -688,6 +679,10 @@ static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
 	err = actiondfs_parse_options(sbi, data);
 	if (err)
 		goto fail;
+	err = kern_path(sbi->cas_root, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &sbi->cas_path);
+	if (err)
+		goto fail;
+	sbi->cas_path_valid = true;
 	err = actiondfs_load_manifest(sbi);
 	if (err)
 		goto fail;

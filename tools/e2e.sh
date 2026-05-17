@@ -191,7 +191,7 @@ run_linux_e2e() {
 }
 
 kernel_path() {
-  run_bazel build //vm:linux_kernel_zst
+  run_bazel build //vm:linux_kernel_zst >&2 || return
   bazel_output //vm:linux_kernel_zst
 }
 

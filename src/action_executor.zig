@@ -368,12 +368,29 @@ fn forceFileInputs(command: reapi.Command, platform: ?reapi.Platform) bool {
 }
 
 fn kernelSupportsActiondfs(io: std.Io, allocator: std.mem.Allocator) bool {
+    _ = allocator;
     if (comptime builtin.os.tag != .linux) return false;
 
     var proc = std.Io.Dir.openDirAbsolute(io, "/proc", .{}) catch return false;
     defer proc.close(io);
-    const filesystems = proc.readFileAlloc(io, "filesystems", allocator, .limited(64 * 1024)) catch return false;
-    defer allocator.free(filesystems);
+    var file = proc.openFile(io, "filesystems", .{}) catch return false;
+    defer file.close(io);
+
+    var buffer: [64 * 1024]u8 = undefined;
+    var len: usize = 0;
+    while (len < buffer.len) {
+        const rc = std.os.linux.read(file.handle, buffer[len..].ptr, buffer.len - len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) break;
+                len += n;
+            },
+            .INTR => continue,
+            else => return false,
+        }
+    }
+    const filesystems = buffer[0..len];
 
     var lines = std.mem.splitScalar(u8, filesystems, '\n');
     while (lines.next()) |line| {
