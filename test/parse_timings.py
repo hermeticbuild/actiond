@@ -128,20 +128,41 @@ def fmt_ms(value: float) -> str:
     return f"{value:.3f}"
 
 
+def percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * pct / 100.0
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = rank - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
 def stat_row(label: str, values_ns: list[int], total_ns: int) -> str:
     values_ms = [ns_to_ms(value) for value in values_ns]
     pct = 100.0 * sum(values_ns) / total_ns if total_ns else 0.0
     return (
         f"| {label} | {fmt_ms(min(values_ms))} | "
-        f"{fmt_ms(statistics.median(values_ms))} | "
+        f"{fmt_ms(percentile(values_ms, 25))} | "
+        f"{fmt_ms(percentile(values_ms, 50))} | "
+        f"{fmt_ms(percentile(values_ms, 75))} | "
+        f"{fmt_ms(percentile(values_ms, 95))} | "
         f"{fmt_ms(statistics.mean(values_ms))} | "
         f"{fmt_ms(max(values_ms))} | {pct:.1f}% |"
     )
 
 
 def int_stat_row(label: str, values: list[int]) -> str:
+    values_float = [float(value) for value in values]
     return (
-        f"| {label} | {min(values)} | {statistics.median(values):.0f} | "
+        f"| {label} | {min(values)} | "
+        f"{percentile(values_float, 25):.0f} | "
+        f"{percentile(values_float, 50):.0f} | "
+        f"{percentile(values_float, 75):.0f} | "
+        f"{percentile(values_float, 95):.0f} | "
         f"{statistics.mean(values):.1f} | {max(values)} |"
     )
 
@@ -162,23 +183,60 @@ def case_rows(timings: list[Timing]) -> list[str]:
         "",
         "## Stage Timing By Stress Case",
         "",
-        "| Stress Case | Actions | Total Median | Total Mean | Input Mean | Execute Mean | Output Mean | File Inputs Median | Dir Inputs Median | Bind Mounts Median |",
+        "| Stress Case | Actions | Total p25 | Total p50 | Total p75 | Total p95 | Input p50 | Execute p50 | Output p50 | Mounts p50 |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name in sorted(groups):
         items = groups[name]
+        total_ms = [ns_to_ms(item.total_ns) for item in items]
+        input_ms = [ns_to_ms(item.input_fetch_ns) for item in items]
+        execute_ms = [ns_to_ms(item.execution_ns) for item in items]
+        output_ms = [ns_to_ms(item.output_upload_ns) for item in items]
+        mounts = [float(item.bind_mounts + item.actiondfs_mounts) for item in items]
         rows.append(
             f"| {name} | {len(items)} | "
-            f"{fmt_ms(statistics.median(ns_to_ms(item.total_ns) for item in items))} | "
-            f"{fmt_ms(statistics.mean(ns_to_ms(item.total_ns) for item in items))} | "
-            f"{fmt_ms(statistics.mean(ns_to_ms(item.input_fetch_ns) for item in items))} | "
-            f"{fmt_ms(statistics.mean(ns_to_ms(item.execution_ns) for item in items))} | "
-            f"{fmt_ms(statistics.mean(ns_to_ms(item.output_upload_ns) for item in items))} | "
-            f"{statistics.median(item.file_inputs for item in items):.0f} | "
-            f"{statistics.median(item.directory_inputs for item in items):.0f} | "
-            f"{statistics.median(item.bind_mounts + item.actiondfs_mounts for item in items):.0f} |"
+            f"{fmt_ms(percentile(total_ms, 25))} | "
+            f"{fmt_ms(percentile(total_ms, 50))} | "
+            f"{fmt_ms(percentile(total_ms, 75))} | "
+            f"{fmt_ms(percentile(total_ms, 95))} | "
+            f"{fmt_ms(percentile(input_ms, 50))} | "
+            f"{fmt_ms(percentile(execute_ms, 50))} | "
+            f"{fmt_ms(percentile(output_ms, 50))} | "
+            f"{percentile(mounts, 50):.0f} |"
         )
     return rows
+
+
+def overhead_rows(timings: list[Timing]) -> list[str]:
+    with_runner = [item for item in timings if item.runner is not None]
+    if not with_runner:
+        return []
+
+    fixed_without_wait = [
+        item.input_fetch_ns
+        + item.output_upload_ns
+        + item.runner.parent_prepare_ns
+        + item.runner.fork_ns
+        + item.runner.child_setup_ns
+        + item.runner.stdio_digest_ns
+        for item in with_runner
+    ]
+    fixed_with_wait = [
+        value + item.runner.wait_ns
+        for value, item in zip(fixed_without_wait, with_runner)
+    ]
+
+    return [
+        "",
+        "## Visible Overhead Estimate",
+        "",
+        "`process/io` is excluded here because it is mostly the action process runtime plus stdout/stderr drain.",
+        "",
+        "| Metric | Min | p25 | p50 | p75 | p95 | Mean | Max | Share of summed total |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        stat_row("fixed overhead, no wait", fixed_without_wait, sum(item.total_ns for item in with_runner)),
+        stat_row("fixed overhead, with wait", fixed_with_wait, sum(item.total_ns for item in with_runner)),
+    ]
 
 
 def runner_rows(timings: list[Timing]) -> list[str]:
@@ -192,8 +250,8 @@ def runner_rows(timings: list[Timing]) -> list[str]:
         "",
         "These values split the `execute` bucket. `process/io` starts after child setup signals right before `execve`; it includes the action process runtime and stdout/stderr drain.",
         "",
-        "| Runner Stage | Min | Median | Mean | Max | Share of execute |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Runner Stage | Min | p25 | p50 | p75 | p95 | Mean | Max | Share of execute |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         stat_row("parent prepare", [item.runner.parent_prepare_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
         stat_row("fork", [item.runner.fork_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
         stat_row("child setup", [item.runner.child_setup_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
@@ -245,8 +303,8 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             "",
             "All timing values are milliseconds unless noted.",
             "",
-            "| Stage | Min | Median | Mean | Max | Share of summed total |",
-            "| --- | ---: | ---: | ---: | ---: | ---: |",
+            "| Stage | Min | p25 | p50 | p75 | p95 | Mean | Max | Share of summed total |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             stat_row("total", [item.total_ns for item in timings], total_ns),
             stat_row("input fetch/materialize", [item.input_fetch_ns for item in timings], total_ns),
             stat_row("execute", [item.execution_ns for item in timings], total_ns),
@@ -254,8 +312,8 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             "",
             "## Input And Mount Counts",
             "",
-            "| Metric | Min | Median | Mean | Max |",
-            "| --- | ---: | ---: | ---: | ---: |",
+            "| Metric | Min | p25 | p50 | p75 | p95 | Mean | Max |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             int_stat_row("file inputs", [item.file_inputs for item in timings]),
             int_stat_row("directory inputs", [item.directory_inputs for item in timings]),
             int_stat_row("bind mounts", [item.bind_mounts for item in timings]),
@@ -265,6 +323,8 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
         ]
     )
     lines.extend(case_rows(timings))
+    lines.extend(overhead_rows(timings))
+    lines.extend(runner_rows(timings))
     lines.extend(
         [
             "",
@@ -283,8 +343,6 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             f"{item.file_inputs} | {item.directory_inputs} | {item.bind_mounts + item.actiondfs_mounts} | "
             f"{item.output_files} file, {item.output_directories} dir |"
         )
-
-    lines.extend(runner_rows(timings))
 
     if all(item.directory_inputs == 0 for item in timings):
         if any(item.actiondfs_mounts > 0 for item in timings):

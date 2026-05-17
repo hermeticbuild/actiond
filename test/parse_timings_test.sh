@@ -17,6 +17,9 @@ python3 "${script_dir}/parse_timings.py" "${log}" \
   --output "${out}"
 
 grep -q "## Stage Timing By Stress Case" "${out}"
+grep -q "| Stage | Min | p25 | p50 | p75 | p95 | Mean | Max |" "${out}"
+grep -q "## Visible Overhead Estimate" "${out}"
+grep -q "| fixed overhead, no wait |" "${out}"
 grep -q "Execute records parsed" "${out}"
 grep -q "Unique action digests" "${out}"
 grep -q "| generated_tree_reuse | 1 |" "${out}"
