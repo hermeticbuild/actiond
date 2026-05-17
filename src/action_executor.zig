@@ -134,6 +134,18 @@ pub fn executeActionWithOptions(
     const use_workspace_chroot = options.runtime_root_path != null;
     const allow_directory_inputs = use_workspace_chroot and !forceFileInputs(command, action.platform);
     try collectInputs(io, allocator, store, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
+    var executable_copy_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (executable_copy_paths.items) |path| allocator.free(path);
+        executable_copy_paths.deinit(allocator);
+    }
+    try selectExecutableInputCopyPaths(
+        allocator,
+        command,
+        inputs.items,
+        if (use_workspace_chroot) "/workspace" else "",
+        &executable_copy_paths,
+    );
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
@@ -159,6 +171,8 @@ pub fn executeActionWithOptions(
     var materialization = materializer.materializeInputs(io, allocator, inputs.items, .{
         .chroot_root_path = exec_root_path,
         .directory_inputs = directory_inputs.items,
+        .copy_all_executable_inputs = false,
+        .copy_executable_inputs = executable_copy_paths.items,
     }) catch |err| switch (err) {
         error.FileNotFound, error.MissingInputTree => return error.MissingInputBlob,
         else => return err,
@@ -310,6 +324,117 @@ fn forceFileInputsFromCommand(command: reapi.Command) bool {
 
 fn forceFileInputs(command: reapi.Command, platform: ?reapi.Platform) bool {
     return forceFileInputsFromPlatform(platform) or forceFileInputsFromCommand(command);
+}
+
+fn selectExecutableInputCopyPaths(
+    allocator: std.mem.Allocator,
+    command: reapi.Command,
+    inputs: []const execroot.Input,
+    workspace_prefix: []const u8,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    if (command.arguments.len == 0) return;
+    const argv0 = command.arguments[0];
+    if (std.mem.indexOfScalar(u8, argv0, '/') != null) {
+        if (try execArgToInputPath(allocator, command.working_directory, argv0, workspace_prefix)) |candidate| {
+            defer allocator.free(candidate);
+            _ = try appendExecutableInputPath(allocator, inputs, candidate, out);
+        }
+        return;
+    }
+
+    const path_value = commandPath(command) orelse "/usr/local/bin:/usr/bin:/bin";
+    var parts = std.mem.splitScalar(u8, path_value, ':');
+    while (parts.next()) |part| {
+        const prefix = if (part.len == 0) "/" else part;
+        const exec_candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, argv0 });
+        defer allocator.free(exec_candidate);
+        if (try execArgToInputPath(allocator, command.working_directory, exec_candidate, workspace_prefix)) |candidate| {
+            defer allocator.free(candidate);
+            _ = try appendExecutableInputPath(allocator, inputs, candidate, out);
+        }
+    }
+}
+
+fn execArgToInputPath(
+    allocator: std.mem.Allocator,
+    working_directory: []const u8,
+    exec_arg: []const u8,
+    workspace_prefix: []const u8,
+) !?[]u8 {
+    if (exec_arg.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, exec_arg, 0) != null) return null;
+
+    if (std.fs.path.isAbsolute(exec_arg)) {
+        if (workspace_prefix.len != 0) {
+            if (!std.mem.startsWith(u8, exec_arg, workspace_prefix)) return null;
+            if (exec_arg.len == workspace_prefix.len or exec_arg[workspace_prefix.len] != '/') return null;
+            return normalizeRelativeInputPath(allocator, exec_arg[workspace_prefix.len + 1 ..]);
+        }
+        return normalizeRelativeInputPath(allocator, exec_arg[1..]);
+    }
+
+    if (working_directory.len == 0) return normalizeRelativeInputPath(allocator, exec_arg);
+    const joined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ working_directory, exec_arg });
+    defer allocator.free(joined);
+    return normalizeRelativeInputPath(allocator, joined);
+}
+
+fn normalizeRelativeInputPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
+    if (path.len == 0) return null;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            out.deinit(allocator);
+            return null;
+        }
+        if (std.mem.indexOfScalar(u8, component, 0) != null) {
+            out.deinit(allocator);
+            return null;
+        }
+        if (out.items.len != 0) try out.append(allocator, '/');
+        try out.appendSlice(allocator, component);
+    }
+
+    if (out.items.len == 0) {
+        out.deinit(allocator);
+        return null;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendExecutableInputPath(
+    allocator: std.mem.Allocator,
+    inputs: []const execroot.Input,
+    candidate: []const u8,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !bool {
+    for (inputs) |input| {
+        if (!std.mem.eql(u8, input.path, candidate)) continue;
+        if (!input.is_executable) return true;
+        if (pathInCopyList(candidate, out.items)) return true;
+        try out.append(allocator, try allocator.dupe(u8, candidate));
+        return true;
+    }
+    return false;
+}
+
+fn pathInCopyList(path: []const u8, paths: []const []const u8) bool {
+    for (paths) |candidate| {
+        if (std.mem.eql(u8, path, candidate)) return true;
+    }
+    return false;
+}
+
+fn commandPath(command: reapi.Command) ?[]const u8 {
+    for (command.environment_variables) |variable| {
+        if (std.mem.eql(u8, variable.name, "PATH")) return variable.value;
+    }
+    return null;
 }
 
 fn runtimeArch() ![]const u8 {
@@ -994,6 +1119,91 @@ test "actiond input mode command environment can force file inputs" {
     try std.testing.expect(!forceFileInputsFromCommand(.{
         .environment_variables = &.{.{ .name = "ACTIOND_INPUT_MODE", .value = "trees" }},
     }));
+}
+
+test "selectExecutableInputCopyPaths keeps only the direct command executable" {
+    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (paths.items) |path| std.testing.allocator.free(path);
+        paths.deinit(std.testing.allocator);
+    }
+
+    try selectExecutableInputCopyPaths(
+        std.testing.allocator,
+        .{ .arguments = &.{"tool/action-tool"} },
+        &.{
+            .{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true },
+            .{ .path = "inputs/data.txt", .digest = cas.Digest.empty(), .is_executable = true },
+        },
+        "/workspace",
+        &paths,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
+    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
+}
+
+test "selectExecutableInputCopyPaths maps workspace absolute command paths" {
+    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (paths.items) |path| std.testing.allocator.free(path);
+        paths.deinit(std.testing.allocator);
+    }
+
+    _ = try selectExecutableInputCopyPaths(
+        std.testing.allocator,
+        .{ .arguments = &.{"/workspace/tool/action-tool"} },
+        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true }},
+        "/workspace",
+        &paths,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
+    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
+}
+
+test "selectExecutableInputCopyPaths normalizes relative working directory commands" {
+    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (paths.items) |path| std.testing.allocator.free(path);
+        paths.deinit(std.testing.allocator);
+    }
+
+    _ = try selectExecutableInputCopyPaths(
+        std.testing.allocator,
+        .{
+            .arguments = &.{"./action-tool"},
+            .working_directory = "tool",
+        },
+        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true }},
+        "/workspace",
+        &paths,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
+    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
+}
+
+test "selectExecutableInputCopyPaths searches input PATH candidates" {
+    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (paths.items) |path| std.testing.allocator.free(path);
+        paths.deinit(std.testing.allocator);
+    }
+
+    _ = try selectExecutableInputCopyPaths(
+        std.testing.allocator,
+        .{
+            .arguments = &.{"action-tool"},
+            .environment_variables = &.{.{ .name = "PATH", .value = "/usr/bin:/workspace/tool" }},
+        },
+        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true }},
+        "/workspace",
+        &paths,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
+    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
 }
 
 test "appendLibcRuntimeMounts maps runtime directories into chroot" {

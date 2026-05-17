@@ -21,6 +21,8 @@ pub const DirectoryInput = struct {
 pub const MaterializeOptions = struct {
     chroot_root_path: ?[]const u8 = null,
     directory_inputs: []const DirectoryInput = &.{},
+    copy_all_executable_inputs: bool = true,
+    copy_executable_inputs: []const []const u8 = &.{},
 };
 
 pub const Materialization = struct {
@@ -114,6 +116,7 @@ pub const Materializer = struct {
                     input,
                     root_path,
                     cas_root_path,
+                    options,
                     &bind_mounts,
                 );
             } else {
@@ -139,10 +142,13 @@ pub const Materializer = struct {
         input: Input,
         root_path: []const u8,
         cas_root_path: ?[]const u8,
+        options: MaterializeOptions,
         bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
     ) !void {
         const permissions: std.Io.File.Permissions = if (input.is_executable) .executable_file else .default_file;
-        if (input.is_executable or input.digest.isEmpty()) {
+        const copy_executable = input.is_executable and
+            (options.copy_all_executable_inputs or pathInList(input.path, options.copy_executable_inputs));
+        if (copy_executable or input.digest.isEmpty()) {
             return self.store.copyToFile(io, input.digest, self.root, input.path, permissions);
         }
 
@@ -189,6 +195,13 @@ pub const Materializer = struct {
         });
     }
 };
+
+fn pathInList(path: []const u8, paths: []const []const u8) bool {
+    for (paths) |candidate| {
+        if (std.mem.eql(u8, path, candidate)) return true;
+    }
+    return false;
+}
 
 pub fn validatePath(path: []const u8) !void {
     if (path.len == 0) return error.EmptyExecPath;
@@ -318,6 +331,63 @@ test "Materializer prepares read-only bind mounts for chroot inputs" {
     );
     defer std.testing.allocator.free(placeholder);
     try std.testing.expectEqual(@as(usize, 0), placeholder.len);
+
+    const restored_tool = try work_dir.readFileAlloc(
+        std.testing.io,
+        "tools/run.sh",
+        std.testing.allocator,
+        .limited(64),
+    );
+    defer std.testing.allocator.free(restored_tool);
+    try std.testing.expectEqualStrings("#!/bin/sh\n", restored_tool);
+}
+
+test "Materializer can bind executable chroot inputs outside the copy list" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    const data = try store.putBytes(std.testing.io, "data\n");
+    const tool = try store.putBytes(std.testing.io, "#!/bin/sh\n");
+
+    var work_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const work_root_len = try work_dir.realPath(std.testing.io, &work_root_buffer);
+    var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cas_root_len = try cas_dir.realPath(std.testing.io, &cas_root_buffer);
+    const materializer = Materializer.init(store, work_dir);
+    var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{
+        .{ .path = "inputs/data.txt", .digest = data, .is_executable = true },
+        .{ .path = "tools/run.sh", .digest = tool, .is_executable = true },
+    }, .{
+        .chroot_root_path = work_root_buffer[0..work_root_len],
+        .copy_all_executable_inputs = false,
+        .copy_executable_inputs = &.{"tools/run.sh"},
+    });
+    defer materialization.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), materialization.bind_mounts.len);
+
+    var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+    const blob_path = cas.blobSubPath(data, &blob_path_buffer);
+    const expected_source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/{s}",
+        .{ cas_root_buffer[0..cas_root_len], blob_path },
+    );
+    defer std.testing.allocator.free(expected_source);
+    const expected_target = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/inputs/data.txt",
+        .{work_root_buffer[0..work_root_len]},
+    );
+    defer std.testing.allocator.free(expected_target);
+    try std.testing.expectEqualStrings(expected_source, materialization.bind_mounts[0].source);
+    try std.testing.expectEqualStrings(expected_target, materialization.bind_mounts[0].target);
 
     const restored_tool = try work_dir.readFileAlloc(
         std.testing.io,
