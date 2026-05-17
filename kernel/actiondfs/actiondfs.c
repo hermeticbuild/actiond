@@ -47,9 +47,12 @@ struct actiondfs_node {
 	struct mutex blob_lock;
 	bool loaded;
 	struct actiondfs_node *parent;
-	struct actiondfs_node **children;
-	size_t child_count;
-	size_t child_capacity;
+	struct actiondfs_node **file_children;
+	size_t file_count;
+	size_t file_capacity;
+	struct actiondfs_node **dir_children;
+	size_t dir_count;
+	size_t dir_capacity;
 };
 
 struct actiondfs_sb_info {
@@ -85,14 +88,35 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 	if (!node)
 		return;
 
-	for (i = 0; i < node->child_count; i++)
-		actiondfs_free_tree(node->children[i]);
+	for (i = 0; i < node->file_count; i++)
+		actiondfs_free_tree(node->file_children[i]);
+	for (i = 0; i < node->dir_count; i++)
+		actiondfs_free_tree(node->dir_children[i]);
 
 	if (node->blob_file)
 		filp_close(node->blob_file, NULL);
-	kfree(node->children);
+	kfree(node->file_children);
+	kfree(node->dir_children);
 	kfree(node->name);
 	kfree(node);
+}
+
+static void actiondfs_clear_children(struct actiondfs_node *node)
+{
+	size_t i;
+
+	for (i = 0; i < node->file_count; i++)
+		actiondfs_free_tree(node->file_children[i]);
+	for (i = 0; i < node->dir_count; i++)
+		actiondfs_free_tree(node->dir_children[i]);
+	kfree(node->file_children);
+	kfree(node->dir_children);
+	node->file_children = NULL;
+	node->file_count = 0;
+	node->file_capacity = 0;
+	node->dir_children = NULL;
+	node->dir_count = 0;
+	node->dir_capacity = 0;
 }
 
 static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info *sbi,
@@ -127,19 +151,83 @@ static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi
 	return actiondfs_alloc_node_len(sbi, name, strlen(name), mode);
 }
 
+static int actiondfs_compare_name(const char *lhs, size_t lhs_len,
+				  const char *rhs, size_t rhs_len)
+{
+	size_t common = min(lhs_len, rhs_len);
+	int cmp;
+
+	cmp = memcmp(lhs, rhs, common);
+	if (cmp < 0)
+		return -1;
+	if (cmp > 0)
+		return 1;
+	if (lhs_len < rhs_len)
+		return -1;
+	if (lhs_len > rhs_len)
+		return 1;
+	return 0;
+}
+
+static struct actiondfs_node *actiondfs_find_child_in(struct actiondfs_node **children,
+						      size_t count,
+						      const char *name,
+						      size_t len)
+{
+	size_t lo = 0;
+	size_t hi = count;
+
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		struct actiondfs_node *child = children[mid];
+		int cmp = actiondfs_compare_name(child->name, child->name_len,
+						 name, len);
+
+		if (cmp < 0) {
+			lo = mid + 1;
+		} else if (cmp > 0) {
+			hi = mid;
+		} else {
+			return child;
+		}
+	}
+	return NULL;
+}
+
 static struct actiondfs_node *actiondfs_find_child(struct actiondfs_node *dir,
 						   const char *name,
 						   size_t len)
 {
-	size_t i;
+	struct actiondfs_node *child;
 
-	for (i = 0; i < dir->child_count; i++) {
-		struct actiondfs_node *child = dir->children[i];
+	child = actiondfs_find_child_in(dir->file_children, dir->file_count,
+					name, len);
+	if (child)
+		return child;
+	return actiondfs_find_child_in(dir->dir_children, dir->dir_count,
+				       name, len);
+}
 
-		if (child->name_len == len && !memcmp(child->name, name, len))
-			return child;
+static int actiondfs_validate_no_cross_type_duplicates(struct actiondfs_node *dir)
+{
+	size_t file_index = 0;
+	size_t dir_index = 0;
+
+	while (file_index < dir->file_count && dir_index < dir->dir_count) {
+		struct actiondfs_node *file = dir->file_children[file_index];
+		struct actiondfs_node *child_dir = dir->dir_children[dir_index];
+		int cmp = actiondfs_compare_name(file->name, file->name_len,
+						 child_dir->name,
+						 child_dir->name_len);
+
+		if (!cmp)
+			return -EEXIST;
+		if (cmp < 0)
+			file_index++;
+		else
+			dir_index++;
 	}
-	return NULL;
+	return 0;
 }
 
 static int actiondfs_valid_component(const char *name, size_t len)
@@ -154,30 +242,47 @@ static int actiondfs_valid_component(const char *name, size_t len)
 	return 0;
 }
 
-static int actiondfs_add_child(struct actiondfs_node *dir,
-			       struct actiondfs_node *child)
+static int actiondfs_validate_next_child(struct actiondfs_node **children,
+					 size_t count,
+					 const char *name,
+					 size_t name_len)
+{
+	struct actiondfs_node *last;
+
+	if (!count)
+		return 0;
+
+	last = children[count - 1];
+	if (actiondfs_compare_name(last->name, last->name_len, name, name_len) >= 0)
+		return -EINVAL;
+	return 0;
+}
+
+static int actiondfs_append_child(struct actiondfs_node *dir,
+				  struct actiondfs_node ***children_ptr,
+				  size_t *count,
+				  size_t *capacity_ptr,
+				  struct actiondfs_node *child)
 {
 	struct actiondfs_node **children;
 	size_t capacity;
 
 	if (!actiondfs_is_dir(dir))
 		return -ENOTDIR;
-	if (actiondfs_find_child(dir, child->name, child->name_len))
-		return -EEXIST;
 
 	child->parent = dir;
-	if (dir->child_count == dir->child_capacity) {
-		if (dir->child_capacity > SIZE_MAX / 2)
+	if (*count == *capacity_ptr) {
+		if (*capacity_ptr > SIZE_MAX / 2)
 			return -EOVERFLOW;
-		capacity = dir->child_capacity ? dir->child_capacity * 2 : 8;
-		children = krealloc_array(dir->children, capacity,
-					  sizeof(*dir->children), GFP_KERNEL);
+		capacity = *capacity_ptr ? *capacity_ptr * 2 : 8;
+		children = krealloc_array(*children_ptr, capacity,
+					  sizeof(*children), GFP_KERNEL);
 		if (!children)
 			return -ENOMEM;
-		dir->children = children;
-		dir->child_capacity = capacity;
+		*children_ptr = children;
+		*capacity_ptr = capacity;
 	}
-	dir->children[dir->child_count++] = child;
+	(*children_ptr)[(*count)++] = child;
 	return 0;
 }
 
@@ -194,8 +299,10 @@ static struct actiondfs_node *actiondfs_add_dir_child(struct actiondfs_sb_info *
 	err = actiondfs_valid_component(name, name_len);
 	if (err)
 		return ERR_PTR(err);
-	if (actiondfs_find_child(parent, name, name_len))
-		return ERR_PTR(-EEXIST);
+	err = actiondfs_validate_next_child(parent->dir_children, parent->dir_count,
+					    name, name_len);
+	if (err)
+		return ERR_PTR(err);
 
 	dir = actiondfs_alloc_node_len(sbi, name, name_len, S_IFDIR | ACTIONDFS_DIR_MODE);
 	if (!dir)
@@ -207,7 +314,9 @@ static struct actiondfs_node *actiondfs_add_dir_child(struct actiondfs_sb_info *
 	}
 	dir->loaded = loaded;
 
-	err = actiondfs_add_child(parent, dir);
+	err = actiondfs_append_child(parent, &parent->dir_children,
+				     &parent->dir_count, &parent->dir_capacity,
+				     dir);
 	if (err) {
 		actiondfs_free_tree(dir);
 		return ERR_PTR(err);
@@ -229,8 +338,10 @@ static int actiondfs_add_file_child(struct actiondfs_sb_info *sbi,
 	err = actiondfs_valid_component(name, name_len);
 	if (err)
 		return err;
-	if (actiondfs_find_child(parent, name, name_len))
-		return -EEXIST;
+	err = actiondfs_validate_next_child(parent->file_children, parent->file_count,
+					    name, name_len);
+	if (err)
+		return err;
 
 	file = actiondfs_alloc_node_len(sbi, name, name_len, S_IFREG | (mode & 0777));
 	if (!file)
@@ -240,7 +351,9 @@ static int actiondfs_add_file_child(struct actiondfs_sb_info *sbi,
 	memcpy(file->hash, hash, 64);
 	file->hash[64] = '\0';
 
-	err = actiondfs_add_child(parent, file);
+	err = actiondfs_append_child(parent, &parent->file_children,
+				     &parent->file_count, &parent->file_capacity,
+				     file);
 	if (err) {
 		actiondfs_free_tree(file);
 		return err;
@@ -695,6 +808,9 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 			if (err)
 				goto out;
 			break;
+		case 3:
+			err = -EOPNOTSUPP;
+			goto out;
 		default:
 			err = actiondfs_pb_skip(buffer, len, &pos, key & 7);
 			if (err)
@@ -702,8 +818,14 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 		}
 	}
 
+	err = actiondfs_validate_no_cross_type_duplicates(dir);
+	if (err)
+		goto out;
+
 	dir->loaded = true;
 out:
+	if (err)
+		actiondfs_clear_children(dir);
 	kvfree(buffer);
 	return err;
 }
@@ -845,13 +967,22 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	if (!dir_emit_dots(file, ctx))
 		return 0;
 
-	for (i = 0; i < dir->child_count; i++, pos++) {
-		struct actiondfs_node *child = dir->children[i];
-		unsigned int type = actiondfs_is_dir(child) ? DT_DIR : DT_REG;
+	for (i = 0; i < dir->file_count; i++, pos++) {
+		struct actiondfs_node *child = dir->file_children[i];
 
 		if (pos < ctx->pos)
 			continue;
-		if (!dir_emit(ctx, child->name, child->name_len, child->ino, type))
+		if (!dir_emit(ctx, child->name, child->name_len, child->ino, DT_REG))
+			return 0;
+		ctx->pos = pos + 1;
+	}
+
+	for (i = 0; i < dir->dir_count; i++, pos++) {
+		struct actiondfs_node *child = dir->dir_children[i];
+
+		if (pos < ctx->pos)
+			continue;
+		if (!dir_emit(ctx, child->name, child->name_len, child->ino, DT_DIR))
 			return 0;
 		ctx->pos = pos + 1;
 	}

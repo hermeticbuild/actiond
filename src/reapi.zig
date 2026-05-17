@@ -561,7 +561,33 @@ pub const Directory = struct {
         self.* = .{};
     }
 
+    pub fn validateCanonical(self: Directory) !void {
+        if (self.files.len > 1) {
+            for (self.files[1..], 1..) |file, index| {
+                if (std.mem.order(u8, self.files[index - 1].name, file.name) != .lt)
+                    return error.NonCanonicalDirectory;
+            }
+        }
+        if (self.directories.len > 1) {
+            for (self.directories[1..], 1..) |directory, index| {
+                if (std.mem.order(u8, self.directories[index - 1].name, directory.name) != .lt)
+                    return error.NonCanonicalDirectory;
+            }
+        }
+
+        var file_index: usize = 0;
+        var directory_index: usize = 0;
+        while (file_index < self.files.len and directory_index < self.directories.len) {
+            switch (std.mem.order(u8, self.files[file_index].name, self.directories[directory_index].name)) {
+                .eq => return error.NonCanonicalDirectory,
+                .lt => file_index += 1,
+                .gt => directory_index += 1,
+            }
+        }
+    }
+
     pub fn encode(self: Directory, writer: *protobuf.Writer) !void {
+        try self.validateCanonical();
         for (self.files) |file| try writer.writeMessageField(1, file);
         for (self.directories) |directory| try writer.writeMessageField(2, directory);
     }
@@ -593,10 +619,16 @@ pub const Directory = struct {
             }
         }
 
-        return .{
-            .files = try files.toOwnedSlice(allocator),
-            .directories = try directories.toOwnedSlice(allocator),
+        const file_slice = try files.toOwnedSlice(allocator);
+        errdefer allocator.free(file_slice);
+        const directory_slice = try directories.toOwnedSlice(allocator);
+        errdefer allocator.free(directory_slice);
+        const out = Directory{
+            .files = file_slice,
+            .directories = directory_slice,
         };
+        try out.validateCanonical();
+        return out;
     }
 };
 
@@ -1583,6 +1615,38 @@ test "Directory decodes files and child directories" {
     try std.testing.expectEqual(@as(usize, 1), decoded.directories.len);
     try std.testing.expectEqualStrings("src", decoded.directories[0].name);
     try std.testing.expect(decoded.directories[0].digest.?.eql(child_digest));
+}
+
+test "Directory canonical order is enforced per field" {
+    const canonical: Directory = .{
+        .files = &.{
+            .{ .name = "b.txt" },
+        },
+        .directories = &.{
+            .{ .name = "a" },
+        },
+    };
+    try canonical.validateCanonical();
+    const encoded = try encodeAlloc(std.testing.allocator, canonical);
+    defer std.testing.allocator.free(encoded);
+
+    const unsorted_files: Directory = .{
+        .files = &.{
+            .{ .name = "b.txt" },
+            .{ .name = "a.txt" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, unsorted_files));
+
+    const overlapping_names: Directory = .{
+        .files = &.{
+            .{ .name = "same" },
+        },
+        .directories = &.{
+            .{ .name = "same" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, overlapping_names));
 }
 
 test "CAS batch messages decode repeated request and response fields" {
