@@ -6,6 +6,7 @@ const cas = @import("cas.zig");
 const execroot = @import("execroot.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
+const staged_cas_index = @import("staged_cas_index.zig");
 
 pub const Error = error{
     MissingActionBlob,
@@ -72,6 +73,7 @@ pub const ExecuteOptions = struct {
     cas_blob_root_path: ?[]const u8 = null,
     input_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_blob_root_path: ?[]const u8 = null,
+    staged_cas_index: ?*staged_cas_index.Index = null,
     runtime_mount_cache: ?RuntimeMountCache = null,
 };
 
@@ -92,6 +94,7 @@ pub const PreparedExecuteOptions = struct {
 const CasReadRoots = struct {
     primary_blob_root_path: ?[]const u8 = null,
     staged_blob_root_path: ?[]const u8 = null,
+    staged_index: ?*staged_cas_index.Index = null,
 };
 
 pub fn prepareExecuteOptions(
@@ -130,6 +133,7 @@ fn casReadRoots(options: ExecuteOptions) CasReadRoots {
     return .{
         .primary_blob_root_path = options.input_cas_blob_root_path orelse options.cas_blob_root_path,
         .staged_blob_root_path = options.staged_cas_blob_root_path,
+        .staged_index = options.staged_cas_index,
     };
 }
 
@@ -143,9 +147,11 @@ fn readCasBlobAlloc(
     if (digest.isEmpty()) return allocator.alloc(u8, 0);
 
     if (read_roots.staged_blob_root_path) |root| {
-        if (readCasBlobFromRootAlloc(io, allocator, root, digest)) |bytes| return bytes else |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| return e,
+        if (read_roots.staged_index == null or read_roots.staged_index.?.contains(io, digest)) {
+            if (readCasBlobFromRootAlloc(io, allocator, root, digest)) |bytes| return bytes else |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            }
         }
     }
     if (read_roots.primary_blob_root_path) |root| {
@@ -410,6 +416,7 @@ pub fn executeActionWithOptions(
             .chroot_root_path = exec_root_path,
             .cas_blob_root_path = options.input_cas_blob_root_path orelse options.cas_blob_root_path,
             .staged_cas_blob_root_path = options.staged_cas_blob_root_path,
+            .staged_cas_index = options.staged_cas_index,
             .directory_inputs = directory_inputs.items,
             .copy_all_executable_inputs = false,
             .copy_executable_inputs = executable_copy_paths.items,
@@ -490,13 +497,17 @@ pub fn executeActionWithOptions(
     const execution_completed = std.Io.Clock.awake.now(io);
     const output_upload_start_wall = timestampNow(io);
     const output_upload_start = std.Io.Clock.awake.now(io);
+    if (options.staged_cas_index) |index| {
+        if (outcome.stdout_digest) |digest| try index.add(io, allocator, digest);
+        if (outcome.stderr_digest) |digest| try index.add(io, allocator, digest);
+    }
     if (actiondfs_workspace) |*workspace| {
         try workspace.mountForCollection();
         var merged_dir = try std.Io.Dir.openDirAbsolute(io, workspace.mounts[0].overlay_target, .{ .iterate = true });
         defer merged_dir.close(io);
-        try collectOutputFiles(io, allocator, store, merged_dir, command, &outcome);
+        try collectOutputFiles(io, allocator, store, options.staged_cas_index, merged_dir, command, &outcome);
     } else {
-        try collectOutputFiles(io, allocator, store, exec_root_dir, command, &outcome);
+        try collectOutputFiles(io, allocator, store, options.staged_cas_index, exec_root_dir, command, &outcome);
     }
     const output_upload_completed_wall = timestampNow(io);
     const output_upload_completed = std.Io.Clock.awake.now(io);
@@ -1339,6 +1350,7 @@ fn collectOutputFiles(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     command: reapi.Command,
     outcome: *action_runner.Outcome,
@@ -1354,14 +1366,14 @@ fn collectOutputFiles(
 
     if (command.output_paths.len != 0) {
         for (command.output_paths) |path| {
-            try collectOutputPath(io, allocator, store, work_root, path, &output_files, &output_directories);
+            try collectOutputPath(io, allocator, store, staged_index, work_root, path, &output_files, &output_directories);
         }
     } else {
         for (command.output_files) |path| {
-            try collectOutputFile(io, allocator, store, work_root, path, &output_files);
+            try collectOutputFile(io, allocator, store, staged_index, work_root, path, &output_files);
         }
         for (command.output_directories) |path| {
-            try collectOutputDirectory(io, allocator, store, work_root, path, &output_directories);
+            try collectOutputDirectory(io, allocator, store, staged_index, work_root, path, &output_directories);
         }
     }
 
@@ -1373,6 +1385,7 @@ fn collectOutputPath(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
@@ -1384,8 +1397,8 @@ fn collectOutputPath(
         else => return err,
     };
     switch (stat.kind) {
-        .file => try collectOutputFileWithStat(io, allocator, store, work_root, path, stat, output_files),
-        .directory => try collectOutputDirectoryWithStat(io, allocator, store, work_root, path, output_directories),
+        .file => try collectOutputFileWithStat(io, allocator, store, staged_index, work_root, path, stat, output_files),
+        .directory => try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories),
         else => return error.FailedPrecondition,
     }
 }
@@ -1394,6 +1407,7 @@ fn collectOutputFile(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
@@ -1404,13 +1418,14 @@ fn collectOutputFile(
         else => return err,
     };
     if (stat.kind != .file) return error.FailedPrecondition;
-    try collectOutputFileWithStat(io, allocator, store, work_root, path, stat, output_files);
+    try collectOutputFileWithStat(io, allocator, store, staged_index, work_root, path, stat, output_files);
 }
 
 fn collectOutputFileWithStat(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
     stat: std.Io.Dir.Stat,
@@ -1422,6 +1437,7 @@ fn collectOutputFileWithStat(
         error.FileNotFound => return,
         else => return err,
     };
+    if (staged_index) |index| try index.add(io, allocator, digest);
 
     const path_copy = try allocator.dupe(u8, path);
     errdefer allocator.free(path_copy);
@@ -1472,6 +1488,7 @@ fn collectOutputDirectory(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
@@ -1482,13 +1499,14 @@ fn collectOutputDirectory(
         else => return err,
     };
     if (stat.kind != .directory) return error.FailedPrecondition;
-    try collectOutputDirectoryWithStat(io, allocator, store, work_root, path, output_directories);
+    try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories);
 }
 
 fn collectOutputDirectoryWithStat(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
@@ -1497,8 +1515,9 @@ fn collectOutputDirectoryWithStat(
     defer dir.close(io);
     var tree = OutputTreeBuilder{};
     defer tree.deinit(allocator);
-    _ = try putOutputDirectoryTree(io, allocator, store, dir, &tree, true);
+    _ = try putOutputDirectoryTree(io, allocator, store, staged_index, dir, &tree, true);
     const tree_digest = try tree.putTreeProto(io, allocator, store);
+    if (staged_index) |index| try index.add(io, allocator, tree_digest);
 
     const path_copy = try allocator.dupe(u8, path);
     errdefer allocator.free(path_copy);
@@ -1597,6 +1616,7 @@ fn putOutputDirectoryTree(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
     dir: std.Io.Dir,
     tree: *OutputTreeBuilder,
     is_root: bool,
@@ -1632,6 +1652,7 @@ fn putOutputDirectoryTree(
             .file => {
                 const stat = try dir.statFile(io, entry.name, .{});
                 const digest = try store.putFile(io, dir, entry.name);
+                if (staged_index) |index| try index.add(io, allocator, digest);
                 try files.append(allocator, .{
                     .name = try tree.dupe(allocator, entry.name),
                     .digest = try tree.appendDigest(allocator, digest),
@@ -1641,7 +1662,7 @@ fn putOutputDirectoryTree(
             .directory => {
                 var child = try dir.openDir(io, entry.name, .{ .iterate = true });
                 defer child.close(io);
-                const digest = try putOutputDirectoryTree(io, allocator, store, child, tree, false);
+                const digest = try putOutputDirectoryTree(io, allocator, store, staged_index, child, tree, false);
                 try directories.append(allocator, .{
                     .name = try tree.dupe(allocator, entry.name),
                     .digest = try tree.appendDigest(allocator, digest),
@@ -1667,6 +1688,7 @@ fn putOutputDirectoryTree(
     errdefer if (directory_owned) directory.deinit(allocator);
 
     const digest = try putProto(io, allocator, store, directory);
+    if (staged_index) |index| try index.add(io, allocator, digest);
     if (is_root) {
         tree.root = directory;
     } else {
@@ -2290,7 +2312,7 @@ test "collectOutputFiles uploads requested output files and directories" {
     };
     defer outcome.deinit(std.testing.allocator);
 
-    try collectOutputFiles(std.testing.io, std.testing.allocator, store, work_dir, .{
+    try collectOutputFiles(std.testing.io, std.testing.allocator, store, null, work_dir, .{
         .output_paths = &.{ "out/file.txt", "tree" },
     }, &outcome);
 
@@ -2367,7 +2389,7 @@ test "collectOutputFiles strips chroot execroot prefix from depfiles" {
 
     var outcome: action_runner.Outcome = .{ .status = .{ .exited = 0 }, .stdout = &.{}, .stderr = &.{} };
     defer outcome.deinit(std.testing.allocator);
-    try collectOutputFiles(std.testing.io, std.testing.allocator, store, work_dir, .{
+    try collectOutputFiles(std.testing.io, std.testing.allocator, store, null, work_dir, .{
         .output_files = &.{"bazel-out/pkg/file.d"},
     }, &outcome);
 

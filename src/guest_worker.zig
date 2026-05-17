@@ -9,6 +9,7 @@ const control_protocol = @import("control_protocol.zig");
 const grpc_record = @import("grpc_record.zig");
 const reapi = @import("reapi.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
+const staged_cas_index = @import("staged_cas_index.zig");
 const vsock = @import("vsock.zig");
 
 pub const Error = error{
@@ -39,11 +40,15 @@ pub fn run(io: std.Io) !void {
     try cas.Store.init(cas_dir).ensureLayout(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
 
+    var staged_index = staged_cas_index.Index{};
+    defer staged_index.deinit(io, allocator);
+
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
         .cas_blob_root_path = guest_cas_blob_root_path,
         .input_cas_blob_root_path = host_cas_blob_root_path,
         .staged_cas_blob_root_path = staged_cas_blob_root_path,
+        .staged_cas_index = &staged_index,
     });
 
     const server: reapi_dispatch.Server = .{
@@ -51,6 +56,7 @@ pub fn run(io: std.Io) !void {
         .action_cache_store = action_cache.Store.initReady(ac_dir),
         .cleanup_store = cas.Store.initReady(cleanup_dir),
         .cleanup_visible_store = cas.Store.initReady(host_cas_dir),
+        .cleanup_staged_index = &staged_index,
         .work_root = action_work_dir,
         .execution_options = execution_options.options,
     };

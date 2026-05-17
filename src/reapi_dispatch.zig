@@ -12,6 +12,7 @@ const execution_service = @import("execution_service.zig");
 const grpc_record = @import("grpc_record.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
+const staged_cas_index = @import("staged_cas_index.zig");
 const tree_service = @import("tree_service.zig");
 
 pub const Error = error{
@@ -37,6 +38,7 @@ pub const Server = struct {
     action_cache_store: ?action_cache.Store = null,
     cleanup_store: ?cas.Store = null,
     cleanup_visible_store: ?cas.Store = null,
+    cleanup_staged_index: ?*staged_cas_index.Index = null,
     work_root: ?std.Io.Dir = null,
     execution_options: action_executor.ExecuteOptions = .{},
 
@@ -96,6 +98,9 @@ pub const Server = struct {
             else
                 try cache_service.deleteBlobs(io, allocator, cleanup_store, request);
             defer response.deinit(allocator);
+            if (self.cleanup_staged_index) |index| {
+                removeCleanedStagedDigests(io, index, request, response);
+            }
             return try encodeResponse(allocator, response);
         }
 
@@ -204,6 +209,27 @@ pub const Server = struct {
         return error.UnsupportedMethod;
     }
 };
+
+fn removeCleanedStagedDigests(
+    io: std.Io,
+    index: *staged_cas_index.Index,
+    request: reapi.FindMissingBlobsRequest,
+    response: reapi.FindMissingBlobsResponse,
+) void {
+    for (request.blob_digests) |digest| {
+        const local = cas.Digest.fromReapi(digest) catch continue;
+        if (responseContainsDigest(response.missing_blob_digests, local)) continue;
+        index.remove(io, local);
+    }
+}
+
+fn responseContainsDigest(digests: []const reapi.Digest, needle: cas.Digest) bool {
+    for (digests) |digest| {
+        const local = cas.Digest.fromReapi(digest) catch continue;
+        if (local.eql(needle)) return true;
+    }
+    return false;
+}
 
 fn singlePayload(record_bytes: []const u8) ![]const u8 {
     var it = grpc_record.Iterator.init(record_bytes);

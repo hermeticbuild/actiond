@@ -28,6 +28,7 @@ pub const protobuf_wire = @import("protobuf_wire.zig");
 pub const reapi = @import("reapi.zig");
 pub const reapi_dispatch = @import("reapi_dispatch.zig");
 pub const runtime_mount = @import("runtime_mount.zig");
+pub const staged_cas_index = @import("staged_cas_index.zig");
 pub const tree_service = @import("tree_service.zig");
 pub const version = @import("version.zig");
 pub const vsock = @import("vsock.zig");
@@ -63,6 +64,7 @@ test {
     _ = reapi;
     _ = reapi_dispatch;
     _ = runtime_mount;
+    _ = staged_cas_index;
     _ = tree_service;
     _ = version;
     _ = vsock;

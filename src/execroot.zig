@@ -1,6 +1,7 @@
 const std = @import("std");
 const action_runner = @import("action_runner.zig");
 const cas = @import("cas.zig");
+const staged_cas_index = @import("staged_cas_index.zig");
 
 pub const Error = error{
     EmptyExecPath,
@@ -22,6 +23,7 @@ pub const MaterializeOptions = struct {
     chroot_root_path: ?[]const u8 = null,
     cas_blob_root_path: ?[]const u8 = null,
     staged_cas_blob_root_path: ?[]const u8 = null,
+    staged_cas_index: ?*staged_cas_index.Index = null,
     directory_inputs: []const DirectoryInput = &.{},
     copy_all_executable_inputs: bool = true,
     copy_executable_inputs: []const []const u8 = &.{},
@@ -162,6 +164,7 @@ pub const Materializer = struct {
                         allocator,
                         input.digest,
                         options.staged_cas_blob_root_path,
+                        options.staged_cas_index,
                         blob_root_path,
                         self.root,
                         input.path,
@@ -173,7 +176,7 @@ pub const Materializer = struct {
         }
 
         const source = if (options.cas_blob_root_path) |blob_root_path|
-            try selectBlobSourcePath(allocator, io, input.digest, options.staged_cas_blob_root_path, blob_root_path)
+            try selectBlobSourcePath(allocator, io, input.digest, options.staged_cas_blob_root_path, options.staged_cas_index, blob_root_path)
         else source: {
             var blob = try self.store.openBlob(io, input.digest);
             blob.close(io);
@@ -225,16 +228,19 @@ fn selectBlobSourcePath(
     io: std.Io,
     digest: cas.Digest,
     staged_blob_root_path: ?[]const u8,
+    staged_index: ?*staged_cas_index.Index,
     blob_root_path: []const u8,
 ) ![:0]u8 {
     if (staged_blob_root_path) |staged_root| {
-        const staged_path = try blobPathFromRoot(allocator, staged_root, digest);
-        const exists = blobPathExists(io, staged_path) catch |err| {
+        if (staged_index == null or staged_index.?.contains(io, digest)) {
+            const staged_path = try blobPathFromRoot(allocator, staged_root, digest);
+            const exists = blobPathExists(io, staged_path) catch |err| {
+                allocator.free(staged_path);
+                return err;
+            };
+            if (exists) return staged_path;
             allocator.free(staged_path);
-            return err;
-        };
-        if (exists) return staged_path;
-        allocator.free(staged_path);
+        }
     }
 
     const path = try blobPathFromRoot(allocator, blob_root_path, digest);
@@ -267,12 +273,13 @@ fn copyBlobFromSourceRoots(
     allocator: std.mem.Allocator,
     digest: cas.Digest,
     staged_blob_root_path: ?[]const u8,
+    staged_index: ?*staged_cas_index.Index,
     blob_root_path: []const u8,
     dest_dir: std.Io.Dir,
     dest_path: []const u8,
     permissions: std.Io.File.Permissions,
 ) !void {
-    const source_path = try selectBlobSourcePath(allocator, io, digest, staged_blob_root_path, blob_root_path);
+    const source_path = try selectBlobSourcePath(allocator, io, digest, staged_blob_root_path, staged_index, blob_root_path);
     defer allocator.free(source_path);
 
     var src = try openBlobPath(io, source_path);
