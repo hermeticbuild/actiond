@@ -70,6 +70,8 @@ pub const ExecuteOptions = struct {
     runtime_root_path: ?[]const u8 = null,
     actiondfs_supported: ?bool = null,
     cas_blob_root_path: ?[]const u8 = null,
+    input_cas_blob_root_path: ?[]const u8 = null,
+    staged_cas_blob_root_path: ?[]const u8 = null,
     runtime_mount_cache: ?RuntimeMountCache = null,
 };
 
@@ -105,6 +107,9 @@ pub fn prepareExecuteOptions(
         const path = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
         prepared.owned_cas_blob_root_path = path;
         prepared.options.cas_blob_root_path = path;
+    }
+    if (prepared.options.input_cas_blob_root_path == null) {
+        prepared.options.input_cas_blob_root_path = prepared.options.cas_blob_root_path;
     }
     if (prepared.options.runtime_root_path) |runtime_root_path| {
         if (prepared.options.runtime_mount_cache == null) {
@@ -278,6 +283,8 @@ pub fn executeActionWithOptions(
     if (!use_actiondfs_inputs) {
         materialization = materializer.materializeInputs(io, allocator, inputs.items, .{
             .chroot_root_path = exec_root_path,
+            .cas_blob_root_path = options.input_cas_blob_root_path orelse options.cas_blob_root_path,
+            .staged_cas_blob_root_path = options.staged_cas_blob_root_path,
             .directory_inputs = directory_inputs.items,
             .copy_all_executable_inputs = false,
             .copy_executable_inputs = executable_copy_paths.items,

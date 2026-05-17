@@ -17,6 +17,7 @@ pub const Error = error{
 
 pub const guest_cas_blob_root_path = "/cas/blobs/sha256";
 pub const host_cas_blob_root_path = "/host-cas/blobs/sha256";
+pub const staged_cas_blob_root_path = "/work/cas-upper/upper/blobs/sha256";
 
 pub fn run(io: std.Io) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
@@ -41,6 +42,8 @@ pub fn run(io: std.Io) !void {
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
         .cas_blob_root_path = guest_cas_blob_root_path,
+        .input_cas_blob_root_path = host_cas_blob_root_path,
+        .staged_cas_blob_root_path = staged_cas_blob_root_path,
     });
 
     const server: reapi_dispatch.Server = .{
@@ -329,6 +332,7 @@ test "guest worker is Linux-only" {
 test "guest worker uses CAS overlay for execution and host CAS for cleanup visibility" {
     try std.testing.expectEqualStrings("/cas/blobs/sha256", guest_cas_blob_root_path);
     try std.testing.expectEqualStrings("/host-cas/blobs/sha256", host_cas_blob_root_path);
+    try std.testing.expectEqualStrings("/work/cas-upper/upper/blobs/sha256", staged_cas_blob_root_path);
 }
 
 fn encodeGrpcRequest(allocator: std.mem.Allocator, value: anytype) ![]u8 {

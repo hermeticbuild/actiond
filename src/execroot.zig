@@ -20,6 +20,8 @@ pub const DirectoryInput = struct {
 
 pub const MaterializeOptions = struct {
     chroot_root_path: ?[]const u8 = null,
+    cas_blob_root_path: ?[]const u8 = null,
+    staged_cas_blob_root_path: ?[]const u8 = null,
     directory_inputs: []const DirectoryInput = &.{},
     copy_all_executable_inputs: bool = true,
     copy_executable_inputs: []const []const u8 = &.{},
@@ -149,20 +151,38 @@ pub const Materializer = struct {
         const copy_executable = input.is_executable and
             (options.copy_all_executable_inputs or pathInList(input.path, options.copy_executable_inputs));
         if (copy_executable or input.digest.isEmpty()) {
+            if (!input.digest.isEmpty()) {
+                if (options.cas_blob_root_path) |blob_root_path| {
+                    return copyBlobFromSourceRoots(
+                        io,
+                        allocator,
+                        input.digest,
+                        options.staged_cas_blob_root_path,
+                        blob_root_path,
+                        self.root,
+                        input.path,
+                        permissions,
+                    );
+                }
+            }
             return self.store.copyToFile(io, input.digest, self.root, input.path, permissions);
         }
 
-        var blob = try self.store.openBlob(io, input.digest);
-        blob.close(io);
+        const source = if (options.cas_blob_root_path) |blob_root_path|
+            try selectBlobSourcePath(allocator, io, input.digest, options.staged_cas_blob_root_path, blob_root_path)
+        else source: {
+            var blob = try self.store.openBlob(io, input.digest);
+            blob.close(io);
+            var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+            const blob_path = cas.blobSubPath(input.digest, &blob_path_buffer);
+            break :source try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path.?, blob_path }, 0);
+        };
+        errdefer allocator.free(source);
         try self.root.writeFile(io, .{
             .sub_path = input.path,
             .data = "",
             .flags = .{ .read = true, .permissions = .default_file },
         });
-        var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
-        const blob_path = cas.blobSubPath(input.digest, &blob_path_buffer);
-        const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path.?, blob_path }, 0);
-        errdefer allocator.free(source);
         const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ root_path, input.path }, 0);
         errdefer allocator.free(target);
         try bind_mounts.append(allocator, .{
@@ -195,6 +215,149 @@ pub const Materializer = struct {
         });
     }
 };
+
+fn selectBlobSourcePath(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    digest: cas.Digest,
+    staged_blob_root_path: ?[]const u8,
+    blob_root_path: []const u8,
+) ![:0]u8 {
+    if (staged_blob_root_path) |staged_root| {
+        const staged_path = try blobPathFromRoot(allocator, staged_root, digest);
+        const exists = blobPathExists(io, staged_path) catch |err| {
+            allocator.free(staged_path);
+            return err;
+        };
+        if (exists) return staged_path;
+        allocator.free(staged_path);
+    }
+
+    const path = try blobPathFromRoot(allocator, blob_root_path, digest);
+    errdefer allocator.free(path);
+    var file = try openBlobPath(io, path);
+    file.close(io);
+    return path;
+}
+
+fn blobPathFromRoot(
+    allocator: std.mem.Allocator,
+    blob_root_path: []const u8,
+    digest: cas.Digest,
+) ![:0]u8 {
+    var hash: [64]u8 = undefined;
+    return std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ blob_root_path, digest.formatHex(&hash) }, 0);
+}
+
+fn blobPathExists(io: std.Io, path: [:0]const u8) !bool {
+    var file = openBlobPath(io, path) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    file.close(io);
+    return true;
+}
+
+fn copyBlobFromSourceRoots(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    digest: cas.Digest,
+    staged_blob_root_path: ?[]const u8,
+    blob_root_path: []const u8,
+    dest_dir: std.Io.Dir,
+    dest_path: []const u8,
+    permissions: std.Io.File.Permissions,
+) !void {
+    const source_path = try selectBlobSourcePath(allocator, io, digest, staged_blob_root_path, blob_root_path);
+    defer allocator.free(source_path);
+
+    var src = try openBlobPath(io, source_path);
+    defer src.close(io);
+    var dest = try dest_dir.createFile(io, dest_path, .{
+        .truncate = true,
+        .permissions = permissions,
+    });
+    defer dest.close(io);
+
+    var buffer: [128 * 1024]u8 = undefined;
+    while (true) {
+        const n = try readFd(src.handle, &buffer);
+        if (n == 0) break;
+        try writeFdAll(dest.handle, buffer[0..n]);
+    }
+}
+
+fn openBlobPath(io: std.Io, path: [:0]const u8) !std.Io.File {
+    if (comptime @import("builtin").os.tag == .linux) {
+        return openBlobPathLinuxRetry(path);
+    }
+    return std.Io.Dir.openFileAbsolute(io, path, .{});
+}
+
+fn openBlobPathLinuxRetry(path: [:0]const u8) !std.Io.File {
+    const linux = std.os.linux;
+    var stale_attempts: usize = 0;
+    while (true) {
+        const rc = linux.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
+            .INTR => continue,
+            .STALE => {
+                if (stale_attempts >= 128) return error.FileNotFound;
+                stale_attempts += 1;
+                sleepStaleRetry();
+                continue;
+            },
+            .NOENT, .SRCH => return error.FileNotFound,
+            .ACCES => return error.AccessDenied,
+            .ISDIR => return error.IsDir,
+            .NOTDIR => return error.NotDir,
+            .NAMETOOLONG => return error.NameTooLong,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOMEM => return error.SystemResources,
+            .LOOP => return error.SymLinkLoop,
+            .FBIG, .OVERFLOW => return error.FileTooBig,
+            else => return error.Unexpected,
+        }
+    }
+}
+
+fn sleepStaleRetry() void {
+    if (comptime @import("builtin").os.tag != .linux) return;
+    var request: std.os.linux.timespec = .{
+        .sec = 0,
+        .nsec = 2 * std.time.ns_per_ms,
+    };
+    while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
+}
+
+fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
+    while (true) {
+        const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+    }
+}
+
+fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rc = std.posix.system.write(fd, bytes[offset..].ptr, bytes.len - offset);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.WriteFailed;
+                offset += n;
+            },
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
+    }
+}
 
 fn pathInList(path: []const u8, paths: []const []const u8) bool {
     for (paths) |candidate| {
@@ -446,4 +609,96 @@ test "Materializer prepares read-only bind mounts for chroot tree inputs" {
 
     const stat = try work_dir.statFile(std.testing.io, "tree-artifact", .{});
     try std.testing.expectEqual(std.Io.File.Kind.directory, stat.kind);
+}
+
+test "Materializer chooses staged blob root before immutable blob root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var store_dir = try tmp.dir.createDirPathOpen(std.testing.io, "store", .{});
+    defer store_dir.close(std.testing.io);
+    var lower_dir = try tmp.dir.createDirPathOpen(std.testing.io, "lower", .{});
+    defer lower_dir.close(std.testing.io);
+    var staged_dir = try tmp.dir.createDirPathOpen(std.testing.io, "staged", .{});
+    defer staged_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const digest = cas.Digest.fromBytes("fresh-output");
+    try cas.Store.init(lower_dir).putKnownBytes(std.testing.io, digest, "fresh-output");
+    try cas.Store.init(staged_dir).putKnownBytes(std.testing.io, digest, "fresh-output");
+
+    var work_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const work_root_len = try work_dir.realPath(std.testing.io, &work_root_buffer);
+    var lower_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const lower_root_len = try lower_dir.realPath(std.testing.io, &lower_root_buffer);
+    var staged_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staged_root_len = try staged_dir.realPath(std.testing.io, &staged_root_buffer);
+    const lower_blob_root = try std.fmt.allocPrint(std.testing.allocator, "{s}/blobs/sha256", .{lower_root_buffer[0..lower_root_len]});
+    defer std.testing.allocator.free(lower_blob_root);
+    const staged_blob_root = try std.fmt.allocPrint(std.testing.allocator, "{s}/blobs/sha256", .{staged_root_buffer[0..staged_root_len]});
+    defer std.testing.allocator.free(staged_blob_root);
+
+    const materializer = Materializer.init(cas.Store.init(store_dir), work_dir);
+    var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{
+        .{ .path = "out/lib.a", .digest = digest },
+    }, .{
+        .chroot_root_path = work_root_buffer[0..work_root_len],
+        .cas_blob_root_path = lower_blob_root,
+        .staged_cas_blob_root_path = staged_blob_root,
+    });
+    defer materialization.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), materialization.bind_mounts.len);
+    var hash: [64]u8 = undefined;
+    const expected_source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/{s}",
+        .{ staged_blob_root, digest.formatHex(&hash) },
+    );
+    defer std.testing.allocator.free(expected_source);
+    try std.testing.expectEqualStrings(expected_source, materialization.bind_mounts[0].source);
+}
+
+test "Materializer copies selected executable from immutable blob root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var store_dir = try tmp.dir.createDirPathOpen(std.testing.io, "store", .{});
+    defer store_dir.close(std.testing.io);
+    var lower_dir = try tmp.dir.createDirPathOpen(std.testing.io, "lower", .{});
+    defer lower_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const digest = cas.Digest.fromBytes("#!/bin/sh\n");
+    try cas.Store.init(lower_dir).putKnownBytes(std.testing.io, digest, "#!/bin/sh\n");
+
+    var work_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const work_root_len = try work_dir.realPath(std.testing.io, &work_root_buffer);
+    var lower_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const lower_root_len = try lower_dir.realPath(std.testing.io, &lower_root_buffer);
+    const lower_blob_root = try std.fmt.allocPrint(std.testing.allocator, "{s}/blobs/sha256", .{lower_root_buffer[0..lower_root_len]});
+    defer std.testing.allocator.free(lower_blob_root);
+
+    const materializer = Materializer.init(cas.Store.init(store_dir), work_dir);
+    var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{
+        .{ .path = "tools/run.sh", .digest = digest, .is_executable = true },
+    }, .{
+        .chroot_root_path = work_root_buffer[0..work_root_len],
+        .cas_blob_root_path = lower_blob_root,
+        .copy_all_executable_inputs = false,
+        .copy_executable_inputs = &.{"tools/run.sh"},
+    });
+    defer materialization.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), materialization.bind_mounts.len);
+    const restored = try work_dir.readFileAlloc(
+        std.testing.io,
+        "tools/run.sh",
+        std.testing.allocator,
+        .limited(64),
+    );
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings("#!/bin/sh\n", restored);
 }
