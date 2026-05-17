@@ -103,6 +103,17 @@ VM e2e on macOS:
 ACTIOND_KERNEL_DOCKER_CONTEXT=colima tools/e2e.sh vm
 ```
 
+Heavier LLVM smoke against an already-running VM worker:
+
+```bash
+e2e/llvm_tblgen_smoke.sh
+```
+
+That smoke uses `--platforms=//platforms:linux_arm64_musl` and
+`--host_platform=//platforms:linux_arm64_musl` in `/Users/dzbarsky/bootstrapped2`
+so the build avoids glibc runtime actions and generated exec tools do not depend
+on glibc inside actiond chroots.
+
 Standalone artifact e2e:
 
 ```bash

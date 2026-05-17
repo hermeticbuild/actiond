@@ -90,14 +90,16 @@ representative.
 
 Use actiond as both executor and cache, keep BuildBuddy BES from the
 `bootstrapped2` `.bazelrc`, and disable remote cache compression because actiond
-does not support it yet:
+does not support it yet. Use the musl Linux target and host platforms so the
+smoke avoids glibc runtime actions and exec tools built by the smoke are Linux
+arm64 musl binaries:
 
 ```bash
 cd /Users/dzbarsky/bootstrapped2
 bazel clean --expunge
 bazel build --config=prebuilt @llvm-project//llvm:llvm-tblgen \
-  --platforms=//platforms:linux_arm64 \
-  --host_platform=//platforms:linux_arm64 \
+  --platforms=//platforms:linux_arm64_musl \
+  --host_platform=//platforms:linux_arm64_musl \
   --remote_executor=grpc://127.0.0.1:8998 \
   --remote_cache=grpc://127.0.0.1:8998 \
   --experimental_remote_downloader= \
@@ -110,4 +112,10 @@ bazel build --config=prebuilt @llvm-project//llvm:llvm-tblgen \
   --spawn_strategy=remote \
   --genrule_strategy=remote \
   --jobs=8
+```
+
+The same command is wrapped by:
+
+```bash
+e2e/llvm_tblgen_smoke.sh
 ```

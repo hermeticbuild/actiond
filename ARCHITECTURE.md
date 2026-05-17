@@ -361,9 +361,16 @@ bazel build //...
 bazel test //...
 tools/docker/run_linux_e2e.sh
 ACTIOND_KERNEL_DOCKER_CONTEXT=colima tools/e2e.sh vm
+e2e/llvm_tblgen_smoke.sh
 ACTIOND_E2E_STANDALONE=1 tools/docker/run_linux_e2e.sh
 ACTIOND_KERNEL_DOCKER_CONTEXT=colima ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
 ```
+
+The LLVM smoke uses the bootstrapped workspace's
+`//platforms:linux_arm64_musl` target and host platform. That keeps generated
+execution tools musl-linked, avoids glibc runtime actions, and avoids making
+actiond guess whether an arbitrary action needs a glibc runtime mounted into the
+chroot.
 
 The VM e2e is the test that proves the Virtualization.framework path can boot,
 connect over vsock, execute actions, and import outputs back to host CAS.
