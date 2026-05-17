@@ -33,6 +33,7 @@
 #define ACTIONDFS_MAGIC 0x41444653
 #define ACTIONDFS_VERSION "actiondfs.v1"
 #define ACTIONDFS_MAX_MANIFEST_SIZE (64U * 1024U * 1024U)
+#define ACTIONDFS_DIR_MODE 0777
 
 struct actiondfs_node {
 	char *name;
@@ -182,7 +183,7 @@ static struct actiondfs_node *actiondfs_ensure_dir(struct actiondfs_sb_info *sbi
 			name = kmemdup_nul(cursor, len, GFP_KERNEL);
 			if (!name)
 				return ERR_PTR(-ENOMEM);
-			child = actiondfs_alloc_node(sbi, name, S_IFDIR | 0555);
+			child = actiondfs_alloc_node(sbi, name, S_IFDIR | ACTIONDFS_DIR_MODE);
 			kfree(name);
 			if (!child)
 				return ERR_PTR(-ENOMEM);
@@ -346,13 +347,18 @@ static int actiondfs_parse_line(struct actiondfs_sb_info *sbi, char *line)
 		return err;
 
 	if (!strcmp(type, "d")) {
+		struct actiondfs_node *dir;
+
 		path_hex = strsep(&line, " ");
 		if (!path_hex || (line && *line))
 			return -EINVAL;
 		path = actiondfs_hex_decode(path_hex);
 		if (IS_ERR(path))
 			return PTR_ERR(path);
-		err = PTR_ERR_OR_ZERO(actiondfs_ensure_dir(sbi, path));
+		dir = actiondfs_ensure_dir(sbi, path);
+		err = PTR_ERR_OR_ZERO(dir);
+		if (!err)
+			dir->mode = S_IFDIR | (mode & 0777);
 		kfree(path);
 		return err;
 	}
@@ -670,7 +676,7 @@ static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_op = &actiondfs_super_ops;
 	sb->s_time_gran = 1;
 
-	sbi->root = actiondfs_alloc_node(sbi, "", S_IFDIR | 0555);
+	sbi->root = actiondfs_alloc_node(sbi, "", S_IFDIR | ACTIONDFS_DIR_MODE);
 	if (!sbi->root) {
 		err = -ENOMEM;
 		goto fail;

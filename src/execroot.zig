@@ -43,7 +43,7 @@ pub fn writeActiondfsManifest(
     try out.writer.writeAll("actiondfs.v1\n");
     for (directories) |directory| {
         try validatePath(directory.path);
-        try out.writer.print("d 555 ", .{});
+        try out.writer.print("d 777 ", .{});
         try writePathHex(&out.writer, directory.path);
         try out.writer.writeByte('\n');
     }
@@ -358,8 +358,8 @@ test "writeActiondfsManifest emits directories and executable metadata" {
     const expected = try std.fmt.allocPrint(
         std.testing.allocator,
         "actiondfs.v1\n" ++
-            "d 555 737263\n" ++
-            "d 555 746f6f6c\n" ++
+            "d 777 737263\n" ++
+            "d 777 746f6f6c\n" ++
             "f 444 4 {s} 7372632f646174612e747874\n" ++
             "f 555 10 {s} 746f6f6c2f72756e2e7368\n",
         .{ data.formatHex(&data_hash), tool.formatHex(&tool_hash) },
