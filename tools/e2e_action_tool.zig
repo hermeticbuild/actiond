@@ -5,6 +5,7 @@ const Options = struct {
     out_dir: ?[]const u8 = null,
     out_count: usize = 16,
     expect_network_blocked: bool = false,
+    expect_loopback: bool = false,
     scans: std.ArrayListUnmanaged([]const u8) = .empty,
 
     fn deinit(self: *Options, allocator: std.mem.Allocator) void {
@@ -24,6 +25,7 @@ pub fn main(init: std.process.Init) !void {
     defer options.deinit(allocator);
 
     if (options.expect_network_blocked) try expectNetworkBlocked();
+    if (options.expect_loopback) try expectLoopbackTcp();
 
     const cwd = std.Io.Dir.cwd();
     var hash = std.hash.Wyhash.init(0xaca1_0d5eed);
@@ -82,6 +84,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
             try options.scans.append(allocator, args[i]);
         } else if (std.mem.eql(u8, arg, "--expect-network-blocked")) {
             options.expect_network_blocked = true;
+        } else if (std.mem.eql(u8, arg, "--expect-loopback")) {
+            options.expect_loopback = true;
         } else {
             return error.UnknownArgument;
         }
@@ -126,6 +130,91 @@ fn expectNetworkBlocked() !void {
         },
         else => |err| {
             std.debug.print("network block check returned unexpected connect errno: {s}\n", .{@tagName(err)});
+            return error.NetworkCheckFailed;
+        },
+    }
+}
+
+fn expectLoopbackTcp() !void {
+    const linux = std.os.linux;
+    if (@import("builtin").os.tag != .linux) return;
+
+    const listener_fd = try tcpSocket();
+    defer _ = linux.close(listener_fd);
+
+    var bind_addr = linux.sockaddr.in{
+        .port = 0,
+        .addr = 0,
+    };
+    switch (std.posix.errno(linux.bind(
+        listener_fd,
+        @as(*const linux.sockaddr, @ptrCast(&bind_addr)),
+        @sizeOf(linux.sockaddr.in),
+    ))) {
+        .SUCCESS => {},
+        else => |err| {
+            std.debug.print("loopback check could not bind 0.0.0.0:0: {s}\n", .{@tagName(err)});
+            return error.LoopbackCheckFailed;
+        },
+    }
+    switch (std.posix.errno(linux.listen(listener_fd, 1))) {
+        .SUCCESS => {},
+        else => |err| {
+            std.debug.print("loopback check could not listen: {s}\n", .{@tagName(err)});
+            return error.LoopbackCheckFailed;
+        },
+    }
+
+    var bound_addr: linux.sockaddr.in = std.mem.zeroes(linux.sockaddr.in);
+    var bound_addr_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    switch (std.posix.errno(linux.getsockname(
+        listener_fd,
+        @as(*linux.sockaddr, @ptrCast(&bound_addr)),
+        &bound_addr_len,
+    ))) {
+        .SUCCESS => {},
+        else => |err| {
+            std.debug.print("loopback check could not read listener address: {s}\n", .{@tagName(err)});
+            return error.LoopbackCheckFailed;
+        },
+    }
+
+    const client_fd = try tcpSocket();
+    defer _ = linux.close(client_fd);
+
+    var connect_addr = linux.sockaddr.in{
+        .port = bound_addr.port,
+        .addr = std.mem.nativeToBig(u32, 0x7f000001),
+    };
+    switch (std.posix.errno(linux.connect(
+        client_fd,
+        @as(*const linux.sockaddr, @ptrCast(&connect_addr)),
+        @sizeOf(linux.sockaddr.in),
+    ))) {
+        .SUCCESS => {},
+        else => |err| {
+            std.debug.print("loopback check could not connect to 127.0.0.1: {s}\n", .{@tagName(err)});
+            return error.LoopbackCheckFailed;
+        },
+    }
+
+    const accepted_rc = linux.accept(listener_fd, null, null);
+    switch (std.posix.errno(accepted_rc)) {
+        .SUCCESS => _ = linux.close(@intCast(accepted_rc)),
+        else => |err| {
+            std.debug.print("loopback check could not accept local connection: {s}\n", .{@tagName(err)});
+            return error.LoopbackCheckFailed;
+        },
+    }
+}
+
+fn tcpSocket() !i32 {
+    const linux = std.os.linux;
+    const socket_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, linux.IPPROTO.TCP);
+    switch (std.posix.errno(socket_rc)) {
+        .SUCCESS => return @intCast(socket_rc),
+        else => |err| {
+            std.debug.print("network check could not create TCP socket: {s}\n", .{@tagName(err)});
             return error.NetworkCheckFailed;
         },
     }
@@ -250,7 +339,8 @@ fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
 }
 
 test "parseArgs accepts network block check" {
-    var options = try parseArgs(std.testing.allocator, &.{"--expect-network-blocked"});
+    var options = try parseArgs(std.testing.allocator, &.{ "--expect-network-blocked", "--expect-loopback" });
     defer options.deinit(std.testing.allocator);
     try std.testing.expect(options.expect_network_blocked);
+    try std.testing.expect(options.expect_loopback);
 }

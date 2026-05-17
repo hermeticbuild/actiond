@@ -432,6 +432,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "prctl_no_new_privs");
     childCloseExtraFds();
     childSyscallName(linux.unshare(actionNamespaceFlags()), "unshare_namespaces");
+    childBringUpLoopback();
     childSyscallName(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0), "mount_private");
     for (action.bind_mounts) |mount| childBindMountReadOnly(mount);
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
@@ -440,6 +441,20 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     _ = linux.execve(action.exec_path.ptr, action.argv, action.envp);
     childWriteLiteral("actiond child setup failed: execve\n");
     linux.exit(127);
+}
+
+fn childBringUpLoopback() void {
+    const linux = std.os.linux;
+    const socket_rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    childSyscallName(socket_rc, "socket_loopback");
+    const fd: std.posix.fd_t = @intCast(socket_rc);
+    defer childClose(fd);
+
+    var ifr: linux.ifreq = std.mem.zeroes(linux.ifreq);
+    @memcpy(ifr.ifrn.name[0.."lo".len], "lo");
+    childSyscallName(linux.ioctl(fd, linux.SIOCGIFFLAGS, @intFromPtr(&ifr)), "ioctl_get_loopback");
+    ifr.ifru.flags.UP = true;
+    childSyscallName(linux.ioctl(fd, linux.SIOCSIFFLAGS, @intFromPtr(&ifr)), "ioctl_set_loopback");
 }
 
 fn childBindMountReadOnly(mount: BindMount) void {

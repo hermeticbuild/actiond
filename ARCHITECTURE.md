@@ -71,6 +71,10 @@ The VM is a long-lived worker. Per-action isolation happens inside Linux with a
 fresh chroot, mount namespace, and network namespace rather than by cold-booting
 a VM per action.
 
+Each action network namespace brings up only `lo`. Actions can use local TCP
+listeners on `127.0.0.1` or `0.0.0.0`, but no host or external network interface
+is attached.
+
 ## Why the Kernel Is Inflated Before Boot
 
 The packaged kernel is compressed, but the VM is booted with a raw Linux
@@ -207,6 +211,7 @@ For each action:
    - set `PR_SET_NO_NEW_PRIVS`
    - close extra file descriptors
    - unshare the mount and network namespaces
+   - bring up loopback inside the private network namespace
    - make mounts private
    - apply read-only bind mounts
    - chroot into the work root
@@ -225,7 +230,7 @@ The isolation boundary differs by host:
 `linux-actiond` relies on Linux kernel primitives:
 
 - chroot
-- private mount and network namespaces
+- private mount and network namespaces with only loopback enabled
 - read-only bind mounts
 - dropped uid/gid
 - `PR_SET_NO_NEW_PRIVS`
@@ -245,7 +250,8 @@ macOS only exposes:
 - serial stderr for logs
 
 There is no guest network device, and each action still gets its own Linux
-network namespace inside the VM. Root inside the guest is not host root.
+network namespace inside the VM with only loopback enabled. Root inside the
+guest is not host root.
 
 ## Cgroups
 
@@ -318,8 +324,8 @@ packing, and zstd packaging.
 
 End-to-end tests use `tools/e2e.sh` and the standalone `test/` workspace. The
 stress action graph covers bare files, source directories, tree artifact inputs,
-output directories, and an action-level probe that fails if the sandbox can open
-an outbound TCP path.
+output directories, and action-level probes that fail if the sandbox can open an
+outbound TCP path or cannot use loopback TCP.
 
 Useful commands:
 
