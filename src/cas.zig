@@ -235,6 +235,10 @@ pub const Store = struct {
             try self.materializeDirectoryContents(io, allocator, digest, temp_path);
             self.root.rename(temp_path, self.root, final_path, io) catch |err| switch (err) {
                 error.DirNotEmpty => return,
+                error.CrossDevice => {
+                    try self.materializeTreeDirect(io, allocator, digest, final_path);
+                    return;
+                },
                 else => |e| return e,
             };
             temp_created = false;
@@ -280,6 +284,24 @@ pub const Store = struct {
             try self.root.createDir(io, child_path, .default_dir);
             try self.materializeDirectoryContents(io, allocator, child_digest, child_path);
         }
+    }
+
+    fn materializeTreeDirect(
+        self: Store,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        digest: Digest,
+        final_path: []const u8,
+    ) !void {
+        self.root.createDir(io, final_path, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => return,
+            else => |e| return e,
+        };
+        var final_created = true;
+        errdefer if (final_created) self.root.deleteTree(io, final_path) catch {};
+
+        try self.materializeDirectoryContents(io, allocator, digest, final_path);
+        final_created = false;
     }
 
     fn materializeTreeFile(
