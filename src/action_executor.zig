@@ -384,7 +384,6 @@ pub fn executeActionWithOptions(
             .staged_cas_blob_root_path = options.staged_cas_blob_root_path,
             .staged_cas_index = options.staged_cas_index,
             .directory_inputs = directory_inputs.items,
-            .copy_all_executable_inputs = false,
             .copy_executable_inputs = executable_copy_paths.items,
         }) catch |err| switch (err) {
             error.FileNotFound, error.MissingInputTree => return error.MissingInputBlob,

@@ -25,7 +25,6 @@ pub const MaterializeOptions = struct {
     staged_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_index: ?*staged_cas_index.Index = null,
     directory_inputs: []const DirectoryInput = &.{},
-    copy_all_executable_inputs: bool = true,
     copy_executable_inputs: []const []const u8 = &.{},
 };
 
@@ -51,16 +50,6 @@ pub const Materializer = struct {
             .store = store,
             .root = root,
         };
-    }
-
-    pub fn copyInputs(
-        self: Materializer,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        inputs: []const Input,
-    ) !void {
-        var materialization = try self.materializeInputs(io, allocator, inputs, .{});
-        defer materialization.deinit(allocator);
     }
 
     pub fn materializeInputs(
@@ -149,9 +138,7 @@ pub const Materializer = struct {
         options: MaterializeOptions,
         bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
     ) !void {
-        const copy_selected_input = pathInList(input.path, options.copy_executable_inputs);
-        const copy_input = copy_selected_input or
-            (input.is_executable and options.copy_all_executable_inputs);
+        const copy_input = pathInList(input.path, options.copy_executable_inputs);
         const permissions: std.Io.File.Permissions = if (input.is_executable)
             .executable_file
         else
@@ -423,10 +410,11 @@ test "Materializer copies CAS blobs into an execroot" {
     const tool = try store.putBytes(std.testing.io, "#!/bin/sh\n");
 
     const materializer = Materializer.init(store, work_dir);
-    try materializer.copyInputs(std.testing.io, std.testing.allocator, &.{
+    var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{
         .{ .path = "src/hello.txt", .digest = hello },
         .{ .path = "tools/run.sh", .digest = tool, .is_executable = true },
-    });
+    }, .{});
+    defer materialization.deinit(std.testing.allocator);
 
     const restored = try work_dir.readFileAlloc(
         std.testing.io,
@@ -478,7 +466,7 @@ test "Materializer prepares read-only bind mounts for chroot inputs" {
     });
     defer materialization.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 1), materialization.bind_mounts.len);
+    try std.testing.expectEqual(@as(usize, 2), materialization.bind_mounts.len);
 
     var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
     const blob_path = cas.blobSubPath(digest, &blob_path_buffer);
@@ -506,14 +494,14 @@ test "Materializer prepares read-only bind mounts for chroot inputs" {
     defer std.testing.allocator.free(placeholder);
     try std.testing.expectEqual(@as(usize, 0), placeholder.len);
 
-    const restored_tool = try work_dir.readFileAlloc(
+    const tool_placeholder = try work_dir.readFileAlloc(
         std.testing.io,
         "tools/run.sh",
         std.testing.allocator,
-        .limited(64),
+        .limited(1),
     );
-    defer std.testing.allocator.free(restored_tool);
-    try std.testing.expectEqualStrings("#!/bin/sh\n", restored_tool);
+    defer std.testing.allocator.free(tool_placeholder);
+    try std.testing.expectEqual(@as(usize, 0), tool_placeholder.len);
 }
 
 test "Materializer can bind executable chroot inputs outside the copy list" {
@@ -539,7 +527,6 @@ test "Materializer can bind executable chroot inputs outside the copy list" {
         .{ .path = "tools/run.sh", .digest = tool, .is_executable = true },
     }, .{
         .chroot_root_path = work_root_buffer[0..work_root_len],
-        .copy_all_executable_inputs = false,
         .copy_executable_inputs = &.{"tools/run.sh"},
     });
     defer materialization.deinit(std.testing.allocator);
@@ -698,7 +685,6 @@ test "Materializer copies selected executable from immutable blob root" {
     }, .{
         .chroot_root_path = work_root_buffer[0..work_root_len],
         .cas_blob_root_path = lower_blob_root,
-        .copy_all_executable_inputs = false,
         .copy_executable_inputs = &.{"tools/run.sh"},
     });
     defer materialization.deinit(std.testing.allocator);
