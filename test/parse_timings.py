@@ -22,6 +22,7 @@ TIMING_RE = re.compile(
     r"file_inputs=(?P<file_inputs>\d+) "
     r"directory_inputs=(?P<directory_inputs>\d+) "
     r"bind_mounts=(?P<bind_mounts>\d+) "
+    r"(?:actiondfs_mounts=(?P<actiondfs_mounts>\d+) )?"
     r"output_files=(?P<output_files>\d+) "
     r"output_directories=(?P<output_directories>\d+)"
     r"(?: stress_case=(?P<stress_case>\S+))?"
@@ -35,6 +36,7 @@ RUNNER_RE = re.compile(
     r"wait_ns=(?P<wait_ns>\d+) "
     r"stdio_digest_ns=(?P<stdio_digest_ns>\d+) "
     r"bind_mounts=(?P<runner_bind_mounts>\d+) "
+    r"(?:actiondfs_mounts=(?P<runner_actiondfs_mounts>\d+) )?"
     r"setup_signaled=(?P<setup_signaled>true|false)"
 )
 
@@ -48,6 +50,7 @@ class RunnerTiming:
     wait_ns: int
     stdio_digest_ns: int
     bind_mounts: int
+    actiondfs_mounts: int
     setup_signaled: bool
 
 
@@ -62,6 +65,7 @@ class Timing:
     file_inputs: int
     directory_inputs: int
     bind_mounts: int
+    actiondfs_mounts: int
     output_files: int
     output_directories: int
     stress_case: str = "unknown"
@@ -87,6 +91,7 @@ def parse_timings(log_path: pathlib.Path) -> list[Timing]:
                     file_inputs=int(groups["file_inputs"]),
                     directory_inputs=int(groups["directory_inputs"]),
                     bind_mounts=int(groups["bind_mounts"]),
+                    actiondfs_mounts=int(groups["actiondfs_mounts"] or 0),
                     output_files=int(groups["output_files"]),
                     output_directories=int(groups["output_directories"]),
                     stress_case=groups["stress_case"] or "unknown",
@@ -105,6 +110,7 @@ def parse_timings(log_path: pathlib.Path) -> list[Timing]:
                 wait_ns=int(groups["wait_ns"]),
                 stdio_digest_ns=int(groups["stdio_digest_ns"]),
                 bind_mounts=int(groups["runner_bind_mounts"]),
+                actiondfs_mounts=int(groups["runner_actiondfs_mounts"] or 0),
                 setup_signaled=groups["setup_signaled"] == "true",
             )
 
@@ -170,7 +176,7 @@ def case_rows(timings: list[Timing]) -> list[str]:
             f"{fmt_ms(statistics.mean(ns_to_ms(item.output_upload_ns) for item in items))} | "
             f"{statistics.median(item.file_inputs for item in items):.0f} | "
             f"{statistics.median(item.directory_inputs for item in items):.0f} | "
-            f"{statistics.median(item.bind_mounts for item in items):.0f} |"
+            f"{statistics.median(item.bind_mounts + item.actiondfs_mounts for item in items):.0f} |"
         )
     return rows
 
@@ -253,6 +259,7 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             int_stat_row("file inputs", [item.file_inputs for item in timings]),
             int_stat_row("directory inputs", [item.directory_inputs for item in timings]),
             int_stat_row("bind mounts", [item.bind_mounts for item in timings]),
+            int_stat_row("actiondfs mounts", [item.actiondfs_mounts for item in timings]),
             int_stat_row("output files", [item.output_files for item in timings]),
             int_stat_row("output directories", [item.output_directories for item in timings]),
         ]
@@ -273,7 +280,7 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             f"{fmt_ms(ns_to_ms(item.input_fetch_ns))} | "
             f"{fmt_ms(ns_to_ms(item.execution_ns))} | "
             f"{fmt_ms(ns_to_ms(item.output_upload_ns))} | "
-            f"{item.file_inputs} | {item.directory_inputs} | {item.bind_mounts} | "
+            f"{item.file_inputs} | {item.directory_inputs} | {item.bind_mounts + item.actiondfs_mounts} | "
             f"{item.output_files} file, {item.output_directories} dir |"
         )
 
