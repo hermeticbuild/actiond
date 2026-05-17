@@ -19,3 +19,18 @@ e2e/llvm_tblgen_smoke.sh
 Start `darwin-actiond serve-vm` on `127.0.0.1:8998` before running it. The
 script runs `bazel clean --expunge` by default so a fresh worker CAS gets a full
 upload.
+
+## LLVM actiondfs Comparison
+
+`llvm_fs_compare.sh` starts a fresh VM worker for each requested actiondfs
+filesystem type, runs the LLVM tblgen smoke, and writes parsed timing summaries
+under a comparison directory:
+
+```bash
+e2e/llvm_fs_compare.sh
+```
+
+By default it compares `actiondfs_vec`, `actiondfs`, and `actiondfs_bucket`
+with an 8 CPU, 4096 MiB VM. The last output directory is written to
+`/tmp/actiond-last-llvm-fs-compare-path`. The current checked-in comparison is
+in `LLVM_ACTIONDFS_FS_COMPARISON.md`.

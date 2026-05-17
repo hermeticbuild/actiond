@@ -76,9 +76,9 @@ run:
 tools/e2e.sh vm-fs-compare
 ```
 
-That mode runs the stress workspace once with `actiondfs_vec` and once with
-the canonical `actiondfs` filesystem, keeps both VM logs, and writes parsed
-summaries under the printed comparison directory.
+That mode runs the stress workspace with `actiondfs_vec`, `actiondfs`, and
+`actiondfs_bucket`, keeps the VM logs, and writes parsed summaries under the
+printed comparison directory.
 
 Then update the timing summary next to the stress workspace:
 
@@ -132,3 +132,17 @@ The same command is wrapped by:
 ```bash
 e2e/llvm_tblgen_smoke.sh
 ```
+
+To compare the in-kernel actiondfs lookup implementations on this workload,
+use:
+
+```bash
+e2e/llvm_fs_compare.sh
+```
+
+That script starts a fresh VM worker for each filesystem type, runs the same
+`llvm-tblgen` smoke, writes parsed timing summaries under the printed output
+directory, and records the latest output root in
+`/tmp/actiond-last-llvm-fs-compare-path`. Keep
+`e2e/LLVM_ACTIONDFS_FS_COMPARISON.md` current when changing actiondfs lookup or
+materialization behavior.

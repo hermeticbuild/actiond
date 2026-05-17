@@ -13,7 +13,7 @@ Modes:
   linux   Start linux-actiond on this Linux host and run test/ via Bazel remote execution.
   vm      Start darwin-actiond serve-vm and run test/ via Bazel remote execution.
   vm-fs-compare
-          Run VM stress twice, once with actiondfs_vec and once with actiondfs.
+          Run VM stress with actiondfs_vec, actiondfs, and actiondfs_bucket.
   all     Run build plus the host-appropriate e2e mode when configured.
 
 Environment:
@@ -265,21 +265,16 @@ run_vm_fs_compare() {
   local previous_fstype="${ACTIOND_ACTIONDFS_FSTYPE:-}"
   export ACTIOND_E2E_KEEP_TMP=1
 
-  export ACTIOND_ACTIONDFS_FSTYPE=actiondfs_vec
-  run_vm_e2e
-  local vec_root="${last_e2e_root}"
-  "${repo_root}/test/parse_timings.py" "${vec_root}/darwin-actiond-vm.log" \
-    --mode vm-actiondfs-vec \
-    --command 'ACTIOND_ACTIONDFS_FSTYPE=actiondfs_vec ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm' \
-    --output "${compare_root}/actiondfs_vec.md"
-
-  export ACTIOND_ACTIONDFS_FSTYPE=actiondfs
-  run_vm_e2e
-  local canonical_root="${last_e2e_root}"
-  "${repo_root}/test/parse_timings.py" "${canonical_root}/darwin-actiond-vm.log" \
-    --mode vm-actiondfs-canonical \
-    --command 'ACTIOND_ACTIONDFS_FSTYPE=actiondfs ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm' \
-    --output "${compare_root}/actiondfs.md"
+  local fstype
+  for fstype in actiondfs_vec actiondfs actiondfs_bucket; do
+    export ACTIOND_ACTIONDFS_FSTYPE="${fstype}"
+    run_vm_e2e
+    local result_root="${last_e2e_root}"
+    "${repo_root}/test/parse_timings.py" "${result_root}/darwin-actiond-vm.log" \
+      --mode "vm-${fstype}" \
+      --command "ACTIOND_ACTIONDFS_FSTYPE=${fstype} ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm" \
+      --output "${compare_root}/${fstype}.md"
+  done
 
   if [[ -n "${previous_keep}" ]]; then
     export ACTIOND_E2E_KEEP_TMP="${previous_keep}"
@@ -292,8 +287,9 @@ run_vm_fs_compare() {
     unset ACTIOND_ACTIONDFS_FSTYPE
   fi
 
-  echo "actiondfs_vec summary: ${compare_root}/actiondfs_vec.md" >&2
-  echo "actiondfs summary: ${compare_root}/actiondfs.md" >&2
+  for fstype in actiondfs_vec actiondfs actiondfs_bucket; do
+    echo "${fstype} summary: ${compare_root}/${fstype}.md" >&2
+  done
 }
 
 case "${1:-}" in

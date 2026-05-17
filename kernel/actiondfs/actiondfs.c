@@ -35,10 +35,13 @@
 #define ACTIONDFS_DIR_MODE 0777
 #define ACTIONDFS_STALE_RETRY_ATTEMPTS 128
 #define ACTIONDFS_STALE_RETRY_MS 2
+#define ACTIONDFS_BUCKET_INDEX_ENTRIES 256
+#define ACTIONDFS_BUCKET_INDEX_THRESHOLD 32
 
 enum actiondfs_lookup_mode {
 	ACTIONDFS_LOOKUP_CANONICAL,
 	ACTIONDFS_LOOKUP_LINEAR,
+	ACTIONDFS_LOOKUP_BUCKETED,
 };
 
 struct actiondfs_node {
@@ -58,9 +61,11 @@ struct actiondfs_node {
 	struct actiondfs_node **file_children;
 	size_t file_count;
 	size_t file_capacity;
+	u32 *file_bucket_starts;
 	struct actiondfs_node **dir_children;
 	size_t dir_count;
 	size_t dir_capacity;
+	u32 *dir_bucket_starts;
 };
 
 struct actiondfs_sb_info {
@@ -108,7 +113,9 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 		filp_close(node->blob_file, NULL);
 	kfree(node->children);
 	kfree(node->file_children);
+	kfree(node->file_bucket_starts);
 	kfree(node->dir_children);
+	kfree(node->dir_bucket_starts);
 	kfree(node->name);
 	kfree(node);
 }
@@ -125,16 +132,20 @@ static void actiondfs_clear_children(struct actiondfs_node *node)
 		actiondfs_free_tree(node->dir_children[i]);
 	kfree(node->children);
 	kfree(node->file_children);
+	kfree(node->file_bucket_starts);
 	kfree(node->dir_children);
+	kfree(node->dir_bucket_starts);
 	node->children = NULL;
 	node->child_count = 0;
 	node->child_capacity = 0;
 	node->file_children = NULL;
 	node->file_count = 0;
 	node->file_capacity = 0;
+	node->file_bucket_starts = NULL;
 	node->dir_children = NULL;
 	node->dir_count = 0;
 	node->dir_capacity = 0;
+	node->dir_bucket_starts = NULL;
 }
 
 static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info *sbi,
@@ -227,6 +238,48 @@ static struct actiondfs_node *actiondfs_find_child_binary(struct actiondfs_node 
 	return NULL;
 }
 
+static struct actiondfs_node *actiondfs_find_child_in_range(struct actiondfs_node **children,
+							    size_t start,
+							    size_t end,
+							    const char *name,
+							    size_t len)
+{
+	size_t i;
+
+	for (i = start; i < end; i++) {
+		struct actiondfs_node *child = children[i];
+
+		if (child->name_len == len && !memcmp(child->name, name, len))
+			return child;
+	}
+	return NULL;
+}
+
+static struct actiondfs_node *actiondfs_find_child_bucketed_in(struct actiondfs_node **children,
+							       size_t count,
+							       const u32 *bucket_starts,
+							       const char *name,
+							       size_t len)
+{
+	u8 first;
+	size_t start = 0;
+	size_t end = count;
+
+	if (!count || !len)
+		return NULL;
+
+	first = name[0];
+	if (!first)
+		return NULL;
+
+	if (bucket_starts) {
+		start = bucket_starts[first - 1];
+		end = bucket_starts[first];
+	}
+
+	return actiondfs_find_child_in_range(children, start, end, name, len);
+}
+
 static struct actiondfs_node *actiondfs_find_child_canonical(struct actiondfs_node *dir,
 							     const char *name,
 							     size_t len)
@@ -241,6 +294,24 @@ static struct actiondfs_node *actiondfs_find_child_canonical(struct actiondfs_no
 					   name, len);
 }
 
+static struct actiondfs_node *actiondfs_find_child_bucketed(struct actiondfs_node *dir,
+							    const char *name,
+							    size_t len)
+{
+	struct actiondfs_node *child;
+
+	child = actiondfs_find_child_bucketed_in(dir->file_children,
+						 dir->file_count,
+						 dir->file_bucket_starts,
+						 name, len);
+	if (child)
+		return child;
+	return actiondfs_find_child_bucketed_in(dir->dir_children,
+						dir->dir_count,
+						dir->dir_bucket_starts,
+						name, len);
+}
+
 static struct actiondfs_node *actiondfs_find_child(struct actiondfs_sb_info *sbi,
 						   struct actiondfs_node *dir,
 						   const char *name,
@@ -248,7 +319,58 @@ static struct actiondfs_node *actiondfs_find_child(struct actiondfs_sb_info *sbi
 {
 	if (sbi->lookup_mode == ACTIONDFS_LOOKUP_LINEAR)
 		return actiondfs_find_child_linear(dir, name, len);
+	if (sbi->lookup_mode == ACTIONDFS_LOOKUP_BUCKETED)
+		return actiondfs_find_child_bucketed(dir, name, len);
 	return actiondfs_find_child_canonical(dir, name, len);
+}
+
+static int actiondfs_build_bucket_index(struct actiondfs_node **children,
+					size_t count,
+					u32 **out)
+{
+	u32 *starts;
+	size_t index = 0;
+	unsigned int bucket;
+
+	*out = NULL;
+	if (count < ACTIONDFS_BUCKET_INDEX_THRESHOLD)
+		return 0;
+	if (count > U32_MAX)
+		return -EOVERFLOW;
+
+	starts = kmalloc_array(ACTIONDFS_BUCKET_INDEX_ENTRIES,
+			       sizeof(*starts), GFP_KERNEL);
+	if (!starts)
+		return -ENOMEM;
+
+	for (bucket = 0; bucket < ACTIONDFS_BUCKET_INDEX_ENTRIES; bucket++) {
+		if (bucket == ACTIONDFS_BUCKET_INDEX_ENTRIES - 1) {
+			starts[bucket] = (u32)count;
+			break;
+		}
+		while (index < count &&
+		       (u8)children[index]->name[0] < bucket + 1)
+			index++;
+		starts[bucket] = (u32)index;
+	}
+
+	*out = starts;
+	return 0;
+}
+
+static int actiondfs_build_bucket_indexes(struct actiondfs_node *dir)
+{
+	int err;
+
+	err = actiondfs_build_bucket_index(dir->file_children, dir->file_count,
+					   &dir->file_bucket_starts);
+	if (err)
+		return err;
+	err = actiondfs_build_bucket_index(dir->dir_children, dir->dir_count,
+					   &dir->dir_bucket_starts);
+	if (err)
+		return err;
+	return 0;
 }
 
 static int actiondfs_validate_no_cross_type_duplicates(struct actiondfs_node *dir)
@@ -351,7 +473,7 @@ static struct actiondfs_node *actiondfs_add_dir_child(struct actiondfs_sb_info *
 	err = actiondfs_valid_component(name, name_len);
 	if (err)
 		return ERR_PTR(err);
-	if (sbi->lookup_mode == ACTIONDFS_LOOKUP_CANONICAL) {
+	if (sbi->lookup_mode != ACTIONDFS_LOOKUP_LINEAR) {
 		err = actiondfs_validate_next_child(parent->dir_children,
 						    parent->dir_count,
 						    name, name_len);
@@ -396,7 +518,7 @@ static int actiondfs_add_file_child(struct actiondfs_sb_info *sbi,
 	err = actiondfs_valid_component(name, name_len);
 	if (err)
 		return err;
-	if (sbi->lookup_mode == ACTIONDFS_LOOKUP_CANONICAL) {
+	if (sbi->lookup_mode != ACTIONDFS_LOOKUP_LINEAR) {
 		err = actiondfs_validate_next_child(parent->file_children,
 						    parent->file_count,
 						    name, name_len);
@@ -882,8 +1004,13 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 		}
 	}
 
-	if (sbi->lookup_mode == ACTIONDFS_LOOKUP_CANONICAL) {
+	if (sbi->lookup_mode != ACTIONDFS_LOOKUP_LINEAR) {
 		err = actiondfs_validate_no_cross_type_duplicates(dir);
+		if (err)
+			goto out;
+	}
+	if (sbi->lookup_mode == ACTIONDFS_LOOKUP_BUCKETED) {
+		err = actiondfs_build_bucket_indexes(dir);
 		if (err)
 			goto out;
 	}
@@ -1246,6 +1373,12 @@ static int actiondfs_vec_fill_super(struct super_block *sb, void *data, int sile
 					 ACTIONDFS_LOOKUP_LINEAR);
 }
 
+static int actiondfs_bucket_fill_super(struct super_block *sb, void *data, int silent)
+{
+	return actiondfs_fill_super_mode(sb, data, silent,
+					 ACTIONDFS_LOOKUP_BUCKETED);
+}
+
 static struct dentry *actiondfs_mount(struct file_system_type *fs_type,
 				      int flags,
 				      const char *dev_name,
@@ -1263,6 +1396,15 @@ static struct dentry *actiondfs_vec_mount(struct file_system_type *fs_type,
 			   actiondfs_vec_fill_super);
 }
 
+static struct dentry *actiondfs_bucket_mount(struct file_system_type *fs_type,
+					     int flags,
+					     const char *dev_name,
+					     void *data)
+{
+	return mount_nodev(fs_type, flags | SB_RDONLY, data,
+			   actiondfs_bucket_fill_super);
+}
+
 static struct file_system_type actiondfs_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "actiondfs",
@@ -1274,6 +1416,13 @@ static struct file_system_type actiondfs_vec_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "actiondfs_vec",
 	.mount = actiondfs_vec_mount,
+	.kill_sb = kill_anon_super,
+};
+
+static struct file_system_type actiondfs_bucket_fs_type = {
+	.owner = THIS_MODULE,
+	.name = "actiondfs_bucket",
+	.mount = actiondfs_bucket_mount,
 	.kill_sb = kill_anon_super,
 };
 
@@ -1289,11 +1438,18 @@ static int __init actiondfs_init(void)
 		unregister_filesystem(&actiondfs_fs_type);
 		return err;
 	}
+	err = register_filesystem(&actiondfs_bucket_fs_type);
+	if (err) {
+		unregister_filesystem(&actiondfs_vec_fs_type);
+		unregister_filesystem(&actiondfs_fs_type);
+		return err;
+	}
 	return 0;
 }
 
 static void __exit actiondfs_exit(void)
 {
+	unregister_filesystem(&actiondfs_bucket_fs_type);
 	unregister_filesystem(&actiondfs_vec_fs_type);
 	unregister_filesystem(&actiondfs_fs_type);
 }
