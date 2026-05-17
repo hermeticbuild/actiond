@@ -89,7 +89,7 @@ pub fn materializeActionInputTrees(
     defer command.deinit(allocator);
 
     const input_root_digest = try cas.Digest.fromReapi(action.input_root_digest orelse return error.MissingInputRootDigest);
-    try collectInputs(io, allocator, store, input_root_digest, "", command, true, null, null);
+    try collectInputs(io, allocator, store, input_root_digest, "", command, !forceFileInputs(command, action.platform), null, null);
 }
 
 pub fn executeActionWithOptions(
@@ -132,7 +132,8 @@ pub fn executeActionWithOptions(
     defer directory_inputs.deinit(allocator);
     defer freeDirectoryInputs(allocator, directory_inputs.items);
     const use_workspace_chroot = options.runtime_root_path != null;
-    try collectInputs(io, allocator, store, input_root_digest, "", command, use_workspace_chroot, &inputs, &directory_inputs);
+    const allow_directory_inputs = use_workspace_chroot and !forceFileInputs(command, action.platform);
+    try collectInputs(io, allocator, store, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
@@ -288,6 +289,27 @@ fn stressCaseFromCommand(command: reapi.Command) []const u8 {
         if (std.mem.eql(u8, variable.name, "ACTIOND_STRESS_CASE") and variable.value.len != 0) return variable.value;
     }
     return "unknown";
+}
+
+fn forceFileInputsFromPlatform(platform: ?reapi.Platform) bool {
+    const value = platform orelse return false;
+    for (value.properties) |property| {
+        if (!std.mem.eql(u8, property.name, "actiond.input_mode")) continue;
+        return std.mem.eql(u8, property.value, "files");
+    }
+    return false;
+}
+
+fn forceFileInputsFromCommand(command: reapi.Command) bool {
+    for (command.environment_variables) |variable| {
+        if (!std.mem.eql(u8, variable.name, "ACTIOND_INPUT_MODE")) continue;
+        return std.mem.eql(u8, variable.value, "files");
+    }
+    return false;
+}
+
+fn forceFileInputs(command: reapi.Command, platform: ?reapi.Platform) bool {
+    return forceFileInputsFromPlatform(platform) or forceFileInputsFromCommand(command);
 }
 
 fn runtimeArch() ![]const u8 {
@@ -952,6 +974,25 @@ test "libc runtime platform property accepts pinned runtimes" {
     }));
     try std.testing.expectError(error.UnsupportedLibcRuntime, libcRuntimeFromPlatform(.{
         .properties = &.{.{ .name = "libc", .value = "glibc2.17" }},
+    }));
+}
+
+test "actiond input mode platform property can force file inputs" {
+    try std.testing.expect(forceFileInputsFromPlatform(.{
+        .properties = &.{.{ .name = "actiond.input_mode", .value = "files" }},
+    }));
+    try std.testing.expect(!forceFileInputsFromPlatform(.{
+        .properties = &.{.{ .name = "actiond.input_mode", .value = "trees" }},
+    }));
+    try std.testing.expect(!forceFileInputsFromPlatform(null));
+}
+
+test "actiond input mode command environment can force file inputs" {
+    try std.testing.expect(forceFileInputsFromCommand(.{
+        .environment_variables = &.{.{ .name = "ACTIOND_INPUT_MODE", .value = "files" }},
+    }));
+    try std.testing.expect(!forceFileInputsFromCommand(.{
+        .environment_variables = &.{.{ .name = "ACTIOND_INPUT_MODE", .value = "trees" }},
     }));
 }
 

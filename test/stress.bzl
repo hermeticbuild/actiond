@@ -3,6 +3,12 @@ def _stress_case(ctx):
         return ctx.attr.stress_case
     return ctx.label.name
 
+def _stress_env(ctx):
+    env = {"ACTIOND_STRESS_CASE": _stress_case(ctx)}
+    if ctx.attr.input_mode:
+        env["ACTIOND_INPUT_MODE"] = ctx.attr.input_mode
+    return env
+
 def _pad2(value):
     if value < 10:
         return "0%d" % value
@@ -45,7 +51,7 @@ def _stress_tree_impl(ctx):
         inputs = inputs,
         outputs = [out_file, out_dir],
         arguments = [args],
-        env = {"ACTIOND_STRESS_CASE": _stress_case(ctx)},
+        env = _stress_env(ctx),
         execution_requirements = ctx.attr.execution_requirements,
         mnemonic = "ActiondStressTree",
         progress_message = "Generating stress tree %{label}",
@@ -58,6 +64,7 @@ stress_tree = rule(
         "srcs": attr.label_list(allow_files = True),
         "trees": attr.label_list(),
         "files": attr.int(default = 16),
+        "input_mode": attr.string(),
         "stress_case": attr.string(),
         "execution_requirements": attr.string_dict(),
         "expect_network_blocked": attr.bool(default = False),
@@ -84,7 +91,7 @@ def _stress_consumer_impl(ctx):
         inputs = inputs,
         outputs = [out_file, out_dir],
         arguments = [args],
-        env = {"ACTIOND_STRESS_CASE": _stress_case(ctx)},
+        env = _stress_env(ctx),
         execution_requirements = ctx.attr.execution_requirements,
         mnemonic = "ActiondStressConsume",
         progress_message = "Consuming stress inputs %{label}",
@@ -97,6 +104,7 @@ stress_consumer = rule(
         "srcs": attr.label_list(allow_files = True),
         "trees": attr.label_list(),
         "files": attr.int(default = 16),
+        "input_mode": attr.string(),
         "stress_case": attr.string(),
         "execution_requirements": attr.string_dict(),
         "expect_network_blocked": attr.bool(default = False),
@@ -157,6 +165,7 @@ def stress_workload(name, tool):
             name = target,
             execution_requirements = {"libc": "glibc2.35"},
             files = 8,
+            input_mode = "files",
             srcs = [":" + group],
             stress_case = "nested_individual_files",
             tool = tool,
@@ -169,6 +178,7 @@ def stress_workload(name, tool):
             name = target,
             execution_requirements = {"libc": "glibc2.35"},
             files = 8,
+            input_mode = "files",
             srcs = [":bare_inputs"],
             stress_case = "bare_individual_files",
             tool = tool,
