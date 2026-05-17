@@ -97,21 +97,11 @@ pub const Store = struct {
 
     pub fn putKnownBytes(self: Store, io: std.Io, digest: Digest, bytes: []const u8) !void {
         if (digest.size_bytes != bytes.len) return error.InvalidDigestSize;
-        try self.ensureLayoutIfNeeded(io);
-        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
-        const path = blobPath(digest, &path_buffer);
 
-        self.root.writeFile(io, .{
-            .sub_path = path,
-            .data = bytes,
-            .flags = .{
-                .read = true,
-                .exclusive = true,
-            },
-        }) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
+        var writer = try self.beginBlobWriter(io);
+        defer writer.deinit(io);
+        try writer.writeAll(bytes);
+        _ = try writer.finish(io, digest);
     }
 
     pub fn has(self: Store, io: std.Io, digest: Digest) !bool {
@@ -687,7 +677,7 @@ test "Store writes blobs once and reads them by digest" {
     try std.testing.expectEqualStrings("hello", bytes);
 }
 
-test "Store writes known blobs without rehashing and ignores existing blob" {
+test "Store writes known blobs atomically and ignores existing blob" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -697,6 +687,7 @@ test "Store writes known blobs without rehashing and ignores existing blob" {
     try store.putKnownBytes(std.testing.io, digest, "hello");
     try std.testing.expect(try store.has(std.testing.io, digest));
     try std.testing.expectError(error.InvalidDigestSize, store.putKnownBytes(std.testing.io, digest, "hell"));
+    try std.testing.expectError(error.DigestMismatch, store.putKnownBytes(std.testing.io, digest, "jello"));
 }
 
 test "Store materializes directory protos as tree directories" {
