@@ -25,6 +25,7 @@ pub const Error = error{
 };
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
+const chroot_execroot_prefix = "/workspace/";
 const worker_name = "actiond";
 const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
 
@@ -1283,7 +1284,7 @@ fn collectOutputFileWithStat(
 ) !void {
     if (stat.size > max_output_file_bytes) return error.FileTooBig;
 
-    const digest = store.putFile(io, work_root, path) catch |err| switch (err) {
+    const digest = putOutputFile(io, allocator, store, work_root, path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -1295,6 +1296,42 @@ fn collectOutputFileWithStat(
         .digest = digest,
         .is_executable = isExecutable(stat),
     });
+}
+
+fn putOutputFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    path: []const u8,
+) !cas.Digest {
+    if (!isDepfileOutput(path)) return store.putFile(io, work_root, path);
+
+    const bytes = try work_root.readFileAlloc(io, path, allocator, .limited(max_output_file_bytes));
+    defer allocator.free(bytes);
+    const normalized = try stripChrootExecrootPrefix(allocator, bytes);
+    defer allocator.free(normalized);
+    return try store.putBytes(io, normalized);
+}
+
+fn isDepfileOutput(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".d");
+}
+
+fn stripChrootExecrootPrefix(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (std.mem.indexOf(u8, bytes, chroot_execroot_prefix) == null) {
+        return try allocator.dupe(u8, bytes);
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var remaining = bytes;
+    while (std.mem.indexOf(u8, remaining, chroot_execroot_prefix)) |index| {
+        try out.appendSlice(allocator, remaining[0..index]);
+        remaining = remaining[index + chroot_execroot_prefix.len ..];
+    }
+    try out.appendSlice(allocator, remaining);
+    return try out.toOwnedSlice(allocator);
 }
 
 fn collectOutputDirectory(
@@ -2101,6 +2138,37 @@ test "collectOutputFiles uploads requested output files and directories" {
     try std.testing.expectEqualStrings("tree", result.result.output_directories[0].path);
     var tree_hash: [64]u8 = undefined;
     try std.testing.expect(result.result.output_directories[0].tree_digest.?.eql(outcome.output_directories[0].tree_digest.toReapi(&tree_hash)));
+}
+
+test "collectOutputFiles strips chroot execroot prefix from depfiles" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    try store.ensureLayout(std.testing.io);
+    try work_dir.createDirPath(std.testing.io, "bazel-out/pkg");
+    try work_dir.writeFile(std.testing.io, .{
+        .sub_path = "bazel-out/pkg/file.d",
+        .data = "bazel-out/pkg/file.o: /workspace/external/tool/include/stddef.h /workspace/pkg/input.c\n",
+    });
+
+    var outcome: action_runner.Outcome = .{ .status = .{ .exited = 0 }, .stdout = &.{}, .stderr = &.{} };
+    defer outcome.deinit(std.testing.allocator);
+    try collectOutputFiles(std.testing.io, std.testing.allocator, store, work_dir, .{
+        .output_files = &.{"bazel-out/pkg/file.d"},
+    }, &outcome);
+
+    const depfile = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_files[0].digest);
+    defer std.testing.allocator.free(depfile);
+    try std.testing.expectEqualStrings(
+        "bazel-out/pkg/file.o: external/tool/include/stddef.h pkg/input.c\n",
+        depfile,
+    );
 }
 
 test "prepareOutputParents creates parent directories for declared outputs" {
