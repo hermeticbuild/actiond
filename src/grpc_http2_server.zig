@@ -425,6 +425,8 @@ pub fn serveDispatcher(
     config: Config,
     dispatcher: Dispatcher,
 ) !void {
+    ignoreSigpipe();
+
     const address = try std.Io.net.IpAddress.parseLiteral(config.listen);
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
@@ -436,13 +438,25 @@ pub fn serveDispatcher(
     try stderr.flush();
 
     while (true) {
-        const stream = try listener.accept(io);
-        const thread = try std.Thread.spawn(.{}, connectionThread, .{
+        const stream = listener.accept(io) catch |err| {
+            try stderr.print("actiond gRPC accept failed: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+            sleepMilliseconds(10);
+            continue;
+        };
+        const thread = std.Thread.spawn(.{}, connectionThread, .{
             io,
             allocator,
             dispatcher,
             stream,
-        });
+        }) catch |err| {
+            var owned_stream = stream;
+            owned_stream.close(io);
+            try stderr.print("actiond gRPC connection spawn failed: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+            sleepMilliseconds(10);
+            continue;
+        };
         thread.detach();
     }
 }
@@ -856,6 +870,25 @@ fn grpcStatusForError(err: anyerror) []const u8 {
 
 fn yieldThread() void {
     std.Thread.yield() catch std.atomic.spinLoopHint();
+}
+
+fn sleepMilliseconds(milliseconds: u32) void {
+    var request: std.c.timespec = .{
+        .sec = @intCast(milliseconds / std.time.ms_per_s),
+        .nsec = @intCast((milliseconds % std.time.ms_per_s) * std.time.ns_per_ms),
+    };
+    while (std.c.nanosleep(&request, &request) != 0) {}
+}
+
+fn ignoreSigpipe() void {
+    if (comptime std.posix.Sigaction == void) return;
+
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.PIPE, &act, null);
 }
 
 fn dispatchGrpc(
