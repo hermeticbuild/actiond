@@ -40,6 +40,16 @@ set -euo pipefail
 tree="$(@D)/runtimes-tree-aarch64"
 rm -rf "$${tree}"
 mkdir -p "$${tree}/libc"
+mkdir -p "$${tree}/common/root/etc"
+cat > "$${tree}/common/root/etc/hosts" <<'EOF'
+127.0.0.1 localhost
+::1 localhost ip6-localhost ip6-loopback
+EOF
+cat > "$${tree}/common/root/etc/nsswitch.conf" <<'EOF'
+passwd: files
+group: files
+hosts: files dns
+EOF
 
 copy_runtime() {
   local repo_root="$$1"
@@ -77,6 +87,16 @@ set -euo pipefail
 tree="$(@D)/runtimes-tree-x86_64"
 rm -rf "$${tree}"
 mkdir -p "$${tree}/libc"
+mkdir -p "$${tree}/common/root/etc"
+cat > "$${tree}/common/root/etc/hosts" <<'EOF'
+127.0.0.1 localhost
+::1 localhost ip6-localhost ip6-loopback
+EOF
+cat > "$${tree}/common/root/etc/nsswitch.conf" <<'EOF'
+passwd: files
+group: files
+hosts: files dns
+EOF
 
 copy_runtime() {
   local repo_root="$$1"

@@ -104,7 +104,7 @@ pub fn executeActionWithOptions(
     const work_root_path = cwd_buffer[0..cwd_len];
 
     const libc_runtime = try libcRuntimeFromPlatform(action.platform);
-    const use_workspace_chroot = libc_runtime != null;
+    const use_workspace_chroot = options.runtime_root_path != null;
     var exec_root_dir = work_root;
     var workspace_dir: ?std.Io.Dir = null;
     defer if (workspace_dir) |*dir| dir.close(io);
@@ -156,6 +156,11 @@ pub fn executeActionWithOptions(
         bind_mounts.deinit(allocator);
     }
     try bind_mounts.appendSlice(allocator, materialization.bind_mounts);
+    if (options.runtime_root_path) |runtime_root| {
+        if (libc_runtime == null) {
+            try appendCommonRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, &bind_mounts);
+        }
+    }
     if (libc_runtime) |libc| {
         const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
         try appendLibcRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, libc, &bind_mounts);
@@ -207,6 +212,19 @@ fn runtimeArch() ![]const u8 {
         .x86_64 => "x86_64",
         else => error.UnsupportedRuntimeArch,
     };
+}
+
+fn appendCommonRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    runtime_root_path: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/common/root", .{runtime_root_path});
+    defer allocator.free(runtime_root);
+    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "etc", "etc", bind_mounts);
 }
 
 fn appendLibcRuntimeMounts(
@@ -839,6 +857,47 @@ test "appendLibcRuntimeMounts maps runtime directories into chroot" {
     try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].target, "/chroot/lib"));
     try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[1].target, "/chroot/usr/lib"));
     try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[2].target, "/chroot/etc"));
+}
+
+test "appendCommonRuntimeMounts maps runtime etc into chroot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "runtimes/common/root/etc");
+    try tmp.dir.createDirPath(std.testing.io, "chroot");
+
+    var chroot_dir = try tmp.dir.openDir(std.testing.io, "chroot", .{});
+    defer chroot_dir.close(std.testing.io);
+
+    var base_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buffer);
+    const base_path = base_buffer[0..base_len];
+    const runtime_root_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/runtimes", .{base_path});
+    defer std.testing.allocator.free(runtime_root_path);
+    const chroot_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/chroot", .{base_path});
+    defer std.testing.allocator.free(chroot_path);
+
+    var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
+    defer {
+        for (bind_mounts.items) |mount| {
+            std.testing.allocator.free(mount.source);
+            std.testing.allocator.free(mount.target);
+        }
+        bind_mounts.deinit(std.testing.allocator);
+    }
+
+    try appendCommonRuntimeMounts(
+        std.testing.io,
+        std.testing.allocator,
+        chroot_dir,
+        chroot_path,
+        runtime_root_path,
+        &bind_mounts,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), bind_mounts.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].source, "/runtimes/common/root/etc"));
+    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].target, "/chroot/etc"));
 }
 
 test "collectInputs preserves materialized tree directories" {

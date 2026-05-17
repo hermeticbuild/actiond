@@ -29,6 +29,7 @@ stress_tree(
 stress_consumer(
     name = "stress_all",
     execution_requirements = {"libc": "glibc2.35"},
+    expect_localhost_hosts = True,
     expect_loopback = True,
     expect_network_blocked = True,
     srcs = [

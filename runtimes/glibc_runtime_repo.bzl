@@ -40,6 +40,10 @@ rm -rf \
   root/var
 find root -path '*/gconv' -type d -prune -exec rm -rf '{}' +
 mkdir -p root/etc
+cat > root/etc/hosts <<'EOF'
+127.0.0.1 localhost
+::1 localhost ip6-localhost ip6-loopback
+EOF
 cat > root/etc/nsswitch.conf <<'EOF'
 passwd: files
 group: files

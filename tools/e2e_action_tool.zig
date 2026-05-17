@@ -6,6 +6,7 @@ const Options = struct {
     out_count: usize = 16,
     expect_network_blocked: bool = false,
     expect_loopback: bool = false,
+    expect_localhost_hosts: bool = false,
     scans: std.ArrayListUnmanaged([]const u8) = .empty,
 
     fn deinit(self: *Options, allocator: std.mem.Allocator) void {
@@ -26,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (options.expect_network_blocked) try expectNetworkBlocked();
     if (options.expect_loopback) try expectLoopbackTcp();
+    if (options.expect_localhost_hosts) try expectLocalhostHosts(io, allocator);
 
     const cwd = std.Io.Dir.cwd();
     var hash = std.hash.Wyhash.init(0xaca1_0d5eed);
@@ -86,6 +88,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
             options.expect_network_blocked = true;
         } else if (std.mem.eql(u8, arg, "--expect-loopback")) {
             options.expect_loopback = true;
+        } else if (std.mem.eql(u8, arg, "--expect-localhost-hosts")) {
+            options.expect_localhost_hosts = true;
         } else {
             return error.UnknownArgument;
         }
@@ -132,6 +136,40 @@ fn expectNetworkBlocked() !void {
             std.debug.print("network block check returned unexpected connect errno: {s}\n", .{@tagName(err)});
             return error.NetworkCheckFailed;
         },
+    }
+}
+
+fn expectLocalhostHosts(io: std.Io, allocator: std.mem.Allocator) !void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "/etc/hosts",
+        allocator,
+        .limited(64 * 1024),
+    ) catch |err| {
+        std.debug.print("localhost hosts check could not read /etc/hosts: {s}\n", .{@errorName(err)});
+        return error.LocalhostHostsCheckFailed;
+    };
+    defer allocator.free(bytes);
+
+    var has_ipv4_localhost = false;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        var fields = std.mem.tokenizeAny(u8, trimmed, " \t");
+        const address = fields.next() orelse continue;
+        if (!std.mem.eql(u8, address, "127.0.0.1")) continue;
+        while (fields.next()) |name| {
+            if (std.mem.eql(u8, name, "localhost")) {
+                has_ipv4_localhost = true;
+                break;
+            }
+        }
+    }
+
+    if (!has_ipv4_localhost) {
+        std.debug.print("localhost hosts check did not find '127.0.0.1 localhost' in /etc/hosts\n", .{});
+        return error.LocalhostHostsCheckFailed;
     }
 }
 
@@ -339,8 +377,9 @@ fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
 }
 
 test "parseArgs accepts network block check" {
-    var options = try parseArgs(std.testing.allocator, &.{ "--expect-network-blocked", "--expect-loopback" });
+    var options = try parseArgs(std.testing.allocator, &.{ "--expect-network-blocked", "--expect-loopback", "--expect-localhost-hosts" });
     defer options.deinit(std.testing.allocator);
     try std.testing.expect(options.expect_network_blocked);
     try std.testing.expect(options.expect_loopback);
+    try std.testing.expect(options.expect_localhost_hosts);
 }
