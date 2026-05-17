@@ -171,14 +171,15 @@ They do not pass through the VM.
 
 In VM mode, action input files are exposed through `actiondfs`, a small built-in
 read-only Linux filesystem in the repo under `kernel/actiondfs`. For each
-action, the guest writes a flat manifest derived from the REAPI input root. The
-child mount namespace mounts:
+action, the guest passes the REAPI input-root digest to actiondfs. The child
+mount namespace mounts:
 
-- `actiondfs` as the lower filesystem, mapping manifest paths to `/cas` blobs
+- `actiondfs` as the lower filesystem, resolving REAPI directory and file nodes
+  lazily from the read-only host CAS mounted at `/host-cas`
 - stock overlayfs at `/workspace`, using per-action upper/work directories
 
-Executable bits are recorded in the manifest and applied by `actiondfs` inode
-metadata. CAS blobs remain immutable data files and are not chmodded.
+Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
+inode metadata. CAS blobs remain immutable data files and are not chmodded.
 
 The Linux host path keeps the older materialization strategy unless the running
 kernel advertises `actiondfs` in `/proc/filesystems`, which lets Docker e2e run
@@ -214,11 +215,11 @@ from guest to host.
 For each action:
 
 1. Read the `Action` and `Command` protobufs from CAS.
-2. Walk the input root tree and collect file and directory inputs.
+2. Read the input-root digest. The fallback file-input path walks the tree; the
+   actiondfs path lets the kernel filesystem resolve it lazily.
 3. Create a per-action work root.
-4. In VM/actiondfs mode, write the manifest and prepare actiondfs plus overlayfs
-   lower/upper/work mount paths. Otherwise materialize input paths using
-   read-only bind mounts.
+4. In VM/actiondfs mode, prepare actiondfs plus overlayfs lower/upper/work mount
+   paths. Otherwise materialize input paths using read-only bind mounts.
 5. If requested, attach libc runtime directories from SquashFS.
 6. Create output parent directories.
 7. Fork the action process.
@@ -230,7 +231,7 @@ For each action:
    - unshare the mount and network namespaces
    - bring up loopback inside the private network namespace
    - make mounts private
-   - mount `actiondfs` and overlayfs when a manifest lowerdir is active
+   - mount `actiondfs` and overlayfs when an actiondfs lowerdir is active
    - apply read-only bind mounts
    - chroot into the work root
    - chdir to the requested working directory
@@ -382,7 +383,7 @@ present in the Bazel-built VM kernel.
 The main copy-minimizing choices are:
 
 - host handles public CAS and ActionCache methods
-- VM action inputs are served by an actiondfs manifest lowerdir plus stock
+- VM action inputs are served by an actiondfs input-root lowerdir plus stock
   overlayfs upperdir instead of per-file bind mounts or hardlink forests
 - Linux-host action inputs are bind-mounted instead of copied
 - tree directories are bind-mounted at directory granularity when available

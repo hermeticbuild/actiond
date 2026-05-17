@@ -149,14 +149,14 @@ pub const Materializer = struct {
         options: MaterializeOptions,
         bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
     ) !void {
-        const copy_resolved_executable = pathInList(input.path, options.copy_executable_inputs);
-        const copy_executable = copy_resolved_executable or
+        const copy_selected_input = pathInList(input.path, options.copy_executable_inputs);
+        const copy_input = copy_selected_input or
             (input.is_executable and options.copy_all_executable_inputs);
-        const permissions: std.Io.File.Permissions = if (input.is_executable or copy_resolved_executable)
+        const permissions: std.Io.File.Permissions = if (input.is_executable)
             .executable_file
         else
             .default_file;
-        if (copy_executable or input.digest.isEmpty()) {
+        if (copy_input or input.digest.isEmpty()) {
             if (!input.digest.isEmpty()) {
                 if (options.cas_blob_root_path) |blob_root_path| {
                     return copyBlobFromSourceRoots(
@@ -671,7 +671,7 @@ test "Materializer chooses staged blob root before immutable blob root" {
     try std.testing.expectEqualStrings(expected_source, materialization.bind_mounts[0].source);
 }
 
-test "Materializer copies resolved executable from immutable blob root" {
+test "Materializer copies selected executable from immutable blob root" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -694,7 +694,7 @@ test "Materializer copies resolved executable from immutable blob root" {
 
     const materializer = Materializer.init(cas.Store.init(store_dir), work_dir);
     var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{
-        .{ .path = "tools/run.sh", .digest = digest, .is_executable = false },
+        .{ .path = "tools/run.sh", .digest = digest, .is_executable = true },
     }, .{
         .chroot_root_path = work_root_buffer[0..work_root_len],
         .cas_blob_root_path = lower_blob_root,
@@ -712,4 +712,9 @@ test "Materializer copies resolved executable from immutable blob root" {
     );
     defer std.testing.allocator.free(restored);
     try std.testing.expectEqualStrings("#!/bin/sh\n", restored);
+
+    const stat = try work_dir.statFile(std.testing.io, "tools/run.sh", .{});
+    if (comptime std.Io.File.Permissions.has_executable_bit) {
+        try std.testing.expect(stat.permissions.toMode() & 0o111 != 0);
+    }
 }
