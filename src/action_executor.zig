@@ -69,7 +69,7 @@ pub const RuntimeMountCache = struct {
 
 pub const ExecuteOptions = struct {
     runtime_root_path: ?[]const u8 = null,
-    actiondfs_supported: ?bool = null,
+    use_actiondfs: bool = false,
     cas_blob_root_path: ?[]const u8 = null,
     input_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_blob_root_path: ?[]const u8 = null,
@@ -106,9 +106,6 @@ pub fn prepareExecuteOptions(
     var prepared: PreparedExecuteOptions = .{ .options = base };
     errdefer prepared.deinit(allocator);
 
-    if (prepared.options.actiondfs_supported == null) {
-        prepared.options.actiondfs_supported = kernelSupportsActiondfs(io);
-    }
     if (prepared.options.cas_blob_root_path == null) {
         var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
@@ -328,8 +325,7 @@ pub fn executeActionWithOptions(
     defer freeDirectoryInputs(allocator, directory_inputs.items);
     const use_workspace_chroot = options.runtime_root_path != null;
     const force_file_inputs = forceFileInputs(command, action.platform);
-    const actiondfs_supported = options.actiondfs_supported orelse kernelSupportsActiondfs(io);
-    const use_actiondfs_inputs = use_workspace_chroot and !force_file_inputs and actiondfs_supported;
+    const use_actiondfs_inputs = use_workspace_chroot and !force_file_inputs and options.use_actiondfs;
     if (!use_actiondfs_inputs) {
         const allow_directory_inputs = use_workspace_chroot and !force_file_inputs;
         try collectInputs(io, allocator, store, read_roots, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
@@ -607,38 +603,6 @@ fn forceFileInputsFromCommand(command: reapi.Command) bool {
 
 fn forceFileInputs(command: reapi.Command, platform: ?reapi.Platform) bool {
     return forceFileInputsFromPlatform(platform) or forceFileInputsFromCommand(command);
-}
-
-fn kernelSupportsActiondfs(io: std.Io) bool {
-    if (comptime builtin.os.tag != .linux) return false;
-
-    var proc = std.Io.Dir.openDirAbsolute(io, "/proc", .{}) catch return false;
-    defer proc.close(io);
-    var file = proc.openFile(io, "filesystems", .{}) catch return false;
-    defer file.close(io);
-
-    var buffer: [64 * 1024]u8 = undefined;
-    var len: usize = 0;
-    while (len < buffer.len) {
-        const rc = std.os.linux.read(file.handle, buffer[len..].ptr, buffer.len - len);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {
-                const n: usize = @intCast(rc);
-                if (n == 0) break;
-                len += n;
-            },
-            .INTR => continue,
-            else => return false,
-        }
-    }
-    const filesystems = buffer[0..len];
-
-    var lines = std.mem.splitScalar(u8, filesystems, '\n');
-    while (lines.next()) |line| {
-        const fs = std.mem.trim(u8, line, " \t");
-        if (std.mem.endsWith(u8, fs, "actiondfs")) return true;
-    }
-    return false;
 }
 
 fn selectExecutableInputCopyPaths(
@@ -2124,7 +2088,7 @@ test "prepareExecuteOptions caches CAS and runtime mount sources" {
     });
     defer prepared.deinit(std.testing.allocator);
 
-    try std.testing.expect(prepared.options.actiondfs_supported != null);
+    try std.testing.expect(!prepared.options.use_actiondfs);
     try std.testing.expect(prepared.options.cas_blob_root_path != null);
     try std.testing.expect(std.mem.endsWith(u8, prepared.options.cas_blob_root_path.?, "/cas/blobs/sha256"));
 

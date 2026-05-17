@@ -181,9 +181,8 @@ mount namespace mounts:
 Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
 inode metadata. CAS blobs remain immutable data files and are not chmodded.
 
-The Linux host path keeps the older materialization strategy unless the running
-kernel advertises `actiondfs` in `/proc/filesystems`, which lets Docker e2e run
-on ordinary host kernels:
+The Linux host path always keeps the non-actiondfs materialization strategy,
+which lets Docker e2e run on ordinary host kernels:
 
 - file inputs become read-only bind mounts from CAS into the chroot
 - tree artifacts can be materialized as CAS tree directories and bind-mounted as
