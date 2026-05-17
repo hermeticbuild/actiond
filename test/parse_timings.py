@@ -128,6 +128,33 @@ def fmt_ms(value: float) -> str:
     return f"{value:.3f}"
 
 
+def markdown_table(headers: list[str], rows: list[list[str]], right_align: set[int]) -> list[str]:
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+    widths = [max(width, 3) for width in widths]
+
+    def format_cell(index: int, cell: str) -> str:
+        if index in right_align:
+            return cell.rjust(widths[index])
+        return cell.ljust(widths[index])
+
+    header = "| " + " | ".join(format_cell(index, cell) for index, cell in enumerate(headers)) + " |"
+    separator_cells = []
+    for index, width in enumerate(widths):
+        if index in right_align:
+            separator_cells.append("-" * (width - 1) + ":")
+        else:
+            separator_cells.append("-" * width)
+    separator = "| " + " | ".join(separator_cells) + " |"
+    body = [
+        "| " + " | ".join(format_cell(index, cell) for index, cell in enumerate(row)) + " |"
+        for row in rows
+    ]
+    return [header, separator, *body]
+
+
 def percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
@@ -141,30 +168,34 @@ def percentile(values: list[float], pct: float) -> float:
     return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
 
 
-def stat_row(label: str, values_ns: list[int], total_ns: int) -> str:
+def stat_cells(label: str, values_ns: list[int], total_ns: int) -> list[str]:
     values_ms = [ns_to_ms(value) for value in values_ns]
     pct = 100.0 * sum(values_ns) / total_ns if total_ns else 0.0
-    return (
-        f"| {label} | {fmt_ms(min(values_ms))} | "
-        f"{fmt_ms(percentile(values_ms, 25))} | "
-        f"{fmt_ms(percentile(values_ms, 50))} | "
-        f"{fmt_ms(percentile(values_ms, 75))} | "
-        f"{fmt_ms(percentile(values_ms, 95))} | "
-        f"{fmt_ms(statistics.mean(values_ms))} | "
-        f"{fmt_ms(max(values_ms))} | {pct:.1f}% |"
-    )
+    return [
+        label,
+        fmt_ms(min(values_ms)),
+        fmt_ms(percentile(values_ms, 25)),
+        fmt_ms(percentile(values_ms, 50)),
+        fmt_ms(percentile(values_ms, 75)),
+        fmt_ms(percentile(values_ms, 95)),
+        fmt_ms(statistics.mean(values_ms)),
+        fmt_ms(max(values_ms)),
+        f"{pct:.1f}%",
+    ]
 
 
-def int_stat_row(label: str, values: list[int]) -> str:
+def int_stat_cells(label: str, values: list[int]) -> list[str]:
     values_float = [float(value) for value in values]
-    return (
-        f"| {label} | {min(values)} | "
-        f"{percentile(values_float, 25):.0f} | "
-        f"{percentile(values_float, 50):.0f} | "
-        f"{percentile(values_float, 75):.0f} | "
-        f"{percentile(values_float, 95):.0f} | "
-        f"{statistics.mean(values):.1f} | {max(values)} |"
-    )
+    return [
+        label,
+        str(min(values)),
+        f"{percentile(values_float, 25):.0f}",
+        f"{percentile(values_float, 50):.0f}",
+        f"{percentile(values_float, 75):.0f}",
+        f"{percentile(values_float, 95):.0f}",
+        f"{statistics.mean(values):.1f}",
+        str(max(values)),
+    ]
 
 
 def grouped_by_case(timings: list[Timing]) -> dict[str, list[Timing]]:
@@ -179,13 +210,7 @@ def case_rows(timings: list[Timing]) -> list[str]:
     if len(groups) <= 1 and "unknown" in groups:
         return []
 
-    rows = [
-        "",
-        "## Stage Timing By Stress Case",
-        "",
-        "| Stress Case | Actions | Total p25 | Total p50 | Total p75 | Total p95 | Input p50 | Execute p50 | Output p50 | Mounts p50 |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
+    table_rows: list[list[str]] = []
     for name in sorted(groups):
         items = groups[name]
         total_ms = [ns_to_ms(item.total_ns) for item in items]
@@ -193,18 +218,31 @@ def case_rows(timings: list[Timing]) -> list[str]:
         execute_ms = [ns_to_ms(item.execution_ns) for item in items]
         output_ms = [ns_to_ms(item.output_upload_ns) for item in items]
         mounts = [float(item.bind_mounts + item.actiondfs_mounts) for item in items]
-        rows.append(
-            f"| {name} | {len(items)} | "
-            f"{fmt_ms(percentile(total_ms, 25))} | "
-            f"{fmt_ms(percentile(total_ms, 50))} | "
-            f"{fmt_ms(percentile(total_ms, 75))} | "
-            f"{fmt_ms(percentile(total_ms, 95))} | "
-            f"{fmt_ms(percentile(input_ms, 50))} | "
-            f"{fmt_ms(percentile(execute_ms, 50))} | "
-            f"{fmt_ms(percentile(output_ms, 50))} | "
-            f"{percentile(mounts, 50):.0f} |"
+        table_rows.append(
+            [
+                name,
+                str(len(items)),
+                fmt_ms(percentile(total_ms, 25)),
+                fmt_ms(percentile(total_ms, 50)),
+                fmt_ms(percentile(total_ms, 75)),
+                fmt_ms(percentile(total_ms, 95)),
+                fmt_ms(percentile(input_ms, 50)),
+                fmt_ms(percentile(execute_ms, 50)),
+                fmt_ms(percentile(output_ms, 50)),
+                f"{percentile(mounts, 50):.0f}",
+            ]
         )
-    return rows
+
+    return [
+        "",
+        "## Stage Timing By Stress Case",
+        "",
+        *markdown_table(
+            ["Stress Case", "Actions", "Total p25", "Total p50", "Total p75", "Total p95", "Input p50", "Execute p50", "Output p50", "Mounts p50"],
+            table_rows,
+            {1, 2, 3, 4, 5, 6, 7, 8, 9},
+        ),
+    ]
 
 
 def overhead_rows(timings: list[Timing]) -> list[str]:
@@ -232,10 +270,14 @@ def overhead_rows(timings: list[Timing]) -> list[str]:
         "",
         "`process/io` is excluded here because it is mostly the action process runtime plus stdout/stderr drain.",
         "",
-        "| Metric | Min | p25 | p50 | p75 | p95 | Mean | Max | Share of summed total |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        stat_row("fixed overhead, no wait", fixed_without_wait, sum(item.total_ns for item in with_runner)),
-        stat_row("fixed overhead, with wait", fixed_with_wait, sum(item.total_ns for item in with_runner)),
+        *markdown_table(
+            ["Metric", "Min", "p25", "p50", "p75", "p95", "Mean", "Max", "Share of summed total"],
+            [
+                stat_cells("fixed overhead, no wait", fixed_without_wait, sum(item.total_ns for item in with_runner)),
+                stat_cells("fixed overhead, with wait", fixed_with_wait, sum(item.total_ns for item in with_runner)),
+            ],
+            {1, 2, 3, 4, 5, 6, 7, 8},
+        ),
     ]
 
 
@@ -244,36 +286,47 @@ def runner_rows(timings: list[Timing]) -> list[str]:
     if not with_runner:
         return []
 
+    runner_table = [
+        stat_cells("parent prepare", [item.runner.parent_prepare_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_cells("fork", [item.runner.fork_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_cells("child setup", [item.runner.child_setup_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_cells("process/io", [item.runner.process_io_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_cells("wait", [item.runner.wait_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_cells("stdio digest", [item.runner.stdio_digest_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+    ]
+    per_action_runner_table = [
+        [
+            item.stress_case,
+            f"`{item.digest[:12]}`",
+            fmt_ms(ns_to_ms(item.runner.parent_prepare_ns)),
+            fmt_ms(ns_to_ms(item.runner.fork_ns)),
+            fmt_ms(ns_to_ms(item.runner.child_setup_ns)),
+            fmt_ms(ns_to_ms(item.runner.process_io_ns)),
+            fmt_ms(ns_to_ms(item.runner.wait_ns)),
+            fmt_ms(ns_to_ms(item.runner.stdio_digest_ns)),
+            str(item.runner.setup_signaled),
+        ]
+        for item in sorted(with_runner, key=lambda value: (value.stress_case, value.file_inputs, value.directory_inputs, value.digest))
+        if item.runner is not None
+    ]
+
     return [
         "",
         "## Runner Timing",
         "",
         "These values split the `execute` bucket. `process/io` starts after child setup signals right before `execve`; it includes the action process runtime and stdout/stderr drain.",
         "",
-        "| Runner Stage | Min | p25 | p50 | p75 | p95 | Mean | Max | Share of execute |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        stat_row("parent prepare", [item.runner.parent_prepare_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
-        stat_row("fork", [item.runner.fork_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
-        stat_row("child setup", [item.runner.child_setup_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
-        stat_row("process/io", [item.runner.process_io_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
-        stat_row("wait", [item.runner.wait_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
-        stat_row("stdio digest", [item.runner.stdio_digest_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        *markdown_table(
+            ["Runner Stage", "Min", "p25", "p50", "p75", "p95", "Mean", "Max", "Share of execute"],
+            runner_table,
+            {1, 2, 3, 4, 5, 6, 7, 8},
+        ),
         "",
-        "| Stress Case | Digest | Parent Prep | Fork | Child Setup | Process/IO | Wait | Stdio Digest | Setup Signaled |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        *[
-            (
-                f"| {item.stress_case} | `{item.digest[:12]}` | {fmt_ms(ns_to_ms(item.runner.parent_prepare_ns))} | "
-                f"{fmt_ms(ns_to_ms(item.runner.fork_ns))} | "
-                f"{fmt_ms(ns_to_ms(item.runner.child_setup_ns))} | "
-                f"{fmt_ms(ns_to_ms(item.runner.process_io_ns))} | "
-                f"{fmt_ms(ns_to_ms(item.runner.wait_ns))} | "
-                f"{fmt_ms(ns_to_ms(item.runner.stdio_digest_ns))} | "
-                f"{item.runner.setup_signaled} |"
-            )
-            for item in sorted(with_runner, key=lambda value: (value.stress_case, value.file_inputs, value.directory_inputs, value.digest))
-            if item.runner is not None
-        ],
+        *markdown_table(
+            ["Stress Case", "Digest", "Parent Prep", "Fork", "Child Setup", "Process/IO", "Wait", "Stdio Digest", "Setup Signaled"],
+            per_action_runner_table,
+            {2, 3, 4, 5, 6, 7},
+        ),
     ]
 
 
@@ -296,6 +349,22 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
         lines.append(f"- Bazel elapsed: `{args.bazel_elapsed}`")
     if args.workload:
         lines.append(f"- Workload: {args.workload}")
+
+    stage_table = [
+        stat_cells("total", [item.total_ns for item in timings], total_ns),
+        stat_cells("input fetch/materialize", [item.input_fetch_ns for item in timings], total_ns),
+        stat_cells("execute", [item.execution_ns for item in timings], total_ns),
+        stat_cells("output upload/collect", [item.output_upload_ns for item in timings], total_ns),
+    ]
+    count_table = [
+        int_stat_cells("file inputs", [item.file_inputs for item in timings]),
+        int_stat_cells("directory inputs", [item.directory_inputs for item in timings]),
+        int_stat_cells("bind mounts", [item.bind_mounts for item in timings]),
+        int_stat_cells("actiondfs mounts", [item.actiondfs_mounts for item in timings]),
+        int_stat_cells("output files", [item.output_files for item in timings]),
+        int_stat_cells("output directories", [item.output_directories for item in timings]),
+    ]
+
     lines.extend(
         [
             "",
@@ -303,23 +372,19 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             "",
             "All timing values are milliseconds unless noted.",
             "",
-            "| Stage | Min | p25 | p50 | p75 | p95 | Mean | Max | Share of summed total |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-            stat_row("total", [item.total_ns for item in timings], total_ns),
-            stat_row("input fetch/materialize", [item.input_fetch_ns for item in timings], total_ns),
-            stat_row("execute", [item.execution_ns for item in timings], total_ns),
-            stat_row("output upload/collect", [item.output_upload_ns for item in timings], total_ns),
+            *markdown_table(
+                ["Stage", "Min", "p25", "p50", "p75", "p95", "Mean", "Max", "Share of summed total"],
+                stage_table,
+                {1, 2, 3, 4, 5, 6, 7, 8},
+            ),
             "",
             "## Input And Mount Counts",
             "",
-            "| Metric | Min | p25 | p50 | p75 | p95 | Mean | Max |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-            int_stat_row("file inputs", [item.file_inputs for item in timings]),
-            int_stat_row("directory inputs", [item.directory_inputs for item in timings]),
-            int_stat_row("bind mounts", [item.bind_mounts for item in timings]),
-            int_stat_row("actiondfs mounts", [item.actiondfs_mounts for item in timings]),
-            int_stat_row("output files", [item.output_files for item in timings]),
-            int_stat_row("output directories", [item.output_directories for item in timings]),
+            *markdown_table(
+                ["Metric", "Min", "p25", "p50", "p75", "p95", "Mean", "Max"],
+                count_table,
+                {1, 2, 3, 4, 5, 6, 7},
+            ),
         ]
     )
     lines.extend(case_rows(timings))
@@ -330,19 +395,31 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             "",
             "## Per Action",
             "",
-            "| Stress Case | Digest | Total | Input | Execute | Output | File Inputs | Dir Inputs | Bind Mounts | Outputs |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
+    per_action_table = []
     for item in sorted(timings, key=lambda value: (value.stress_case, value.file_inputs, value.directory_inputs, value.digest)):
-        lines.append(
-            f"| {item.stress_case} | `{item.digest[:12]}` | {fmt_ms(ns_to_ms(item.total_ns))} | "
-            f"{fmt_ms(ns_to_ms(item.input_fetch_ns))} | "
-            f"{fmt_ms(ns_to_ms(item.execution_ns))} | "
-            f"{fmt_ms(ns_to_ms(item.output_upload_ns))} | "
-            f"{item.file_inputs} | {item.directory_inputs} | {item.bind_mounts + item.actiondfs_mounts} | "
-            f"{item.output_files} file, {item.output_directories} dir |"
+        per_action_table.append(
+            [
+                item.stress_case,
+                f"`{item.digest[:12]}`",
+                fmt_ms(ns_to_ms(item.total_ns)),
+                fmt_ms(ns_to_ms(item.input_fetch_ns)),
+                fmt_ms(ns_to_ms(item.execution_ns)),
+                fmt_ms(ns_to_ms(item.output_upload_ns)),
+                str(item.file_inputs),
+                str(item.directory_inputs),
+                str(item.bind_mounts + item.actiondfs_mounts),
+                f"{item.output_files} file, {item.output_directories} dir",
+            ]
         )
+    lines.extend(
+        markdown_table(
+            ["Stress Case", "Digest", "Total", "Input", "Execute", "Output", "File Inputs", "Dir Inputs", "Bind Mounts", "Outputs"],
+            per_action_table,
+            {2, 3, 4, 5, 6, 7, 8},
+        )
+    )
 
     if all(item.directory_inputs == 0 for item in timings):
         if any(item.actiondfs_mounts > 0 for item in timings):
