@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
+const action_executor = @import("action_executor.zig");
 const body_sink = @import("body_sink.zig");
 const bytestream_service = @import("bytestream_service.zig");
 const cas = @import("cas.zig");
@@ -32,14 +33,16 @@ pub fn run(io: std.Io) !void {
     try cas.Store.init(cas_dir).ensureLayout(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
 
+    const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
+        .runtime_root_path = "/runtimes",
+    });
+
     const server: reapi_dispatch.Server = .{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
         .cleanup_store = cas.Store.initReady(cleanup_dir),
         .work_root = action_work_dir,
-        .execution_options = .{
-            .runtime_root_path = "/runtimes",
-        },
+        .execution_options = execution_options.options,
     };
 
     const listener = try vsock.listen(vsock.control_port);

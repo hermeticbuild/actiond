@@ -26,10 +26,94 @@ pub const Error = error{
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
 const worker_name = "actiond";
+const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
+
+pub const RuntimeMountSources = struct {
+    lib: ?[:0]const u8 = null,
+    lib64: ?[:0]const u8 = null,
+    usr_lib: ?[:0]const u8 = null,
+    etc: ?[:0]const u8 = null,
+
+    fn deinit(self: *RuntimeMountSources, allocator: std.mem.Allocator) void {
+        if (self.lib) |path| allocator.free(path);
+        if (self.lib64) |path| allocator.free(path);
+        if (self.usr_lib) |path| allocator.free(path);
+        if (self.etc) |path| allocator.free(path);
+        self.* = .{};
+    }
+};
+
+pub const RuntimeMountCache = struct {
+    common: RuntimeMountSources = .{},
+    glibc2_31: RuntimeMountSources = .{},
+    glibc2_35: RuntimeMountSources = .{},
+    glibc2_39: RuntimeMountSources = .{},
+
+    fn deinit(self: *RuntimeMountCache, allocator: std.mem.Allocator) void {
+        self.common.deinit(allocator);
+        self.glibc2_31.deinit(allocator);
+        self.glibc2_35.deinit(allocator);
+        self.glibc2_39.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn forLibc(self: *const RuntimeMountCache, libc: []const u8) ?*const RuntimeMountSources {
+        if (std.mem.eql(u8, libc, "glibc2.31")) return &self.glibc2_31;
+        if (std.mem.eql(u8, libc, "glibc2.35")) return &self.glibc2_35;
+        if (std.mem.eql(u8, libc, "glibc2.39")) return &self.glibc2_39;
+        return null;
+    }
+};
 
 pub const ExecuteOptions = struct {
     runtime_root_path: ?[]const u8 = null,
+    actiondfs_supported: ?bool = null,
+    cas_blob_root_path: ?[]const u8 = null,
+    runtime_mount_cache: ?RuntimeMountCache = null,
 };
+
+pub const PreparedExecuteOptions = struct {
+    options: ExecuteOptions,
+    owned_cas_blob_root_path: ?[]u8 = null,
+    owns_runtime_mount_cache: bool = false,
+
+    pub fn deinit(self: *PreparedExecuteOptions, allocator: std.mem.Allocator) void {
+        if (self.owns_runtime_mount_cache) {
+            if (self.options.runtime_mount_cache) |*cache| cache.deinit(allocator);
+        }
+        if (self.owned_cas_blob_root_path) |path| allocator.free(path);
+        self.* = undefined;
+    }
+};
+
+pub fn prepareExecuteOptions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    base: ExecuteOptions,
+) !PreparedExecuteOptions {
+    var prepared: PreparedExecuteOptions = .{ .options = base };
+    errdefer prepared.deinit(allocator);
+
+    if (prepared.options.actiondfs_supported == null) {
+        prepared.options.actiondfs_supported = kernelSupportsActiondfs(io);
+    }
+    if (prepared.options.cas_blob_root_path == null) {
+        var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
+        const path = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
+        prepared.owned_cas_blob_root_path = path;
+        prepared.options.cas_blob_root_path = path;
+    }
+    if (prepared.options.runtime_root_path) |runtime_root_path| {
+        if (prepared.options.runtime_mount_cache == null) {
+            prepared.options.runtime_mount_cache = try discoverRuntimeMounts(io, allocator, runtime_root_path);
+            prepared.owns_runtime_mount_cache = true;
+        }
+    }
+
+    return prepared;
+}
 
 pub fn executeAndCacheAction(
     io: std.Io,
@@ -133,14 +217,9 @@ pub fn executeActionWithOptions(
     defer freeDirectoryInputs(allocator, directory_inputs.items);
     const use_workspace_chroot = options.runtime_root_path != null;
     const force_file_inputs = forceFileInputs(command, action.platform);
-    const use_actiondfs_inputs = use_workspace_chroot and !force_file_inputs and kernelSupportsActiondfs(io, allocator);
-    if (use_actiondfs_inputs) {
-        var input_root_blob = store.openBlob(io, input_root_digest) catch |err| switch (err) {
-            error.FileNotFound => return error.MissingDirectoryBlob,
-            else => return err,
-        };
-        input_root_blob.close(io);
-    } else {
+    const actiondfs_supported = options.actiondfs_supported orelse kernelSupportsActiondfs(io);
+    const use_actiondfs_inputs = use_workspace_chroot and !force_file_inputs and actiondfs_supported;
+    if (!use_actiondfs_inputs) {
         const allow_directory_inputs = use_workspace_chroot and !force_file_inputs;
         try collectInputs(io, allocator, store, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
     }
@@ -185,11 +264,20 @@ pub fn executeActionWithOptions(
 
     var actiondfs_workspace: ?ActiondfsWorkspace = null;
     defer if (actiondfs_workspace) |*workspace| workspace.deinit(io, allocator);
+    var fallback_cas_blob_root_path: ?[]u8 = null;
+    defer if (fallback_cas_blob_root_path) |path| allocator.free(path);
     if (use_actiondfs_inputs) {
+        const cas_blob_root_path = options.cas_blob_root_path orelse path: {
+            var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
+            const value = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
+            fallback_cas_blob_root_path = value;
+            break :path value;
+        };
         actiondfs_workspace = try ActiondfsWorkspace.init(
             io,
             allocator,
-            store,
+            cas_blob_root_path,
             work_root_path,
             exec_root_path,
             input_root_digest,
@@ -231,22 +319,33 @@ pub fn executeActionWithOptions(
 
     var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
     const borrowed_bind_mount_count = materialization.bind_mounts.len;
+    var runtime_mount_sources_are_borrowed = false;
     defer {
         for (bind_mounts.items[borrowed_bind_mount_count..]) |mount| {
-            allocator.free(mount.source);
+            if (!runtime_mount_sources_are_borrowed) allocator.free(mount.source);
             allocator.free(mount.target);
         }
         bind_mounts.deinit(allocator);
     }
     try bind_mounts.appendSlice(allocator, materialization.bind_mounts);
-    if (options.runtime_root_path) |runtime_root| {
-        if (libc_runtime == null) {
-            try appendCommonRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, &bind_mounts);
+    if (options.runtime_mount_cache) |cache| {
+        runtime_mount_sources_are_borrowed = true;
+        if (libc_runtime) |libc| {
+            const sources = cache.forLibc(libc) orelse return error.UnsupportedLibcRuntime;
+            try appendCachedLibcRuntimeMounts(io, allocator, work_root, work_root_path, sources, &bind_mounts);
+        } else {
+            try appendCachedCommonRuntimeMounts(io, allocator, work_root, work_root_path, &cache.common, &bind_mounts);
         }
-    }
-    if (libc_runtime) |libc| {
-        const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
-        try appendLibcRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, libc, &bind_mounts);
+    } else {
+        if (options.runtime_root_path) |runtime_root| {
+            if (libc_runtime == null) {
+                try appendCommonRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, &bind_mounts);
+            }
+        }
+        if (libc_runtime) |libc| {
+            const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
+            try appendLibcRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, libc, &bind_mounts);
+        }
     }
 
     const input_fetch_completed_wall = timestampNow(io);
@@ -333,9 +432,9 @@ fn libcRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
     for (value.properties) |property| {
         if (!std.mem.eql(u8, property.name, "libc")) continue;
         if (property.value.len == 0 or std.mem.eql(u8, property.value, "none")) return null;
-        if (std.mem.eql(u8, property.value, "glibc2.31")) return "glibc2.31";
-        if (std.mem.eql(u8, property.value, "glibc2.35")) return "glibc2.35";
-        if (std.mem.eql(u8, property.value, "glibc2.39")) return "glibc2.39";
+        for (supported_libc_runtimes) |name| {
+            if (std.mem.eql(u8, property.value, name)) return name;
+        }
         return error.UnsupportedLibcRuntime;
     }
     return null;
@@ -369,8 +468,7 @@ fn forceFileInputs(command: reapi.Command, platform: ?reapi.Platform) bool {
     return forceFileInputsFromPlatform(platform) or forceFileInputsFromCommand(command);
 }
 
-fn kernelSupportsActiondfs(io: std.Io, allocator: std.mem.Allocator) bool {
-    _ = allocator;
+fn kernelSupportsActiondfs(io: std.Io) bool {
     if (comptime builtin.os.tag != .linux) return false;
 
     var proc = std.Io.Dir.openDirAbsolute(io, "/proc", .{}) catch return false;
@@ -526,15 +624,14 @@ const ActiondfsWorkspace = struct {
     fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
-        store: cas.Store,
+        cas_blob_root: []const u8,
         work_root_path: []const u8,
         workspace_path: []const u8,
         input_root_digest: cas.Digest,
     ) !ActiondfsWorkspace {
         const base_path = try std.fmt.allocPrint(allocator, "{s}.actiondfs", .{work_root_path});
         errdefer allocator.free(base_path);
-        std.Io.Dir.cwd().deleteTree(io, base_path) catch {};
-        try std.Io.Dir.cwd().createDirPath(io, base_path);
+        try std.Io.Dir.cwd().createDir(io, base_path, .default_dir);
 
         const lower_path = try std.fmt.allocPrintSentinel(allocator, "{s}/lower", .{base_path}, 0);
         errdefer allocator.free(lower_path);
@@ -543,14 +640,12 @@ const ActiondfsWorkspace = struct {
         const work_path = try std.fmt.allocPrint(allocator, "{s}/work", .{base_path});
         defer allocator.free(work_path);
 
-        try std.Io.Dir.cwd().createDirPath(io, lower_path);
-        try std.Io.Dir.cwd().createDirPath(io, upper_path);
-        try std.Io.Dir.cwd().createDirPath(io, work_path);
+        var base_dir = try std.Io.Dir.openDirAbsolute(io, base_path, .{});
+        defer base_dir.close(io);
+        try base_dir.createDir(io, "lower", .default_dir);
+        try base_dir.createDir(io, "upper", .default_dir);
+        try base_dir.createDir(io, "work", .default_dir);
 
-        var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
-        const cas_blob_root = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
-        defer allocator.free(cas_blob_root);
         var root_hash: [64]u8 = undefined;
 
         const actiondfs_data = try std.fmt.allocPrintSentinel(
@@ -645,6 +740,117 @@ fn runtimeArch() ![]const u8 {
         .x86_64 => "x86_64",
         else => error.UnsupportedRuntimeArch,
     };
+}
+
+fn discoverRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime_root_path: []const u8,
+) !RuntimeMountCache {
+    var cache: RuntimeMountCache = .{};
+    errdefer cache.deinit(allocator);
+
+    const common_root = try std.fmt.allocPrint(allocator, "{s}/common/root", .{runtime_root_path});
+    defer allocator.free(common_root);
+    cache.common.etc = try runtimePathIfExists(io, allocator, common_root, "etc");
+
+    cache.glibc2_31 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.31");
+    cache.glibc2_35 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.35");
+    cache.glibc2_39 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.39");
+
+    return cache;
+}
+
+fn discoverLibcRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime_root_path: []const u8,
+    libc: []const u8,
+) !RuntimeMountSources {
+    const arch = try runtimeArch();
+    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/libc/{s}/{s}/root", .{ runtime_root_path, libc, arch });
+    defer allocator.free(runtime_root);
+
+    var sources: RuntimeMountSources = .{};
+    errdefer sources.deinit(allocator);
+    sources.lib = try firstRuntimePathIfExists(io, allocator, runtime_root, &.{ "lib", "usr/lib" });
+    sources.lib64 = try firstRuntimePathIfExists(io, allocator, runtime_root, &.{ "lib64", "usr/lib64" });
+    sources.usr_lib = try runtimePathIfExists(io, allocator, runtime_root, "usr/lib");
+    sources.etc = try runtimePathIfExists(io, allocator, runtime_root, "etc");
+    return sources;
+}
+
+fn firstRuntimePathIfExists(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime_root: []const u8,
+    source_candidates: []const []const u8,
+) !?[:0]const u8 {
+    for (source_candidates) |source_rel| {
+        if (try runtimePathIfExists(io, allocator, runtime_root, source_rel)) |path| return path;
+    }
+    return null;
+}
+
+fn runtimePathIfExists(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime_root: []const u8,
+    source_rel: []const u8,
+) !?[:0]const u8 {
+    const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ runtime_root, source_rel }, 0);
+    errdefer allocator.free(source);
+    std.Io.Dir.cwd().access(io, source, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            allocator.free(source);
+            return null;
+        },
+        else => |e| return e,
+    };
+    return source;
+}
+
+fn appendCachedCommonRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    sources: *const RuntimeMountSources,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    if (sources.etc) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "etc", bind_mounts);
+}
+
+fn appendCachedLibcRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    sources: *const RuntimeMountSources,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    if (sources.lib) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "lib", bind_mounts);
+    if (sources.lib64) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "lib64", bind_mounts);
+    if (sources.usr_lib) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "usr/lib", bind_mounts);
+    if (sources.etc) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "etc", bind_mounts);
+}
+
+fn appendCachedRuntimeMount(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    source: [:0]const u8,
+    target_rel: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    try chroot_dir.createDirPath(io, target_rel);
+    const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ chroot_path, target_rel }, 0);
+    errdefer allocator.free(target);
+    try bind_mounts.append(allocator, .{
+        .source = @constCast(source),
+        .target = target,
+    });
 }
 
 fn appendCommonRuntimeMounts(
@@ -1499,6 +1705,42 @@ test "appendCommonRuntimeMounts maps runtime etc into chroot" {
     try std.testing.expectEqual(@as(usize, 1), bind_mounts.items.len);
     try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].source, "/runtimes/common/root/etc"));
     try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].target, "/chroot/etc"));
+}
+
+test "prepareExecuteOptions caches CAS and runtime mount sources" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    try cas.Store.init(cas_dir).ensureLayout(std.testing.io);
+
+    const arch = try runtimeArch();
+    const runtime_usr_lib = try std.fmt.allocPrint(std.testing.allocator, "runtimes/libc/glibc2.35/{s}/root/usr/lib", .{arch});
+    defer std.testing.allocator.free(runtime_usr_lib);
+    try tmp.dir.createDirPath(std.testing.io, runtime_usr_lib);
+    try tmp.dir.createDirPath(std.testing.io, "runtimes/common/root/etc");
+
+    var base_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buffer);
+    const base_path = base_buffer[0..base_len];
+    const runtime_root_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/runtimes", .{base_path});
+    defer std.testing.allocator.free(runtime_root_path);
+
+    var prepared = try prepareExecuteOptions(std.testing.io, std.testing.allocator, cas.Store.initReady(cas_dir), .{
+        .runtime_root_path = runtime_root_path,
+    });
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expect(prepared.options.actiondfs_supported != null);
+    try std.testing.expect(prepared.options.cas_blob_root_path != null);
+    try std.testing.expect(std.mem.endsWith(u8, prepared.options.cas_blob_root_path.?, "/cas/blobs/sha256"));
+
+    const cache = prepared.options.runtime_mount_cache.?;
+    try std.testing.expect(cache.common.etc != null);
+    try std.testing.expect(cache.glibc2_35.lib != null);
+    try std.testing.expect(cache.glibc2_35.usr_lib != null);
+    try std.testing.expect(cache.glibc2_31.lib == null);
 }
 
 test "collectInputs materializes bindable tree directories" {

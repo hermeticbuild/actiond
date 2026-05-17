@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
+const action_executor = @import("action_executor.zig");
 const cas = @import("cas.zig");
 const embedded_payload = @import("embedded_payload.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
@@ -92,13 +93,16 @@ pub fn serve(
     );
     defer mounted_runtime.deinit(allocator);
 
+    var execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
+        .runtime_root_path = mounted_runtime.path(),
+    });
+    defer execution_options.deinit(allocator);
+
     const server: reapi_dispatch.Server = .{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
         .work_root = work_dir,
-        .execution_options = .{
-            .runtime_root_path = mounted_runtime.path(),
-        },
+        .execution_options = execution_options.options,
     };
 
     return grpc_http2_server.serve(io, allocator, .{
