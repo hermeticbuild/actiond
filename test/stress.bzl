@@ -4,10 +4,7 @@ def _stress_case(ctx):
     return ctx.label.name
 
 def _stress_env(ctx):
-    env = {"ACTIOND_STRESS_CASE": _stress_case(ctx)}
-    if ctx.attr.input_mode:
-        env["ACTIOND_INPUT_MODE"] = ctx.attr.input_mode
-    return env
+    return {"ACTIOND_STRESS_CASE": _stress_case(ctx)}
 
 def _pad2(value):
     if value < 10:
@@ -78,7 +75,6 @@ stress_tree = rule(
         "srcs": attr.label_list(allow_files = True),
         "trees": attr.label_list(),
         "files": attr.int(default = 16),
-        "input_mode": attr.string(),
         "stress_case": attr.string(),
         "execution_requirements": attr.string_dict(),
         "expect_network_blocked": attr.bool(default = False),
@@ -123,7 +119,6 @@ stress_files = rule(
         "prefix": attr.string(mandatory = True),
         "srcs": attr.label_list(allow_files = True),
         "trees": attr.label_list(),
-        "input_mode": attr.string(),
         "stress_case": attr.string(),
         "execution_requirements": attr.string_dict(),
         "expect_network_blocked": attr.bool(default = False),
@@ -163,7 +158,6 @@ stress_consumer = rule(
         "srcs": attr.label_list(allow_files = True),
         "trees": attr.label_list(),
         "files": attr.int(default = 16),
-        "input_mode": attr.string(),
         "stress_case": attr.string(),
         "execution_requirements": attr.string_dict(),
         "expect_network_blocked": attr.bool(default = False),
@@ -222,9 +216,11 @@ def stress_workload(name, tool):
         )
         stress_consumer(
             name = target,
-            execution_requirements = {"libc": "glibc2.35"},
+            execution_requirements = {
+                "actiond.input_mode": "files",
+                "libc": "glibc2.35",
+            },
             files = 8,
-            input_mode = "files",
             srcs = [":" + group],
             stress_case = "nested_individual_files",
             tool = tool,
@@ -235,9 +231,11 @@ def stress_workload(name, tool):
         target = "bare_files_%s" % _pad2(i)
         stress_consumer(
             name = target,
-            execution_requirements = {"libc": "glibc2.35"},
+            execution_requirements = {
+                "actiond.input_mode": "files",
+                "libc": "glibc2.35",
+            },
             files = 8,
-            input_mode = "files",
             srcs = [":bare_inputs"],
             stress_case = "bare_individual_files",
             tool = tool,
@@ -277,9 +275,11 @@ def stress_workload(name, tool):
         target = "generated_files_%s" % _pad2(i)
         stress_consumer(
             name = target,
-            execution_requirements = {"libc": "glibc2.35"},
+            execution_requirements = {
+                "actiond.input_mode": "files",
+                "libc": "glibc2.35",
+            },
             files = 8,
-            input_mode = "files",
             srcs = [":generated_file_set"],
             stress_case = "generated_individual_files",
             tool = tool,

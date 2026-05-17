@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const action_cache = @import("action_cache.zig");
 const action_runner = @import("action_runner.zig");
 const cas = @import("cas.zig");
 const execroot = @import("execroot.zig");
@@ -250,38 +249,6 @@ fn sleepShortRetry() void {
     while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
 }
 
-pub fn executeAndCacheAction(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    blob_store: cas.Store,
-    result_store: action_cache.Store,
-    work_root: std.Io.Dir,
-    action_digest: cas.Digest,
-) !action_runner.Outcome {
-    var outcome = try executeActionWithOptions(io, allocator, blob_store, work_root, action_digest, .{});
-    errdefer outcome.deinit(allocator);
-
-    var result = try actionResultFromOutcomeOwned(allocator, outcome);
-    defer result.deinit(allocator);
-    try result_store.put(
-        io,
-        allocator,
-        action_digest,
-        result.result,
-    );
-    return outcome;
-}
-
-pub fn executeAction(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    work_root: std.Io.Dir,
-    action_digest: cas.Digest,
-) !action_runner.Outcome {
-    return executeActionWithOptions(io, allocator, store, work_root, action_digest, .{});
-}
-
 pub fn executeActionWithOptions(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -324,7 +291,7 @@ pub fn executeActionWithOptions(
     defer directory_inputs.deinit(allocator);
     defer freeDirectoryInputs(allocator, directory_inputs.items);
     const use_workspace_chroot = options.runtime_root_path != null;
-    const force_file_inputs = forceFileInputs(command, action.platform);
+    const force_file_inputs = forceFileInputs(action.platform);
     const use_actiondfs_inputs = use_workspace_chroot and !force_file_inputs and options.use_actiondfs;
     if (!use_actiondfs_inputs) {
         const allow_directory_inputs = use_workspace_chroot and !force_file_inputs;
@@ -593,16 +560,8 @@ fn forceFileInputsFromPlatform(platform: ?reapi.Platform) bool {
     return false;
 }
 
-fn forceFileInputsFromCommand(command: reapi.Command) bool {
-    for (command.environment_variables) |variable| {
-        if (!std.mem.eql(u8, variable.name, "ACTIOND_INPUT_MODE")) continue;
-        return std.mem.eql(u8, variable.value, "files");
-    }
-    return false;
-}
-
-fn forceFileInputs(command: reapi.Command, platform: ?reapi.Platform) bool {
-    return forceFileInputsFromPlatform(platform) or forceFileInputsFromCommand(command);
+fn forceFileInputs(platform: ?reapi.Platform) bool {
+    return forceFileInputsFromPlatform(platform);
 }
 
 fn selectExecutableInputCopyPaths(
@@ -1805,15 +1764,6 @@ test "actiond input mode platform property can force file inputs" {
     try std.testing.expect(!forceFileInputsFromPlatform(null));
 }
 
-test "actiond input mode command environment can force file inputs" {
-    try std.testing.expect(forceFileInputsFromCommand(.{
-        .environment_variables = &.{.{ .name = "ACTIOND_INPUT_MODE", .value = "files" }},
-    }));
-    try std.testing.expect(!forceFileInputsFromCommand(.{
-        .environment_variables = &.{.{ .name = "ACTIOND_INPUT_MODE", .value = "trees" }},
-    }));
-}
-
 test "selectExecutableInputCopyPaths keeps only the direct command executable" {
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
@@ -1917,7 +1867,7 @@ test "selectExecutableInputCopyPaths searches input PATH candidates" {
     try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
 }
 
-test "resolveActiondfsExecutablePath resolves executable input from manifest" {
+test "resolveActiondfsExecutablePath resolves executable input from input root" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "cas", .default_dir);
