@@ -89,6 +89,11 @@ pub const PreparedExecuteOptions = struct {
     }
 };
 
+const CasReadRoots = struct {
+    primary_blob_root_path: ?[]const u8 = null,
+    staged_blob_root_path: ?[]const u8 = null,
+};
+
 pub fn prepareExecuteOptions(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -119,6 +124,123 @@ pub fn prepareExecuteOptions(
     }
 
     return prepared;
+}
+
+fn casReadRoots(options: ExecuteOptions) CasReadRoots {
+    return .{
+        .primary_blob_root_path = options.input_cas_blob_root_path orelse options.cas_blob_root_path,
+        .staged_blob_root_path = options.staged_cas_blob_root_path,
+    };
+}
+
+fn readCasBlobAlloc(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    read_roots: CasReadRoots,
+    digest: cas.Digest,
+) ![]u8 {
+    if (digest.isEmpty()) return allocator.alloc(u8, 0);
+
+    if (read_roots.staged_blob_root_path) |root| {
+        if (readCasBlobFromRootAlloc(io, allocator, root, digest)) |bytes| return bytes else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| return e,
+        }
+    }
+    if (read_roots.primary_blob_root_path) |root| {
+        if (readCasBlobFromRootAlloc(io, allocator, root, digest)) |bytes| return bytes else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| return e,
+        }
+    }
+    return store.readAlloc(io, allocator, digest);
+}
+
+fn readCasBlobFromRootAlloc(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    blob_root_path: []const u8,
+    digest: cas.Digest,
+) ![]u8 {
+    const len = std.math.cast(usize, digest.size_bytes) orelse return error.FileTooBig;
+    var hash: [64]u8 = undefined;
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ blob_root_path, digest.formatHex(&hash) }, 0);
+    defer allocator.free(path);
+
+    var file = try openAbsoluteBlobPath(io, path);
+    defer file.close(io);
+
+    const bytes = try allocator.alloc(u8, len);
+    errdefer allocator.free(bytes);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const n = try readFdRetry(file.handle, bytes[offset..]);
+        if (n == 0) return error.ReadFailed;
+        offset += n;
+    }
+    return bytes;
+}
+
+fn openAbsoluteBlobPath(io: std.Io, path: [:0]const u8) !std.Io.File {
+    if (comptime builtin.os.tag == .linux) return openAbsoluteBlobPathLinuxRetry(path);
+    return std.Io.Dir.openFileAbsolute(io, path, .{});
+}
+
+fn openAbsoluteBlobPathLinuxRetry(path: [:0]const u8) !std.Io.File {
+    const linux = std.os.linux;
+    var stale_attempts: usize = 0;
+    while (true) {
+        const rc = linux.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
+            .INTR => continue,
+            .STALE => {
+                if (stale_attempts >= 128) return error.FileNotFound;
+                stale_attempts += 1;
+                sleepShortRetry();
+                continue;
+            },
+            .NOENT, .SRCH => return error.FileNotFound,
+            .ACCES => return error.AccessDenied,
+            .ISDIR => return error.IsDir,
+            .NOTDIR => return error.NotDir,
+            .NAMETOOLONG => return error.NameTooLong,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOMEM => return error.SystemResources,
+            .LOOP => return error.SymLinkLoop,
+            .FBIG, .OVERFLOW => return error.FileTooBig,
+            else => return error.Unexpected,
+        }
+    }
+}
+
+fn readFdRetry(fd: std.Io.File.Handle, buffer: []u8) !usize {
+    var stale_attempts: usize = 0;
+    while (true) {
+        const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .STALE => {
+                if (stale_attempts >= 128) return error.ReadFailed;
+                stale_attempts += 1;
+                sleepShortRetry();
+                continue;
+            },
+            else => return error.ReadFailed,
+        }
+    }
+}
+
+fn sleepShortRetry() void {
+    if (comptime builtin.os.tag != .linux) return;
+    var request: std.os.linux.timespec = .{
+        .sec = 0,
+        .nsec = 2 * std.time.ns_per_ms,
+    };
+    while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
 }
 
 pub fn executeAndCacheAction(
@@ -166,7 +288,9 @@ pub fn executeActionWithOptions(
     const total_start = std.Io.Clock.awake.now(io);
     const input_fetch_start = total_start;
 
-    const action_bytes = store.readAlloc(io, allocator, action_digest) catch |err| switch (err) {
+    const read_roots = casReadRoots(options);
+
+    const action_bytes = readCasBlobAlloc(io, allocator, store, read_roots, action_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingActionBlob,
         else => return err,
     };
@@ -176,7 +300,7 @@ pub fn executeActionWithOptions(
     defer action.deinit(allocator);
 
     const command_digest = try cas.Digest.fromReapi(action.command_digest orelse return error.MissingCommandDigest);
-    const command_bytes = store.readAlloc(io, allocator, command_digest) catch |err| switch (err) {
+    const command_bytes = readCasBlobAlloc(io, allocator, store, read_roots, command_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingCommandBlob,
         else => return err,
     };
@@ -198,7 +322,7 @@ pub fn executeActionWithOptions(
     const use_actiondfs_inputs = use_workspace_chroot and !force_file_inputs and actiondfs_supported;
     if (!use_actiondfs_inputs) {
         const allow_directory_inputs = use_workspace_chroot and !force_file_inputs;
-        try collectInputs(io, allocator, store, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
+        try collectInputs(io, allocator, store, read_roots, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
     }
     var executable_copy_paths: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
@@ -268,6 +392,7 @@ pub fn executeActionWithOptions(
             io,
             allocator,
             store,
+            read_roots,
             input_root_digest,
             action_digest,
             command,
@@ -556,6 +681,7 @@ fn resolveActiondfsExecutablePath(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    read_roots: CasReadRoots,
     input_root_digest: cas.Digest,
     action_digest: cas.Digest,
     command: reapi.Command,
@@ -569,7 +695,7 @@ fn resolveActiondfsExecutablePath(
     try selectExecutableInputCandidatePaths(allocator, command, workspace_prefix, &candidates);
 
     for (candidates.items) |candidate| {
-        const input = lookupInputFile(io, allocator, store, input_root_digest, candidate) catch |err| {
+        const input = lookupInputFile(io, allocator, store, read_roots, input_root_digest, candidate) catch |err| {
             logExecuteSetupError("lookup actiondfs executable", action_digest, err);
             return err;
         } orelse continue;
@@ -583,18 +709,20 @@ fn lookupInputFile(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    read_roots: CasReadRoots,
     root_digest: cas.Digest,
     path: []const u8,
 ) !?LookupInputFile {
     try execroot.validatePath(path);
     var components = std.mem.splitScalar(u8, path, '/');
-    return lookupInputFileComponent(io, allocator, store, root_digest, &components);
+    return lookupInputFileComponent(io, allocator, store, read_roots, root_digest, &components);
 }
 
 fn lookupInputFileComponent(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    read_roots: CasReadRoots,
     directory_digest: cas.Digest,
     components: *std.mem.SplitIterator(u8, .scalar),
 ) !?LookupInputFile {
@@ -602,7 +730,7 @@ fn lookupInputFileComponent(
     if (component.len == 0) return null;
     try validateEntryName(component);
 
-    const directory_bytes = store.readAlloc(io, allocator, directory_digest) catch |err| switch (err) {
+    const directory_bytes = readCasBlobAlloc(io, allocator, store, read_roots, directory_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingDirectoryBlob,
         else => return err,
     };
@@ -628,7 +756,7 @@ fn lookupInputFileComponent(
         try validateEntryName(child.name);
         if (!std.mem.eql(u8, child.name, component)) continue;
         const digest = try cas.Digest.fromReapi(child.digest orelse return error.MissingDirectoryDigest);
-        return lookupInputFileComponent(io, allocator, store, digest, components);
+        return lookupInputFileComponent(io, allocator, store, read_roots, digest, components);
     }
     return null;
 }
@@ -1552,6 +1680,7 @@ fn collectInputs(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
+    read_roots: CasReadRoots,
     directory_digest: cas.Digest,
     prefix: []const u8,
     command: reapi.Command,
@@ -1559,7 +1688,7 @@ fn collectInputs(
     inputs: ?*std.ArrayListUnmanaged(execroot.Input),
     directory_inputs: ?*std.ArrayListUnmanaged(execroot.DirectoryInput),
 ) !void {
-    const directory_bytes = store.readAlloc(io, allocator, directory_digest) catch |err| switch (err) {
+    const directory_bytes = readCasBlobAlloc(io, allocator, store, read_roots, directory_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingDirectoryBlob,
         else => return err,
     };
@@ -1599,7 +1728,7 @@ fn collectInputs(
                 allocator.free(child_prefix);
             }
         } else {
-            try collectInputs(io, allocator, store, digest, child_prefix, command, allow_directory_inputs, inputs, directory_inputs);
+            try collectInputs(io, allocator, store, read_roots, digest, child_prefix, command, allow_directory_inputs, inputs, directory_inputs);
             allocator.free(child_prefix);
         }
     }
@@ -1843,6 +1972,7 @@ test "resolveActiondfsExecutablePath resolves executable input from manifest" {
         std.testing.io,
         std.testing.allocator,
         store,
+        .{},
         root_digest,
         root_digest,
         .{ .arguments = &.{"external/llvm-toolchain/bin/llvm-ar"} },
@@ -2011,7 +2141,7 @@ test "collectInputs materializes bindable tree directories" {
     defer dirs.deinit(std.testing.allocator);
     defer freeDirectoryInputs(std.testing.allocator, dirs.items);
 
-    try collectInputs(std.testing.io, std.testing.allocator, store, root_digest, "", .{}, true, &files, &dirs);
+    try collectInputs(std.testing.io, std.testing.allocator, store, .{}, root_digest, "", .{}, true, &files, &dirs);
 
     try std.testing.expectEqual(@as(usize, 0), files.items.len);
     try std.testing.expectEqual(@as(usize, 1), dirs.items.len);
@@ -2026,6 +2156,58 @@ test "collectInputs materializes bindable tree directories" {
     const leaf = try cas_dir.readFileAlloc(std.testing.io, leaf_path, std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(leaf);
     try std.testing.expectEqualStrings("leaf", leaf);
+}
+
+test "collectInputs reads directory metadata from staged CAS root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var store_dir = try tmp.dir.createDirPathOpen(std.testing.io, "store", .{});
+    defer store_dir.close(std.testing.io);
+    var lower_dir = try tmp.dir.createDirPathOpen(std.testing.io, "lower", .{});
+    defer lower_dir.close(std.testing.io);
+    var staged_dir = try tmp.dir.createDirPathOpen(std.testing.io, "staged", .{});
+    defer staged_dir.close(std.testing.io);
+
+    const file_digest = cas.Digest.fromBytes("leaf");
+    var file_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, cas.Store.init(staged_dir), reapi.Directory{
+        .files = &.{.{ .name = "leaf.txt", .digest = file_digest.toReapi(&file_hash) }},
+    });
+
+    var lower_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const lower_root_len = try lower_dir.realPath(std.testing.io, &lower_root_buffer);
+    const lower_blob_root = try std.fmt.allocPrint(std.testing.allocator, "{s}/blobs/sha256", .{lower_root_buffer[0..lower_root_len]});
+    defer std.testing.allocator.free(lower_blob_root);
+
+    var staged_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staged_root_len = try staged_dir.realPath(std.testing.io, &staged_root_buffer);
+    const staged_blob_root = try std.fmt.allocPrint(std.testing.allocator, "{s}/blobs/sha256", .{staged_root_buffer[0..staged_root_len]});
+    defer std.testing.allocator.free(staged_blob_root);
+
+    var files: std.ArrayListUnmanaged(execroot.Input) = .empty;
+    defer files.deinit(std.testing.allocator);
+    defer freeInputs(std.testing.allocator, files.items);
+
+    try collectInputs(
+        std.testing.io,
+        std.testing.allocator,
+        cas.Store.init(store_dir),
+        .{
+            .primary_blob_root_path = lower_blob_root,
+            .staged_blob_root_path = staged_blob_root,
+        },
+        root_digest,
+        "",
+        .{},
+        false,
+        &files,
+        null,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), files.items.len);
+    try std.testing.expectEqualStrings("leaf.txt", files.items[0].path);
+    try std.testing.expect(files.items[0].digest.eql(file_digest));
 }
 
 test "collectInputs expands directories that overlap outputs" {
@@ -2064,6 +2246,7 @@ test "collectInputs expands directories that overlap outputs" {
         std.testing.io,
         std.testing.allocator,
         store,
+        .{},
         root_digest,
         "",
         .{ .output_paths = &.{"tree/out.txt"} },
