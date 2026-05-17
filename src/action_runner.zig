@@ -81,6 +81,7 @@ pub const Outcome = struct {
     stderr_digest: ?cas.Digest = null,
     output_files: []OutputFile = &.{},
     output_directories: []OutputDirectory = &.{},
+    execution_metadata: ?reapi.ExecutedActionMetadata = null,
 
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
         for (self.output_files) |output_file| allocator.free(output_file.path);

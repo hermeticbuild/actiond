@@ -83,6 +83,35 @@ pub const Status = struct {
     }
 };
 
+pub const Timestamp = struct {
+    seconds: i64 = 0,
+    nanos: i32 = 0,
+
+    pub fn encode(self: Timestamp, writer: *protobuf.Writer) !void {
+        if (self.seconds != 0) try writer.writeInt64Field(1, self.seconds);
+        if (self.nanos != 0) try writer.writeInt32Field(2, self.nanos);
+    }
+
+    pub fn encodedLen(self: Timestamp) usize {
+        var len: usize = 0;
+        if (self.seconds != 0) len += protobuf.int64FieldLen(1, self.seconds);
+        if (self.nanos != 0) len += protobuf.int32FieldLen(2, self.nanos);
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !Timestamp {
+        var out: Timestamp = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.seconds = try reader.readInt64(),
+                2 => out.nanos = try reader.readInt32(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
 pub const DigestFunction = enum(u32) {
     unknown = 0,
     sha256 = 1,
@@ -629,6 +658,7 @@ pub const ActionResult = struct {
     exit_code: i32 = 0,
     stdout_digest: ?Digest = null,
     stderr_digest: ?Digest = null,
+    execution_metadata: ?ExecutedActionMetadata = null,
 
     pub fn deinit(self: *ActionResult, allocator: std.mem.Allocator) void {
         allocator.free(self.output_files);
@@ -642,6 +672,7 @@ pub const ActionResult = struct {
         if (self.exit_code != 0) try writer.writeInt32Field(4, self.exit_code);
         if (self.stdout_digest) |digest| try writer.writeMessageField(6, digest);
         if (self.stderr_digest) |digest| try writer.writeMessageField(8, digest);
+        if (self.execution_metadata) |metadata| try writer.writeMessageField(9, metadata);
     }
 
     pub fn encodedLen(self: ActionResult) usize {
@@ -651,6 +682,7 @@ pub const ActionResult = struct {
         if (self.exit_code != 0) len += protobuf.int32FieldLen(4, self.exit_code);
         if (self.stdout_digest) |digest| len += protobuf.messageFieldLen(6, digest.encodedLen());
         if (self.stderr_digest) |digest| len += protobuf.messageFieldLen(8, digest.encodedLen());
+        if (self.execution_metadata) |metadata| len += protobuf.messageFieldLen(9, metadata.encodedLen());
         return len;
     }
 
@@ -668,6 +700,10 @@ pub const ActionResult = struct {
                 8 => {
                     var nested = try reader.readMessage();
                     out.stderr_digest = try Digest.decode(&nested);
+                },
+                9 => {
+                    var nested = try reader.readMessage();
+                    out.execution_metadata = try ExecutedActionMetadata.decode(&nested);
                 },
                 else => try reader.skipField(tag.wire_type),
             }
@@ -701,12 +737,104 @@ pub const ActionResult = struct {
                     var nested = try reader.readMessage();
                     out.stderr_digest = try Digest.decode(&nested);
                 },
+                9 => {
+                    var nested = try reader.readMessage();
+                    out.execution_metadata = try ExecutedActionMetadata.decode(&nested);
+                },
                 else => try reader.skipField(tag.wire_type),
             }
         }
 
         out.output_files = try output_files.toOwnedSlice(allocator);
         out.output_directories = try output_directories.toOwnedSlice(allocator);
+        return out;
+    }
+};
+
+pub const ExecutedActionMetadata = struct {
+    worker: []const u8 = "",
+    queued_timestamp: ?Timestamp = null,
+    worker_start_timestamp: ?Timestamp = null,
+    worker_completed_timestamp: ?Timestamp = null,
+    input_fetch_start_timestamp: ?Timestamp = null,
+    input_fetch_completed_timestamp: ?Timestamp = null,
+    execution_start_timestamp: ?Timestamp = null,
+    execution_completed_timestamp: ?Timestamp = null,
+    output_upload_start_timestamp: ?Timestamp = null,
+    output_upload_completed_timestamp: ?Timestamp = null,
+
+    pub fn encode(self: ExecutedActionMetadata, writer: *protobuf.Writer) !void {
+        if (self.worker.len != 0) try writer.writeStringField(1, self.worker);
+        if (self.queued_timestamp) |timestamp| try writer.writeMessageField(2, timestamp);
+        if (self.worker_start_timestamp) |timestamp| try writer.writeMessageField(3, timestamp);
+        if (self.worker_completed_timestamp) |timestamp| try writer.writeMessageField(4, timestamp);
+        if (self.input_fetch_start_timestamp) |timestamp| try writer.writeMessageField(5, timestamp);
+        if (self.input_fetch_completed_timestamp) |timestamp| try writer.writeMessageField(6, timestamp);
+        if (self.execution_start_timestamp) |timestamp| try writer.writeMessageField(7, timestamp);
+        if (self.execution_completed_timestamp) |timestamp| try writer.writeMessageField(8, timestamp);
+        if (self.output_upload_start_timestamp) |timestamp| try writer.writeMessageField(9, timestamp);
+        if (self.output_upload_completed_timestamp) |timestamp| try writer.writeMessageField(10, timestamp);
+    }
+
+    pub fn encodedLen(self: ExecutedActionMetadata) usize {
+        var len: usize = 0;
+        if (self.worker.len != 0) len += protobuf.stringFieldLen(1, self.worker.len);
+        if (self.queued_timestamp) |timestamp| len += protobuf.messageFieldLen(2, timestamp.encodedLen());
+        if (self.worker_start_timestamp) |timestamp| len += protobuf.messageFieldLen(3, timestamp.encodedLen());
+        if (self.worker_completed_timestamp) |timestamp| len += protobuf.messageFieldLen(4, timestamp.encodedLen());
+        if (self.input_fetch_start_timestamp) |timestamp| len += protobuf.messageFieldLen(5, timestamp.encodedLen());
+        if (self.input_fetch_completed_timestamp) |timestamp| len += protobuf.messageFieldLen(6, timestamp.encodedLen());
+        if (self.execution_start_timestamp) |timestamp| len += protobuf.messageFieldLen(7, timestamp.encodedLen());
+        if (self.execution_completed_timestamp) |timestamp| len += protobuf.messageFieldLen(8, timestamp.encodedLen());
+        if (self.output_upload_start_timestamp) |timestamp| len += protobuf.messageFieldLen(9, timestamp.encodedLen());
+        if (self.output_upload_completed_timestamp) |timestamp| len += protobuf.messageFieldLen(10, timestamp.encodedLen());
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !ExecutedActionMetadata {
+        var out: ExecutedActionMetadata = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.worker = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.queued_timestamp = try Timestamp.decode(&nested);
+                },
+                3 => {
+                    var nested = try reader.readMessage();
+                    out.worker_start_timestamp = try Timestamp.decode(&nested);
+                },
+                4 => {
+                    var nested = try reader.readMessage();
+                    out.worker_completed_timestamp = try Timestamp.decode(&nested);
+                },
+                5 => {
+                    var nested = try reader.readMessage();
+                    out.input_fetch_start_timestamp = try Timestamp.decode(&nested);
+                },
+                6 => {
+                    var nested = try reader.readMessage();
+                    out.input_fetch_completed_timestamp = try Timestamp.decode(&nested);
+                },
+                7 => {
+                    var nested = try reader.readMessage();
+                    out.execution_start_timestamp = try Timestamp.decode(&nested);
+                },
+                8 => {
+                    var nested = try reader.readMessage();
+                    out.execution_completed_timestamp = try Timestamp.decode(&nested);
+                },
+                9 => {
+                    var nested = try reader.readMessage();
+                    out.output_upload_start_timestamp = try Timestamp.decode(&nested);
+                },
+                10 => {
+                    var nested = try reader.readMessage();
+                    out.output_upload_completed_timestamp = try Timestamp.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
         return out;
     }
 };
@@ -1543,6 +1671,17 @@ test "ActionResult round-trips exit code and stream digests" {
         .exit_code = 7,
         .stdout_digest = stdout_digest,
         .stderr_digest = stderr_digest,
+        .execution_metadata = .{
+            .worker = "worker-1",
+            .worker_start_timestamp = .{ .seconds = 10, .nanos = 11 },
+            .worker_completed_timestamp = .{ .seconds = 12, .nanos = 13 },
+            .input_fetch_start_timestamp = .{ .seconds = 10, .nanos = 20 },
+            .input_fetch_completed_timestamp = .{ .seconds = 10, .nanos = 30 },
+            .execution_start_timestamp = .{ .seconds = 10, .nanos = 40 },
+            .execution_completed_timestamp = .{ .seconds = 11, .nanos = 50 },
+            .output_upload_start_timestamp = .{ .seconds = 11, .nanos = 60 },
+            .output_upload_completed_timestamp = .{ .seconds = 12, .nanos = 70 },
+        },
     };
 
     const encoded = try encodeAlloc(std.testing.allocator, result);
@@ -1561,6 +1700,9 @@ test "ActionResult round-trips exit code and stream digests" {
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));
+    try std.testing.expectEqualStrings("worker-1", decoded.execution_metadata.?.worker);
+    try std.testing.expectEqual(@as(i64, 10), decoded.execution_metadata.?.worker_start_timestamp.?.seconds);
+    try std.testing.expectEqual(@as(i32, 70), decoded.execution_metadata.?.output_upload_completed_timestamp.?.nanos);
 }
 
 test "Operation carries packed ExecuteResponse" {

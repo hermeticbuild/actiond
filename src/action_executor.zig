@@ -25,6 +25,7 @@ pub const Error = error{
 };
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
+const worker_name = "actiond";
 
 pub const ExecuteOptions = struct {
     runtime_root_path: ?[]const u8 = null,
@@ -70,6 +71,11 @@ pub fn executeActionWithOptions(
     action_digest: cas.Digest,
     options: ExecuteOptions,
 ) !action_runner.Outcome {
+    const worker_start_wall = timestampNow(io);
+    const input_fetch_start_wall = worker_start_wall;
+    const total_start = std.Io.Clock.awake.now(io);
+    const input_fetch_start = total_start;
+
     const action_bytes = store.readAlloc(io, allocator, action_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingActionBlob,
         else => return err,
@@ -165,6 +171,10 @@ pub fn executeActionWithOptions(
         try appendLibcRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, libc, &bind_mounts);
     }
 
+    const input_fetch_completed_wall = timestampNow(io);
+    const input_fetch_completed = std.Io.Clock.awake.now(io);
+    const execution_start_wall = timestampNow(io);
+    const execution_start = std.Io.Clock.awake.now(io);
     var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, .{
         .chroot_dir = work_root_path,
         .chroot_cwd = chroot_cwd,
@@ -172,7 +182,41 @@ pub fn executeActionWithOptions(
         .cgroup_limits = action_runner.CgroupLimits.fromPlatform(action.platform),
     });
     errdefer outcome.deinit(allocator);
+    const execution_completed_wall = timestampNow(io);
+    const execution_completed = std.Io.Clock.awake.now(io);
+    const output_upload_start_wall = timestampNow(io);
+    const output_upload_start = std.Io.Clock.awake.now(io);
     try collectOutputFiles(io, allocator, store, exec_root_dir, command, &outcome);
+    const output_upload_completed_wall = timestampNow(io);
+    const output_upload_completed = std.Io.Clock.awake.now(io);
+
+    outcome.execution_metadata = .{
+        .worker = worker_name,
+        .queued_timestamp = worker_start_wall,
+        .worker_start_timestamp = worker_start_wall,
+        .worker_completed_timestamp = output_upload_completed_wall,
+        .input_fetch_start_timestamp = input_fetch_start_wall,
+        .input_fetch_completed_timestamp = input_fetch_completed_wall,
+        .execution_start_timestamp = execution_start_wall,
+        .execution_completed_timestamp = execution_completed_wall,
+        .output_upload_start_timestamp = output_upload_start_wall,
+        .output_upload_completed_timestamp = output_upload_completed_wall,
+    };
+    logActionTiming(
+        action_digest,
+        total_start,
+        input_fetch_start,
+        input_fetch_completed,
+        execution_start,
+        execution_completed,
+        output_upload_start,
+        output_upload_completed,
+        inputs.items.len,
+        directory_inputs.items.len,
+        bind_mounts.items.len,
+        outcome.output_files.len,
+        outcome.output_directories.len,
+    );
     return outcome;
 }
 
@@ -189,6 +233,7 @@ pub fn actionResultFromOutcome(
         },
         .stdout_digest = if (outcome.stdout_digest) |digest| digest.toReapi(stdout_hash) else null,
         .stderr_digest = if (outcome.stderr_digest) |digest| digest.toReapi(stderr_hash) else null,
+        .execution_metadata = outcome.execution_metadata,
     };
 }
 
@@ -345,6 +390,7 @@ pub fn actionResultFromOutcomeOwned(
             },
             .stdout_digest = if (outcome.stdout_digest) |digest| try appendDigest(allocator, &hash_strings, digest) else null,
             .stderr_digest = if (outcome.stderr_digest) |digest| try appendDigest(allocator, &hash_strings, digest) else null,
+            .execution_metadata = outcome.execution_metadata,
         },
         .output_files = output_files,
         .output_directories = output_directories,
@@ -365,6 +411,57 @@ fn appendDigest(
         .hash = owned_hash,
         .size_bytes = @intCast(digest.size_bytes),
     };
+}
+
+fn timestampNow(io: std.Io) reapi.Timestamp {
+    return timestampFromIo(std.Io.Clock.real.now(io));
+}
+
+fn timestampFromIo(timestamp: std.Io.Timestamp) reapi.Timestamp {
+    const seconds = @divTrunc(timestamp.nanoseconds, std.time.ns_per_s);
+    const nanos = timestamp.nanoseconds - seconds * std.time.ns_per_s;
+    return .{
+        .seconds = @intCast(seconds),
+        .nanos = @intCast(nanos),
+    };
+}
+
+fn elapsedNs(start: std.Io.Timestamp, end: std.Io.Timestamp) i96 {
+    return start.durationTo(end).nanoseconds;
+}
+
+fn logActionTiming(
+    action_digest: cas.Digest,
+    total_start: std.Io.Timestamp,
+    input_fetch_start: std.Io.Timestamp,
+    input_fetch_completed: std.Io.Timestamp,
+    execution_start: std.Io.Timestamp,
+    execution_completed: std.Io.Timestamp,
+    output_upload_start: std.Io.Timestamp,
+    output_upload_completed: std.Io.Timestamp,
+    file_inputs: usize,
+    directory_inputs: usize,
+    bind_mounts: usize,
+    output_files: usize,
+    output_directories: usize,
+) void {
+    var hash: [64]u8 = undefined;
+    std.log.info(
+        "execute timing {s}/{d}: total_ns={d} input_fetch_ns={d} execution_ns={d} output_upload_ns={d} file_inputs={d} directory_inputs={d} bind_mounts={d} output_files={d} output_directories={d}",
+        .{
+            action_digest.formatHex(&hash),
+            action_digest.size_bytes,
+            elapsedNs(total_start, output_upload_completed),
+            elapsedNs(input_fetch_start, input_fetch_completed),
+            elapsedNs(execution_start, execution_completed),
+            elapsedNs(output_upload_start, output_upload_completed),
+            file_inputs,
+            directory_inputs,
+            bind_mounts,
+            output_files,
+            output_directories,
+        },
+    );
 }
 
 fn collectOutputFiles(
