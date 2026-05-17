@@ -6,7 +6,6 @@ const cas = @import("cas.zig");
 const execroot = @import("execroot.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
-const tree_service = @import("tree_service.zig");
 
 pub const Error = error{
     MissingActionBlob,
@@ -492,9 +491,10 @@ fn collectOutputDirectoryWithStat(
 ) !void {
     var dir = try work_root.openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
-    const root_digest = try putDirectoryTree(io, allocator, store, dir);
-    try materializeOutputTreeDirectory(io, store, work_root, path, root_digest);
-    const tree_digest = try putTreeProto(io, allocator, store, root_digest);
+    var tree = OutputTreeBuilder{};
+    defer tree.deinit(allocator);
+    _ = try putOutputDirectoryTree(io, allocator, store, dir, &tree, true);
+    const tree_digest = try tree.putTreeProto(io, allocator, store);
 
     const path_copy = try allocator.dupe(u8, path);
     errdefer allocator.free(path_copy);
@@ -502,95 +502,6 @@ fn collectOutputDirectoryWithStat(
         .path = path_copy,
         .tree_digest = tree_digest,
     });
-}
-
-fn putTreeProto(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    root_digest: cas.Digest,
-) !cas.Digest {
-    var root_hash: [64]u8 = undefined;
-    var tree = try tree_service.getTree(io, allocator, store, .{
-        .root_digest = root_digest.toReapi(&root_hash),
-    });
-    defer tree.deinit(allocator);
-
-    return try putProto(io, allocator, store, reapi.Tree{
-        .root = tree.response.directories[0],
-        .children = tree.response.directories[1..],
-    });
-}
-
-fn materializeOutputTreeDirectory(
-    io: std.Io,
-    store: cas.Store,
-    work_root: std.Io.Dir,
-    output_path: []const u8,
-    root_digest: cas.Digest,
-) !void {
-    var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
-    const tree_path = cas.treeSubPath(root_digest, &tree_path_buffer);
-    const stat = store.root.statFile(io, tree_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => return err,
-    };
-    if (stat) |value| {
-        if (value.kind == .directory) return;
-        return error.UnsupportedOutputDirectoryEntry;
-    }
-
-    try store.root.createDirPath(io, tree_path);
-    var src = try work_root.openDir(io, output_path, .{ .iterate = true });
-    defer src.close(io);
-    var dest = try store.root.openDir(io, tree_path, .{ .iterate = true });
-    defer dest.close(io);
-    try copyDirectoryContents(io, src, dest);
-}
-
-fn copyDirectoryContents(
-    io: std.Io,
-    src: std.Io.Dir,
-    dest: std.Io.Dir,
-) !void {
-    var it = src.iterate();
-    while (try it.next(io)) |entry| {
-        switch (entry.kind) {
-            .file => try copyFile(io, src, dest, entry.name),
-            .directory => {
-                try dest.createDirPath(io, entry.name);
-                var src_child = try src.openDir(io, entry.name, .{ .iterate = true });
-                defer src_child.close(io);
-                var dest_child = try dest.openDir(io, entry.name, .{ .iterate = true });
-                defer dest_child.close(io);
-                try copyDirectoryContents(io, src_child, dest_child);
-            },
-            else => return error.UnsupportedOutputDirectoryEntry,
-        }
-    }
-}
-
-fn copyFile(
-    io: std.Io,
-    src_dir: std.Io.Dir,
-    dest_dir: std.Io.Dir,
-    name: []const u8,
-) !void {
-    const stat = try src_dir.statFile(io, name, .{});
-    var src = try src_dir.openFile(io, name, .{});
-    defer src.close(io);
-    var dest = try dest_dir.createFile(io, name, .{
-        .truncate = true,
-        .permissions = if (isExecutable(stat)) .executable_file else .default_file,
-    });
-    defer dest.close(io);
-
-    var buffer: [128 * 1024]u8 = undefined;
-    while (true) {
-        const n = try readFd(src.handle, &buffer);
-        if (n == 0) break;
-        try writeFdAll(dest.handle, buffer[0..n]);
-    }
 }
 
 fn prepareOutputParents(
@@ -625,11 +536,61 @@ const DirectoryEntry = struct {
     kind: std.Io.File.Kind,
 };
 
-fn putDirectoryTree(
+const OutputTreeBuilder = struct {
+    root: ?reapi.Directory = null,
+    children: std.ArrayListUnmanaged(reapi.Directory) = .empty,
+    strings: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *OutputTreeBuilder, allocator: std.mem.Allocator) void {
+        if (self.root) |*root| root.deinit(allocator);
+        for (self.children.items) |*child| child.deinit(allocator);
+        self.children.deinit(allocator);
+        for (self.strings.items) |value| allocator.free(value);
+        self.strings.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn dupe(self: *OutputTreeBuilder, allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+        const owned = try allocator.dupe(u8, value);
+        errdefer allocator.free(owned);
+        try self.strings.append(allocator, owned);
+        return owned;
+    }
+
+    fn appendDigest(
+        self: *OutputTreeBuilder,
+        allocator: std.mem.Allocator,
+        digest: cas.Digest,
+    ) !reapi.Digest {
+        var buffer: [64]u8 = undefined;
+        const owned_hash = try self.dupe(allocator, digest.formatHex(&buffer));
+        return .{
+            .hash = owned_hash,
+            .size_bytes = @intCast(digest.size_bytes),
+        };
+    }
+
+    fn putTreeProto(
+        self: *OutputTreeBuilder,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        store: cas.Store,
+    ) !cas.Digest {
+        const root = self.root orelse return error.MissingRootDigest;
+        return try putProto(io, allocator, store, reapi.Tree{
+            .root = root,
+            .children = self.children.items,
+        });
+    }
+};
+
+fn putOutputDirectoryTree(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
     dir: std.Io.Dir,
+    tree: *OutputTreeBuilder,
+    is_root: bool,
 ) !cas.Digest {
     var entries: std.ArrayListUnmanaged(DirectoryEntry) = .empty;
     defer {
@@ -652,43 +613,58 @@ fn putDirectoryTree(
     }.lessThan);
 
     var files: std.ArrayListUnmanaged(reapi.FileNode) = .empty;
-    defer files.deinit(allocator);
+    errdefer files.deinit(allocator);
     var directories: std.ArrayListUnmanaged(reapi.DirectoryNode) = .empty;
-    defer directories.deinit(allocator);
-    var hash_strings: std.ArrayListUnmanaged([]u8) = .empty;
-    defer {
-        for (hash_strings.items) |hash| allocator.free(hash);
-        hash_strings.deinit(allocator);
-    }
+    errdefer directories.deinit(allocator);
 
     for (entries.items) |entry| {
+        try validateEntryName(entry.name);
         switch (entry.kind) {
             .file => {
                 const stat = try dir.statFile(io, entry.name, .{});
                 const digest = try store.putFile(io, dir, entry.name);
                 try files.append(allocator, .{
-                    .name = entry.name,
-                    .digest = try appendDigest(allocator, &hash_strings, digest),
+                    .name = try tree.dupe(allocator, entry.name),
+                    .digest = try tree.appendDigest(allocator, digest),
                     .is_executable = isExecutable(stat),
                 });
             },
             .directory => {
                 var child = try dir.openDir(io, entry.name, .{ .iterate = true });
                 defer child.close(io);
-                const digest = try putDirectoryTree(io, allocator, store, child);
+                const digest = try putOutputDirectoryTree(io, allocator, store, child, tree, false);
                 try directories.append(allocator, .{
-                    .name = entry.name,
-                    .digest = try appendDigest(allocator, &hash_strings, digest),
+                    .name = try tree.dupe(allocator, entry.name),
+                    .digest = try tree.appendDigest(allocator, digest),
                 });
             },
             else => return error.UnsupportedOutputDirectoryEntry,
         }
     }
 
-    return try putProto(io, allocator, store, reapi.Directory{
-        .files = files.items,
-        .directories = directories.items,
-    });
+    const file_slice = try files.toOwnedSlice(allocator);
+    var file_slice_owned = true;
+    errdefer if (file_slice_owned) allocator.free(file_slice);
+    const directory_slice = try directories.toOwnedSlice(allocator);
+    var directory_slice_owned = true;
+    errdefer if (directory_slice_owned) allocator.free(directory_slice);
+    var directory = reapi.Directory{
+        .files = file_slice,
+        .directories = directory_slice,
+    };
+    file_slice_owned = false;
+    directory_slice_owned = false;
+    var directory_owned = true;
+    errdefer if (directory_owned) directory.deinit(allocator);
+
+    const digest = try putProto(io, allocator, store, directory);
+    if (is_root) {
+        tree.root = directory;
+    } else {
+        try tree.children.append(allocator, directory);
+    }
+    directory_owned = false;
+    return digest;
 }
 
 fn collectInputs(
@@ -769,33 +745,6 @@ fn putProto(
     const bytes = try reapi.encodeAlloc(allocator, value);
     defer allocator.free(bytes);
     return try store.putBytes(io, bytes);
-}
-
-fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
-    while (true) {
-        const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-    }
-}
-
-fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const rc = std.posix.system.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {
-                const n: usize = @intCast(rc);
-                if (n == 0) return error.WriteFailed;
-                offset += n;
-            },
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-    }
 }
 
 test "libc runtime platform property accepts pinned runtimes" {
@@ -989,24 +938,38 @@ test "collectOutputFiles uploads requested output files and directories" {
     const tree_bytes = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_directories[0].tree_digest);
     defer std.testing.allocator.free(tree_bytes);
     var tree_reader = protobuf.Reader.init(tree_bytes);
+    var root_directory: ?reapi.Directory = null;
+    defer if (root_directory) |*directory| directory.deinit(std.testing.allocator);
+    var child_directories: std.ArrayListUnmanaged(reapi.Directory) = .empty;
+    defer {
+        for (child_directories.items) |*directory| directory.deinit(std.testing.allocator);
+        child_directories.deinit(std.testing.allocator);
+    }
     while (try tree_reader.next()) |tag| switch (tag.field_number) {
         1 => {
             var nested = try tree_reader.readMessage();
-            var directory = try reapi.Directory.decodeOwned(std.testing.allocator, &nested);
-            defer directory.deinit(std.testing.allocator);
-            try std.testing.expectEqual(@as(usize, 1), directory.directories.len);
-            try std.testing.expectEqualStrings("sub", directory.directories[0].name);
+            root_directory = try reapi.Directory.decodeOwned(std.testing.allocator, &nested);
+        },
+        2 => {
+            var nested = try tree_reader.readMessage();
+            try child_directories.append(std.testing.allocator, try reapi.Directory.decodeOwned(std.testing.allocator, &nested));
         },
         else => try tree_reader.skipField(tag.wire_type),
     };
 
-    var tree_dir = try work_dir.openDir(std.testing.io, "tree", .{ .iterate = true });
-    defer tree_dir.close(std.testing.io);
-    const root_digest = try putDirectoryTree(std.testing.io, std.testing.allocator, store, tree_dir);
-    var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
-    const materialized_tree = cas.treeSubPath(root_digest, &tree_path_buffer);
-    const materialized_stat = try cas_dir.statFile(std.testing.io, materialized_tree, .{});
-    try std.testing.expectEqual(std.Io.File.Kind.directory, materialized_stat.kind);
+    const root = root_directory orelse return error.MissingRootDigest;
+    try std.testing.expectEqual(@as(usize, 1), root.directories.len);
+    try std.testing.expectEqualStrings("sub", root.directories[0].name);
+    try std.testing.expectEqual(@as(usize, 1), child_directories.items.len);
+    try std.testing.expectEqual(@as(usize, 1), child_directories.items[0].files.len);
+    try std.testing.expectEqualStrings("file.txt", child_directories.items[0].files[0].name);
+    const child_file_digest = try cas.Digest.fromReapi(child_directories.items[0].files[0].digest orelse return error.MissingFileDigest);
+    const child_file = try store.readAlloc(std.testing.io, std.testing.allocator, child_file_digest);
+    defer std.testing.allocator.free(child_file);
+    try std.testing.expectEqualStrings("leaf", child_file);
+
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, root);
+    try std.testing.expect(!try store.hasTree(std.testing.io, root_digest));
 
     var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
     defer result.deinit(std.testing.allocator);
