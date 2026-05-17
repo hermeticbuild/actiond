@@ -10,6 +10,7 @@
  */
 
 #include <linux/cred.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/highmem.h>
@@ -32,6 +33,8 @@
 #define ACTIONDFS_MAGIC 0x41444653
 #define ACTIONDFS_MAX_DIRECTORY_PROTO_SIZE (64U * 1024U * 1024U)
 #define ACTIONDFS_DIR_MODE 0777
+#define ACTIONDFS_STALE_RETRY_ATTEMPTS 128
+#define ACTIONDFS_STALE_RETRY_MS 2
 
 struct actiondfs_node {
 	char *name;
@@ -40,6 +43,8 @@ struct actiondfs_node {
 	umode_t mode;
 	u64 size;
 	char hash[65];
+	struct file *blob_file;
+	struct mutex blob_lock;
 	bool loaded;
 	struct actiondfs_node *parent;
 	struct actiondfs_node *children;
@@ -87,6 +92,8 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 		child = next;
 	}
 
+	if (node->blob_file)
+		filp_close(node->blob_file, NULL);
 	kfree(node->name);
 	kfree(node);
 }
@@ -112,6 +119,7 @@ static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info 
 	node->ino = ++sbi->next_ino;
 	node->mode = mode;
 	node->loaded = true;
+	mutex_init(&node->blob_lock);
 	return node;
 }
 
@@ -254,6 +262,75 @@ static int actiondfs_valid_hash(const char *hash)
 			return -EINVAL;
 	}
 	return 0;
+}
+
+static bool actiondfs_retry_stale(int err, unsigned int *attempts)
+{
+	if (err != -ESTALE || *attempts >= ACTIONDFS_STALE_RETRY_ATTEMPTS)
+		return false;
+	(*attempts)++;
+	msleep(ACTIONDFS_STALE_RETRY_MS);
+	return true;
+}
+
+static struct file *actiondfs_open_cas_blob(struct actiondfs_sb_info *sbi,
+					    const char *hash)
+{
+	unsigned int stale_attempts = 0;
+	struct file *file;
+	int err;
+
+	while (true) {
+		file = file_open_root(&sbi->cas_path, hash, O_RDONLY, 0);
+		if (!IS_ERR(file))
+			return file;
+
+		err = PTR_ERR(file);
+		if (!actiondfs_retry_stale(err, &stale_attempts))
+			return file;
+	}
+}
+
+static void actiondfs_drop_node_blob(struct actiondfs_node *node)
+{
+	struct file *file = NULL;
+
+	mutex_lock(&node->blob_lock);
+	if (node->blob_file) {
+		file = node->blob_file;
+		node->blob_file = NULL;
+	}
+	mutex_unlock(&node->blob_lock);
+
+	if (file)
+		filp_close(file, NULL);
+}
+
+static struct file *actiondfs_get_node_blob(struct actiondfs_sb_info *sbi,
+					    struct actiondfs_node *node)
+{
+	struct file *file;
+	int err;
+
+	err = actiondfs_valid_hash(node->hash);
+	if (err)
+		return ERR_PTR(err);
+
+	mutex_lock(&node->blob_lock);
+	file = node->blob_file;
+	if (file) {
+		get_file(file);
+		mutex_unlock(&node->blob_lock);
+		return file;
+	}
+
+	file = actiondfs_open_cas_blob(sbi, node->hash);
+	if (!IS_ERR(file)) {
+		node->blob_file = file;
+		get_file(file);
+	}
+	mutex_unlock(&node->blob_lock);
+	return file;
 }
 
 static int actiondfs_pb_read_varint(const u8 *data, size_t len,
@@ -498,10 +575,10 @@ static int actiondfs_parse_reapi_directory_node(struct actiondfs_sb_info *sbi,
 						      digest.hash, false));
 }
 
-static int actiondfs_read_cas_blob(struct actiondfs_sb_info *sbi,
-				   const char *hash,
-				   u8 **out,
-				   size_t *out_len)
+static int actiondfs_read_cas_blob_once(struct actiondfs_sb_info *sbi,
+					const char *hash,
+					u8 **out,
+					size_t *out_len)
 {
 	struct file *file;
 	loff_t pos = 0;
@@ -514,7 +591,7 @@ static int actiondfs_read_cas_blob(struct actiondfs_sb_info *sbi,
 	if (err)
 		return err;
 
-	file = file_open_root(&sbi->cas_path, hash, O_RDONLY, 0);
+	file = actiondfs_open_cas_blob(sbi, hash);
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
@@ -544,6 +621,21 @@ static int actiondfs_read_cas_blob(struct actiondfs_sb_info *sbi,
 	*out = buffer;
 	*out_len = (size_t)size;
 	return 0;
+}
+
+static int actiondfs_read_cas_blob(struct actiondfs_sb_info *sbi,
+				   const char *hash,
+				   u8 **out,
+				   size_t *out_len)
+{
+	unsigned int stale_attempts = 0;
+	int err;
+
+	while (true) {
+		err = actiondfs_read_cas_blob_once(sbi, hash, out, out_len);
+		if (!actiondfs_retry_stale(err, &stale_attempts))
+			return err;
+	}
 }
 
 static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
@@ -777,24 +869,32 @@ static int actiondfs_read_folio(struct file *file, struct folio *folio)
 		wanted = min_t(u64, folio_len, node->size - offset);
 
 	if (wanted) {
-		loff_t pos = offset;
+		unsigned int stale_attempts = 0;
 
-		blob = file_open_root(&sbi->cas_path, node->hash, O_RDONLY, 0);
-		if (IS_ERR(blob)) {
-			err = PTR_ERR(blob);
-			blob = NULL;
-			goto out;
-		}
+		do {
+			loff_t pos = offset;
 
-		nread = kernel_read(blob, addr, wanted, &pos);
-		if (nread < 0) {
-			err = nread;
+			blob = actiondfs_get_node_blob(sbi, node);
+			if (IS_ERR(blob)) {
+				err = PTR_ERR(blob);
+				blob = NULL;
+			} else {
+				nread = kernel_read(blob, addr, wanted, &pos);
+				if (nread < 0)
+					err = nread;
+				else if (nread != wanted)
+					err = -EIO;
+				else
+					err = 0;
+				filp_close(blob, NULL);
+				blob = NULL;
+			}
+			if (err == -ESTALE)
+				actiondfs_drop_node_blob(node);
+		} while (actiondfs_retry_stale(err, &stale_attempts));
+
+		if (err)
 			goto out;
-		}
-		if (nread != wanted) {
-			err = -EIO;
-			goto out;
-		}
 	}
 
 	folio_mark_uptodate(folio);
