@@ -37,10 +37,11 @@ ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
 
 Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.
 
-The VM guest mounts the host CAS share read-only at `/cas-ro` and uses a tmpfs
-overlay at `/cas`. VM e2e therefore validates API-visible execution behavior
-for one running VM; it does not prove that VM-written blobs persisted into the
-host CAS directory.
+The VM guest mounts the host CAS share read-only at `/host-cas` and uses a
+tmpfs overlay at `/cas` for guest-side writes. actiondfs reads input blobs from
+`/host-cas/blobs/sha256`; `/cas` is for guest-produced blobs that the host
+imports and then deletes from the guest staging upperdir. VM e2e therefore
+validates API-visible execution behavior for one running VM.
 
 ## Stress Workspace
 
@@ -78,3 +79,35 @@ test/parse_timings.py /path/to/actiond.log \
 Keep `test/STRESS_TIMINGS.md` current whenever the stress workload, executor
 timing instrumentation, execroot materialization, VM proxying, or output import
 path changes.
+
+## LLVM Smoke
+
+For a more realistic VM remote-execution smoke than the small local stress
+workspace, run `@llvm-project//llvm:llvm-tblgen` from
+`/Users/dzbarsky/bootstrapped2` against `darwin-actiond serve-vm`. Do not use
+`//runtimes:resource_directory` as the default smoke; it is too small and less
+representative.
+
+Use actiond as both executor and cache, keep BuildBuddy BES from the
+`bootstrapped2` `.bazelrc`, and disable remote cache compression because actiond
+does not support it yet:
+
+```bash
+cd /Users/dzbarsky/bootstrapped2
+bazel clean --expunge
+bazel build --config=prebuilt @llvm-project//llvm:llvm-tblgen \
+  --platforms=//platforms:linux_arm64 \
+  --host_platform=//platforms:linux_arm64 \
+  --remote_executor=grpc://127.0.0.1:8998 \
+  --remote_cache=grpc://127.0.0.1:8998 \
+  --experimental_remote_downloader= \
+  --experimental_remote_downloader_local_fallback=true \
+  --noremote_cache_compression \
+  --noremote_accept_cached \
+  --remote_local_fallback=false \
+  --remote_upload_local_results=false \
+  --disk_cache= \
+  --spawn_strategy=remote \
+  --genrule_strategy=remote \
+  --jobs=8
+```
