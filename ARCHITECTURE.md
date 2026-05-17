@@ -53,7 +53,8 @@ The Darwin standalone binary embeds compressed payloads in Mach-O sections:
 At runtime, boot artifacts are extracted under the worker root. Zstd payloads
 are inflated to content-addressed files in `root/boot/` before
 Virtualization.framework is called. The runtime SquashFS remains compressed and
-is attached read-only as a virtio block device.
+is staged under the worker root, shared read-only with VirtioFS, and loop-mounted
+inside the guest.
 
 ## VM Shape
 
@@ -64,7 +65,7 @@ The VM is intentionally small:
 - no network devices
 - virtio-vsock control channel
 - virtiofs host CAS share
-- read-only virtio block device for runtimes
+- read-only virtiofs runtime image share
 - no SSH, package manager, systemd, graphics, audio, or user login
 
 The VM is a long-lived worker. Per-action isolation happens inside Linux with a
@@ -73,7 +74,8 @@ a VM per action.
 
 Each action network namespace brings up only `lo`. Actions can use local TCP
 listeners on `127.0.0.1` or `0.0.0.0`, but no host or external network interface
-is attached.
+is attached. The runtime image includes a canonical `/etc/hosts` so `localhost`
+resolves to loopback inside runtime-backed actions.
 
 ## Why the Kernel Is Inflated Before Boot
 
@@ -245,13 +247,15 @@ and avoids direct writes to CAS inputs.
 macOS only exposes:
 
 - read-only virtiofs CAS directory
-- read-only runtime block device
+- read-only virtiofs directory containing `runtimes.sqfs`
 - virtio-vsock control channel
 - serial stderr for logs
 
 There is no guest network device, and each action still gets its own Linux
 network namespace inside the VM with only loopback enabled. Root inside the
-guest is not host root.
+guest is not host root. The guest loop-mounts the shared SquashFS image at
+`/runtimes`, so runtime payloads stay compressed and separate from the
+initramfs.
 
 ## Cgroups
 
@@ -293,6 +297,12 @@ into the chroot:
 - `/usr/lib`
 - `/etc`
 
+Runtime-backed actions run with their execroot at `/workspace`. That lets
+actiond mount runtime-owned root paths such as `/etc` without hiding user input
+paths that happen to start with `etc/`. Actions that do not request a libc
+runtime still receive the runtime image's common `/etc` package for localhost
+resolution.
+
 The glibc packages are extracted from Ubuntu `libc6` `.deb`s. The repo rule
 removes documentation, locales, gconv modules, lintian metadata, and package
 scratch directories. The current distro-provided ELF files are already stripped;
@@ -325,7 +335,8 @@ packing, and zstd packaging.
 End-to-end tests use `tools/e2e.sh` and the standalone `test/` workspace. The
 stress action graph covers bare files, source directories, tree artifact inputs,
 output directories, and action-level probes that fail if the sandbox can open an
-outbound TCP path or cannot use loopback TCP.
+outbound TCP path, cannot use loopback TCP, or cannot see the runtime-provided
+`/etc/hosts` localhost mapping.
 
 Useful commands:
 

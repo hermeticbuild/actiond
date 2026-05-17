@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     const actiond = try std.Io.Dir.cwd().readFileAlloc(io, actiond_path, arena, .limited(max_input_file_bytes));
 
     var entries: std.ArrayListUnmanaged(Entry) = .empty;
-    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "host-cas", "cas", "modules", "runtimes" }) |path| {
+    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "host-cas", "cas", "modules", "runtime-image", "runtimes" }) |path| {
         try addDir(arena, &entries, path);
     }
     try addCharDevice(arena, &entries, "dev/console", 5, 1);

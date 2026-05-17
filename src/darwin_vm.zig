@@ -27,16 +27,16 @@ pub const Machine = struct {
     connect_timeout_ms: u32,
     connect_attempt_timeout_ms: u32,
 
-    pub fn start(allocator: std.mem.Allocator, options: Options) !Machine {
+    pub fn start(io: std.Io, allocator: std.mem.Allocator, options: Options) !Machine {
         if (comptime builtin.os.tag != .macos) return error.UnsupportedHost;
 
-        const kernel_path = try allocator.dupeZ(u8, options.kernel_path);
+        const kernel_path = try absolutePathZ(io, allocator, options.kernel_path);
         defer allocator.free(kernel_path);
-        const initramfs_path = try allocator.dupeZ(u8, options.initramfs_path);
+        const initramfs_path = try absolutePathZ(io, allocator, options.initramfs_path);
         defer allocator.free(initramfs_path);
-        const runtime_image_path = if (options.runtime_image_path) |path| try allocator.dupeZ(u8, path) else null;
+        const runtime_image_path = if (options.runtime_image_path) |path| try absolutePathZ(io, allocator, path) else null;
         defer if (runtime_image_path) |path| allocator.free(path);
-        const cas_path = try allocator.dupeZ(u8, options.cas_path);
+        const cas_path = try absolutePathZ(io, allocator, options.cas_path);
         defer allocator.free(cas_path);
 
         var errbuf: [1024]u8 = [_]u8{0} ** 1024;
@@ -116,6 +116,20 @@ pub const Machine = struct {
     }
 };
 
+fn absolutePathZ(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        return std.Io.Dir.realPathFileAbsoluteAlloc(io, path, allocator) catch allocator.dupeZ(u8, path);
+    }
+
+    if (std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator)) |absolute_path| {
+        return absolute_path;
+    } else |_| {}
+
+    var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.Io.Dir.cwd().realPath(io, &cwd_buffer);
+    return std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cwd_buffer[0..cwd_len], path }, 0);
+}
+
 fn sleepMilliseconds(milliseconds: u32) void {
     var request: std.c.timespec = .{
         .sec = @intCast(milliseconds / std.time.ms_per_s),
@@ -153,7 +167,7 @@ extern fn actiond_vm_release(handle: *anyopaque) void;
 
 test "darwin VM start is macOS-only" {
     if (comptime builtin.os.tag != .macos) {
-        try std.testing.expectError(error.UnsupportedHost, Machine.start(std.testing.allocator, .{
+        try std.testing.expectError(error.UnsupportedHost, Machine.start(std.testing.io, std.testing.allocator, .{
             .kernel_path = "/kernel",
             .initramfs_path = "/initramfs",
             .cas_path = "/cas",

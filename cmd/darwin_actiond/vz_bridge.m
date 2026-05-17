@@ -88,18 +88,29 @@ void *actiond_vm_start(
         VZSingleDirectoryShare *casShare = [[VZSingleDirectoryShare alloc] initWithDirectory:casDirectory];
         VZVirtioFileSystemDeviceConfiguration *casFs = [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"cas"];
         casFs.share = casShare;
+        NSMutableArray<VZDirectorySharingDeviceConfiguration *> *directoryDevices =
+            [NSMutableArray arrayWithObject:casFs];
 
         VZVirtualMachineConfiguration *configuration = [[VZVirtualMachineConfiguration alloc] init];
         configuration.bootLoader = bootLoader;
         configuration.platform = [[VZGenericPlatformConfiguration alloc] init];
         configuration.CPUCount = cpu_count == 0 ? 1 : (NSUInteger)cpu_count;
         configuration.memorySize = (memory_mib == 0 ? 512 : memory_mib) * 1024ULL * 1024ULL;
-        configuration.directorySharingDevices = @[ casFs ];
         configuration.entropyDevices = @[ [[VZVirtioEntropyDeviceConfiguration alloc] init] ];
         configuration.socketDevices = @[ [[VZVirtioSocketDeviceConfiguration alloc] init] ];
         configuration.networkDevices = @[];
         if (runtime_image_path != NULL && runtime_image_path[0] != '\0') {
-            NSURL *runtimeURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:runtime_image_path]];
+            NSString *runtimePath = [NSString stringWithUTF8String:runtime_image_path];
+            NSString *runtimeDirectoryPath = [runtimePath stringByDeletingLastPathComponent];
+            NSURL *runtimeDirectoryURL = [NSURL fileURLWithPath:runtimeDirectoryPath isDirectory:YES];
+            VZSharedDirectory *runtimeDirectory = [[VZSharedDirectory alloc] initWithURL:runtimeDirectoryURL readOnly:YES];
+            VZSingleDirectoryShare *runtimeShare = [[VZSingleDirectoryShare alloc] initWithDirectory:runtimeDirectory];
+            VZVirtioFileSystemDeviceConfiguration *runtimeFs =
+                [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"runtimes"];
+            runtimeFs.share = runtimeShare;
+            [directoryDevices addObject:runtimeFs];
+
+            NSURL *runtimeURL = [NSURL fileURLWithPath:runtimePath];
             NSError *runtimeError = nil;
             VZDiskImageStorageDeviceAttachment *runtimeAttachment =
                 [[VZDiskImageStorageDeviceAttachment alloc] initWithURL:runtimeURL readOnly:YES error:&runtimeError];
@@ -111,6 +122,7 @@ void *actiond_vm_start(
                 [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:runtimeAttachment];
             configuration.storageDevices = @[ runtimeBlock ];
         }
+        configuration.directorySharingDevices = directoryDevices;
 
         VZVirtioConsoleDeviceSerialPortConfiguration *serial = [[VZVirtioConsoleDeviceSerialPortConfiguration alloc] init];
         serial.attachment = [[VZFileHandleSerialPortAttachment alloc]
