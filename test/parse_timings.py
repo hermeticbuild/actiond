@@ -287,15 +287,26 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
     lines.extend(runner_rows(timings))
 
     if all(item.directory_inputs == 0 for item in timings):
-        lines.extend(
-            [
-                "",
-                "## Notes",
-                "",
-                "- This run observed `directory_inputs=0` for every action. The stress graph declares tree artifacts, but this execution path expanded them into file inputs rather than using directory bind mounts.",
-                "- Input fetch/materialization dominates this run, so execroot construction remains the next performance target.",
-            ]
-        )
+        if any(item.actiondfs_mounts > 0 for item in timings):
+            lines.extend(
+                [
+                    "",
+                    "## Notes",
+                    "",
+                    "- This run observed `directory_inputs=0` for every action. Actions with `actiondfs_mounts>0` are using the lazy actiondfs input-root path, so their input tree is represented by the mounted REAPI root digest rather than by flattened file or directory counters.",
+                    "- For actiondfs actions, some CAS directory/file read cost moves from input fetch/materialization into the action `process/io` bucket because metadata and pages are loaded lazily.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "## Notes",
+                    "",
+                    "- This run observed `directory_inputs=0` for every action. The stress graph declares tree artifacts, but this execution path expanded them into file inputs rather than using directory bind mounts.",
+                    "- Input fetch/materialization dominates this run, so execroot construction remains the next performance target.",
+                ]
+            )
 
     return "\n".join(lines) + "\n"
 
