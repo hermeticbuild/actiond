@@ -222,7 +222,8 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
         "",
         f"- Generated: `{generated_at}`",
         f"- Mode: `{args.mode}`",
-        f"- Actions parsed: `{len(timings)}`",
+        f"- Execute records parsed: `{len(timings)}`",
+        f"- Unique action digests: `{len({item.digest for item in timings})}`",
         f"- Source log: `{args.log}`",
     ]
     if args.command:

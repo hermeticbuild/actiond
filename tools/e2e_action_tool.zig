@@ -8,9 +8,11 @@ const Options = struct {
     expect_loopback: bool = false,
     expect_localhost_hosts: bool = false,
     scans: std.ArrayListUnmanaged([]const u8) = .empty,
+    extra_out_files: std.ArrayListUnmanaged([]const u8) = .empty,
 
     fn deinit(self: *Options, allocator: std.mem.Allocator) void {
         self.scans.deinit(allocator);
+        self.extra_out_files.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -36,6 +38,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (options.out_file) |path| try writeSummary(io, allocator, cwd, path, value, options.scans.items.len);
     if (options.out_dir) |path| try writeTree(io, allocator, cwd, path, value, options.out_count);
+    for (options.extra_out_files.items, 0..) |path, i| try writeGeneratedFile(io, allocator, cwd, path, value, i);
 }
 
 fn expandArgs(
@@ -80,6 +83,10 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
             i += 1;
             if (i >= args.len) return error.MissingArgumentValue;
             options.out_count = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--out-extra-file")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgumentValue;
+            try options.extra_out_files.append(allocator, args[i]);
         } else if (std.mem.eql(u8, arg, "--scan")) {
             i += 1;
             if (i >= args.len) return error.MissingArgumentValue;
@@ -331,10 +338,7 @@ fn writeSummary(
     try createParentDirs(io, root, path);
     const bytes = try std.fmt.allocPrint(allocator, "inputs={d}\nhash={x}\n", .{ input_count, value });
     defer allocator.free(bytes);
-    try root.writeFile(io, .{
-        .sub_path = path,
-        .data = bytes,
-    });
+    try writeDefaultFile(io, root, path, bytes);
 }
 
 fn writeTree(
@@ -352,11 +356,30 @@ fn writeTree(
         defer allocator.free(child);
         const data = try std.fmt.allocPrint(allocator, "index={d}\nhash={x}\n", .{ i, value +% i });
         defer allocator.free(data);
-        try root.writeFile(io, .{
-            .sub_path = child,
-            .data = data,
-        });
+        try writeDefaultFile(io, root, child, data);
     }
+}
+
+fn writeGeneratedFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: std.Io.Dir,
+    path: []const u8,
+    value: u64,
+    index: usize,
+) !void {
+    try createParentDirs(io, root, path);
+    const data = try std.fmt.allocPrint(allocator, "path={s}\nindex={d}\nhash={x}\n", .{ path, index, value +% index });
+    defer allocator.free(data);
+    try writeDefaultFile(io, root, path, data);
+}
+
+fn writeDefaultFile(io: std.Io, root: std.Io.Dir, path: []const u8, data: []const u8) !void {
+    try root.writeFile(io, .{
+        .sub_path = path,
+        .data = data,
+        .flags = .{ .read = true, .permissions = .default_file },
+    });
 }
 
 fn createParentDirs(io: std.Io, root: std.Io.Dir, path: []const u8) !void {
@@ -377,9 +400,11 @@ fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
 }
 
 test "parseArgs accepts network block check" {
-    var options = try parseArgs(std.testing.allocator, &.{ "--expect-network-blocked", "--expect-loopback", "--expect-localhost-hosts" });
+    var options = try parseArgs(std.testing.allocator, &.{ "--expect-network-blocked", "--expect-loopback", "--expect-localhost-hosts", "--out-extra-file", "out/a.txt" });
     defer options.deinit(std.testing.allocator);
     try std.testing.expect(options.expect_network_blocked);
     try std.testing.expect(options.expect_loopback);
     try std.testing.expect(options.expect_localhost_hosts);
+    try std.testing.expectEqual(@as(usize, 1), options.extra_out_files.items.len);
+    try std.testing.expectEqualStrings("out/a.txt", options.extra_out_files.items[0]);
 }
