@@ -178,6 +178,11 @@ mount namespace mounts:
   lazily from the read-only host CAS mounted at `/host-cas`
 - stock overlayfs at `/workspace`, using per-action upper/work directories
 
+The kernel module also registers `actiondfs_vec`, a linear vector lookup
+variant used only for performance A/B testing. Production VM execution uses the
+canonical `actiondfs` filesystem unless `darwin-actiond serve-vm` is launched
+with `--actiondfs-fstype=actiondfs_vec`.
+
 Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
 inode metadata. CAS blobs remain immutable data files and are not chmodded.
 

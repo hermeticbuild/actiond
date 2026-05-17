@@ -15,6 +15,7 @@ pub const Options = struct {
     initramfs_path: []const u8,
     runtime_image_path: ?[]const u8 = null,
     cas_path: []const u8,
+    actiondfs_fstype: []const u8 = "actiondfs",
     memory_mib: u64 = 512,
     cpu_count: u32 = 2,
     start_timeout_ms: u32 = 30_000,
@@ -38,6 +39,8 @@ pub const Machine = struct {
         defer if (runtime_image_path) |path| allocator.free(path);
         const cas_path = try absolutePathZ(io, allocator, options.cas_path);
         defer allocator.free(cas_path);
+        const actiondfs_fstype = try allocator.dupeZ(u8, options.actiondfs_fstype);
+        defer allocator.free(actiondfs_fstype);
 
         var errbuf: [1024]u8 = [_]u8{0} ** 1024;
         const handle = actiond_vm_start(
@@ -45,6 +48,7 @@ pub const Machine = struct {
             initramfs_path.ptr,
             if (runtime_image_path) |path| path.ptr else null,
             cas_path.ptr,
+            actiondfs_fstype.ptr,
             options.memory_mib,
             options.cpu_count,
             options.start_timeout_ms,
@@ -147,6 +151,7 @@ extern fn actiond_vm_start(
     initramfs_path: [*:0]const u8,
     runtime_image_path: ?[*:0]const u8,
     cas_path: [*:0]const u8,
+    actiondfs_fstype: [*:0]const u8,
     memory_mib: u64,
     cpu_count: u32,
     start_timeout_ms: u32,

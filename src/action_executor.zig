@@ -20,6 +20,7 @@ pub const Error = error{
     OutputParentCreateFailed,
     InvalidDirectoryEntryName,
     UnsupportedLibcRuntime,
+    UnsupportedActiondfsFSType,
     UnsupportedOutputDirectoryEntry,
     UnsupportedRuntimeArch,
 };
@@ -28,6 +29,7 @@ const max_output_file_bytes = 1024 * 1024 * 1024;
 const chroot_execroot_prefix = "/workspace/";
 const worker_name = "actiond";
 const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
+pub const default_actiondfs_fstype = "actiondfs";
 
 pub const RuntimeMountSources = struct {
     lib: ?[:0]const u8 = null,
@@ -69,6 +71,7 @@ pub const RuntimeMountCache = struct {
 pub const ExecuteOptions = struct {
     runtime_root_path: ?[]const u8 = null,
     use_actiondfs: bool = false,
+    actiondfs_fstype: []const u8 = default_actiondfs_fstype,
     cas_blob_root_path: ?[]const u8 = null,
     input_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_blob_root_path: ?[]const u8 = null,
@@ -105,6 +108,8 @@ pub fn prepareExecuteOptions(
     var prepared: PreparedExecuteOptions = .{ .options = base };
     errdefer prepared.deinit(allocator);
 
+    try validateActiondfsFSType(prepared.options.actiondfs_fstype);
+
     if (prepared.options.cas_blob_root_path == null) {
         var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
@@ -123,6 +128,12 @@ pub fn prepareExecuteOptions(
     }
 
     return prepared;
+}
+
+pub fn validateActiondfsFSType(fstype: []const u8) !void {
+    if (std.mem.eql(u8, fstype, "actiondfs")) return;
+    if (std.mem.eql(u8, fstype, "actiondfs_vec")) return;
+    return error.UnsupportedActiondfsFSType;
 }
 
 fn casReadRoots(options: ExecuteOptions) CasReadRoots {
@@ -357,6 +368,7 @@ pub fn executeActionWithOptions(
             work_root_path,
             exec_root_path,
             input_root_digest,
+            options.actiondfs_fstype,
         );
         actiondfs_upper_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.?.mounts[0].upperdir, .{});
         exec_root_dir = actiondfs_upper_dir.?;
@@ -776,6 +788,7 @@ fn commandPath(command: reapi.Command) ?[]const u8 {
 
 const ActiondfsWorkspace = struct {
     base_path: []u8,
+    fstype: [:0]u8,
     lower_target: [:0]u8,
     overlay_target: [:0]u8,
     upperdir: [:0]u8,
@@ -791,11 +804,15 @@ const ActiondfsWorkspace = struct {
         work_root_path: []const u8,
         workspace_path: []const u8,
         input_root_digest: cas.Digest,
+        actiondfs_fstype: []const u8,
     ) !ActiondfsWorkspace {
+        try validateActiondfsFSType(actiondfs_fstype);
         const base_path = try std.fmt.allocPrint(allocator, "{s}.actiondfs", .{work_root_path});
         errdefer allocator.free(base_path);
         try std.Io.Dir.cwd().createDir(io, base_path, .default_dir);
 
+        const fstype = try allocator.dupeZ(u8, actiondfs_fstype);
+        errdefer allocator.free(fstype);
         const lower_path = try std.fmt.allocPrintSentinel(allocator, "{s}/lower", .{base_path}, 0);
         errdefer allocator.free(lower_path);
         const upper_path = try std.fmt.allocPrintSentinel(allocator, "{s}/upper", .{base_path}, 0);
@@ -830,12 +847,14 @@ const ActiondfsWorkspace = struct {
 
         return .{
             .base_path = base_path,
+            .fstype = fstype,
             .lower_target = lower_path,
             .overlay_target = overlay_target,
             .upperdir = upper_path,
             .actiondfs_data = actiondfs_data,
             .overlay_data = overlay_data,
             .mounts = .{.{
+                .fstype = fstype,
                 .lower_target = lower_path,
                 .overlay_target = overlay_target,
                 .upperdir = upper_path,
@@ -851,9 +870,9 @@ const ActiondfsWorkspace = struct {
 
         const linux = std.os.linux;
         const actiondfs_rc = linux.mount(
-            "actiondfs",
+            self.fstype.ptr,
             self.lower_target.ptr,
-            "actiondfs",
+            self.fstype.ptr,
             linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME,
             @intFromPtr(self.actiondfs_data.ptr),
         );
@@ -888,6 +907,7 @@ const ActiondfsWorkspace = struct {
             std.log.warn("failed to remove actiondfs workspace {s}: {s}", .{ self.base_path, @errorName(err) });
         };
         allocator.free(self.base_path);
+        allocator.free(self.fstype);
         allocator.free(self.lower_target);
         allocator.free(self.overlay_target);
         allocator.free(self.upperdir);
@@ -1737,6 +1757,12 @@ test "libc runtime platform property accepts pinned runtimes" {
     try std.testing.expectError(error.UnsupportedLibcRuntime, libcRuntimeFromPlatform(.{
         .properties = &.{.{ .name = "libc", .value = "glibc2.17" }},
     }));
+}
+
+test "validateActiondfsFSType accepts benchmark variants only" {
+    try validateActiondfsFSType("actiondfs");
+    try validateActiondfsFSType("actiondfs_vec");
+    try std.testing.expectError(error.UnsupportedActiondfsFSType, validateActiondfsFSType("tmpfs"));
 }
 
 test "selectExecutableInputCopyPaths keeps only the direct command executable" {

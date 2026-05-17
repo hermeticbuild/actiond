@@ -69,6 +69,17 @@ actiond log survives:
 ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
 ```
 
+To compare the two in-kernel actiondfs lookup implementations back-to-back,
+run:
+
+```bash
+tools/e2e.sh vm-fs-compare
+```
+
+That mode runs the stress workspace once with `actiondfs_vec` and once with
+the canonical `actiondfs` filesystem, keeps both VM logs, and writes parsed
+summaries under the printed comparison directory.
+
 Then update the timing summary next to the stress workspace:
 
 ```bash

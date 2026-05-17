@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zstd = if (builtin.os.tag == .macos) @import("c") else struct {};
 const action_cache = @import("action_cache.zig");
+const action_executor = @import("action_executor.zig");
 const cas = @import("cas.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
@@ -31,6 +32,7 @@ pub const ServeVmOptions = struct {
     kernel: ?[]const u8 = null,
     initramfs: ?[]const u8 = null,
     runtime_image: ?[]const u8 = null,
+    actiondfs_fstype: []const u8 = action_executor.default_actiondfs_fstype,
     memory_mib: u64 = 512,
     cpus: u32 = 2,
     start_timeout_ms: u32 = 30_000,
@@ -78,6 +80,15 @@ pub fn parseServeVmArgs(args: []const []const u8) !ServeVmOptions {
             options.runtime_image = args[i];
         } else if (std.mem.startsWith(u8, arg, "--runtime-image=")) {
             options.runtime_image = arg["--runtime-image=".len..];
+        } else if (std.mem.eql(u8, arg, "--actiondfs-fstype")) {
+            i += 1;
+            if (i >= args.len) return error.MissingServeArgumentValue;
+            try action_executor.validateActiondfsFSType(args[i]);
+            options.actiondfs_fstype = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--actiondfs-fstype=")) {
+            const value = arg["--actiondfs-fstype=".len..];
+            try action_executor.validateActiondfsFSType(value);
+            options.actiondfs_fstype = value;
         } else if (std.mem.eql(u8, arg, "--memory-mib")) {
             i += 1;
             if (i >= args.len) return error.MissingServeArgumentValue;
@@ -169,11 +180,12 @@ pub fn serve(
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas={s}\n", .{
+    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas={s} actiondfs_fstype={s}\n", .{
         boot_kernel_path,
         boot_initramfs_path,
         runtime_image_path orelse "<none>",
         cas_path,
+        options.actiondfs_fstype,
     });
     try stderr.flush();
 
@@ -182,6 +194,7 @@ pub fn serve(
         .initramfs_path = boot_initramfs_path,
         .runtime_image_path = runtime_image_path,
         .cas_path = cas_path,
+        .actiondfs_fstype = options.actiondfs_fstype,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
         .start_timeout_ms = options.start_timeout_ms,
@@ -375,6 +388,7 @@ test "parseServeVmArgs accepts VM flags" {
         "/tmp/Image",
         "--initramfs=/tmp/initramfs.cpio.zst",
         "--runtime-image=/tmp/runtimes.sqfs",
+        "--actiondfs-fstype=actiondfs_vec",
         "--cas",
         "/tmp/actiond-cas",
         "--memory-mib=768",
@@ -390,6 +404,7 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqualStrings("/tmp/Image", options.kernel.?);
     try std.testing.expectEqualStrings("/tmp/initramfs.cpio.zst", options.initramfs.?);
     try std.testing.expectEqualStrings("/tmp/runtimes.sqfs", options.runtime_image.?);
+    try std.testing.expectEqualStrings("actiondfs_vec", options.actiondfs_fstype);
     try std.testing.expectEqualStrings("/tmp/actiond-cas", options.cas.?);
     try std.testing.expectEqual(@as(u64, 768), options.memory_mib);
     try std.testing.expectEqual(@as(u32, 3), options.cpus);
@@ -401,8 +416,10 @@ test "parseServeVmArgs permits embedded VM artifacts" {
     const options = try parseServeVmArgs(&.{});
     try std.testing.expectEqual(@as(?[]const u8, null), options.kernel);
     try std.testing.expectEqual(@as(?[]const u8, null), options.initramfs);
+    try std.testing.expectEqualStrings(action_executor.default_actiondfs_fstype, options.actiondfs_fstype);
     try std.testing.expectError(error.MissingServeArgumentValue, parseServeVmArgs(&.{ "--kernel", "/tmp/Image", "--initramfs" }));
     try std.testing.expectError(error.UnknownServeArgument, parseServeVmArgs(&.{ "--kernel=/tmp/Image", "--initramfs=/tmp/initramfs", "--bad" }));
+    try std.testing.expectError(error.UnsupportedActiondfsFSType, parseServeVmArgs(&.{ "--actiondfs-fstype=badfs" }));
 }
 
 test "prepareBootInitramfs leaves raw initramfs paths unchanged" {

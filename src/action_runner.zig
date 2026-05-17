@@ -58,6 +58,7 @@ pub const BindMount = struct {
 };
 
 pub const ActiondfsOverlayMount = struct {
+    fstype: [:0]u8,
     lower_target: [:0]u8,
     overlay_target: [:0]u8,
     upperdir: [:0]u8,
@@ -520,9 +521,9 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
 fn childMountActiondfsOverlay(mount: ActiondfsOverlayMount) void {
     const linux = std.os.linux;
     childSyscallName(linux.mount(
-        "actiondfs",
+        mount.fstype.ptr,
         mount.lower_target.ptr,
-        "actiondfs",
+        mount.fstype.ptr,
         linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME,
         @intFromPtr(mount.actiondfs_data.ptr),
     ), "mount_actiondfs");
