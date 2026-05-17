@@ -44,6 +44,7 @@ pub const CgroupLimits = struct {
 pub const RunOptions = struct {
     chroot_dir: []const u8,
     chroot_cwd: []const u8 = "/",
+    exec_path_override: ?[]const u8 = null,
     bind_mounts: []const BindMount = &.{},
     actiondfs_mounts: []const ActiondfsOverlayMount = &.{},
     cgroup_limits: CgroupLimits = .{},
@@ -331,7 +332,10 @@ fn runCommandChroot(
         try prepareChrootWritableDirs(io, allocator, mount.upperdir, options.sandbox_uid, options.sandbox_gid);
     }
 
-    const exec_path = try resolveExecPath(io, allocator, command, chroot_dir);
+    const exec_path = if (options.exec_path_override) |path|
+        try allocator.dupe(u8, path)
+    else
+        try resolveExecPath(io, allocator, command, chroot_dir);
     defer allocator.free(exec_path);
 
     const chroot_z = try allocator.dupeZ(u8, chroot_dir);

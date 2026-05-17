@@ -15,6 +15,8 @@ pub const Error = error{
     UnsupportedHost,
 };
 
+pub const host_cas_blob_root_path = "/host-cas/blobs/sha256";
+
 pub fn run(io: std.Io) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
@@ -35,6 +37,7 @@ pub fn run(io: std.Io) !void {
 
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
+        .cas_blob_root_path = host_cas_blob_root_path,
     });
 
     const server: reapi_dispatch.Server = .{
@@ -317,6 +320,10 @@ test "guest worker is Linux-only" {
     if (comptime builtin.os.tag != .linux) {
         try std.testing.expectError(error.UnsupportedHost, run(std.testing.io));
     }
+}
+
+test "guest worker points actiondfs at raw read-only host CAS" {
+    try std.testing.expectEqualStrings("/host-cas/blobs/sha256", host_cas_blob_root_path);
 }
 
 fn encodeGrpcRequest(allocator: std.mem.Allocator, value: anytype) ![]u8 {
