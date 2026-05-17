@@ -47,8 +47,9 @@ struct actiondfs_node {
 	struct mutex blob_lock;
 	bool loaded;
 	struct actiondfs_node *parent;
-	struct actiondfs_node *children;
-	struct actiondfs_node *next;
+	struct actiondfs_node **children;
+	size_t child_count;
+	size_t child_capacity;
 };
 
 struct actiondfs_sb_info {
@@ -79,21 +80,17 @@ static bool actiondfs_is_dir(const struct actiondfs_node *node)
 
 static void actiondfs_free_tree(struct actiondfs_node *node)
 {
-	struct actiondfs_node *child;
-	struct actiondfs_node *next;
+	size_t i;
 
 	if (!node)
 		return;
 
-	child = node->children;
-	while (child) {
-		next = child->next;
-		actiondfs_free_tree(child);
-		child = next;
-	}
+	for (i = 0; i < node->child_count; i++)
+		actiondfs_free_tree(node->children[i]);
 
 	if (node->blob_file)
 		filp_close(node->blob_file, NULL);
+	kfree(node->children);
 	kfree(node->name);
 	kfree(node);
 }
@@ -134,9 +131,11 @@ static struct actiondfs_node *actiondfs_find_child(struct actiondfs_node *dir,
 						   const char *name,
 						   size_t len)
 {
-	struct actiondfs_node *child;
+	size_t i;
 
-	for (child = dir->children; child; child = child->next) {
+	for (i = 0; i < dir->child_count; i++) {
+		struct actiondfs_node *child = dir->children[i];
+
 		if (child->name_len == len && !memcmp(child->name, name, len))
 			return child;
 	}
@@ -158,7 +157,8 @@ static int actiondfs_valid_component(const char *name, size_t len)
 static int actiondfs_add_child(struct actiondfs_node *dir,
 			       struct actiondfs_node *child)
 {
-	struct actiondfs_node **slot;
+	struct actiondfs_node **children;
+	size_t capacity;
 
 	if (!actiondfs_is_dir(dir))
 		return -ENOTDIR;
@@ -166,10 +166,18 @@ static int actiondfs_add_child(struct actiondfs_node *dir,
 		return -EEXIST;
 
 	child->parent = dir;
-	slot = &dir->children;
-	while (*slot)
-		slot = &(*slot)->next;
-	*slot = child;
+	if (dir->child_count == dir->child_capacity) {
+		if (dir->child_capacity > SIZE_MAX / 2)
+			return -EOVERFLOW;
+		capacity = dir->child_capacity ? dir->child_capacity * 2 : 8;
+		children = krealloc_array(dir->children, capacity,
+					  sizeof(*dir->children), GFP_KERNEL);
+		if (!children)
+			return -ENOMEM;
+		dir->children = children;
+		dir->child_capacity = capacity;
+	}
+	dir->children[dir->child_count++] = child;
 	return 0;
 }
 
@@ -826,7 +834,7 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
 	struct actiondfs_node *dir = inode->i_private;
-	struct actiondfs_node *child;
+	size_t i;
 	loff_t pos = 2;
 	int err;
 
@@ -837,7 +845,8 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	if (!dir_emit_dots(file, ctx))
 		return 0;
 
-	for (child = dir->children; child; child = child->next, pos++) {
+	for (i = 0; i < dir->child_count; i++, pos++) {
+		struct actiondfs_node *child = dir->children[i];
 		unsigned int type = actiondfs_is_dir(child) ? DT_DIR : DT_REG;
 
 		if (pos < ctx->pos)
