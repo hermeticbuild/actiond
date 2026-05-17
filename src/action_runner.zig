@@ -82,6 +82,7 @@ pub const Outcome = struct {
     output_files: []OutputFile = &.{},
     output_directories: []OutputDirectory = &.{},
     execution_metadata: ?reapi.ExecutedActionMetadata = null,
+    runner_timing: ?RunTiming = null,
 
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
         for (self.output_files) |output_file| allocator.free(output_file.path);
@@ -92,6 +93,17 @@ pub const Outcome = struct {
         allocator.free(self.stderr);
         self.* = undefined;
     }
+};
+
+pub const RunTiming = struct {
+    parent_prepare_ns: i96,
+    fork_ns: i96,
+    child_setup_ns: i96,
+    process_io_ns: i96,
+    wait_ns: i96,
+    stdio_digest_ns: i96,
+    bind_mounts: usize,
+    setup_signaled: bool,
 };
 
 pub fn runCommandWithOptions(
@@ -299,6 +311,7 @@ fn runCommandChroot(
     options: RunOptions,
 ) !Outcome {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+    const runner_start = std.Io.Clock.awake.now(io);
     const chroot_dir = options.chroot_dir;
 
     var cgroup = try Cgroup.create(io, allocator, options.cgroup_limits);
@@ -348,11 +361,15 @@ fn runCommandChroot(
     errdefer closePipe(stdout_pipe);
     const stderr_pipe = try linuxPipe();
     errdefer closePipe(stderr_pipe);
+    const setup_pipe = try linuxPipe();
+    errdefer closePipe(setup_pipe);
 
+    const fork_start = std.Io.Clock.awake.now(io);
     const pid = try forkAction(.{
         .stdin_pipe = stdin_pipe,
         .stdout_pipe = stdout_pipe,
         .stderr_pipe = stderr_pipe,
+        .setup_pipe = setup_pipe,
         .chroot_dir = chroot_z,
         .cwd = cwd_z,
         .exec_path = exec_z,
@@ -363,6 +380,7 @@ fn runCommandChroot(
         .sandbox_uid = options.sandbox_uid,
         .sandbox_gid = options.sandbox_gid,
     });
+    const fork_completed = std.Io.Clock.awake.now(io);
     var child_waited = false;
     errdefer if (!child_waited) terminateChild(io, allocator, pid, cgroup);
 
@@ -370,25 +388,47 @@ fn runCommandChroot(
     closeFd(stdin_pipe[1]);
     closeFd(stdout_pipe[1]);
     closeFd(stderr_pipe[1]);
+    closeFd(setup_pipe[1]);
     errdefer {
         closeFd(stdout_pipe[0]);
         closeFd(stderr_pipe[0]);
+        closeFd(setup_pipe[0]);
     }
 
+    const setup_signaled = try readSetupSignal(setup_pipe[0]);
+    closeFd(setup_pipe[0]);
+    const setup_completed = std.Io.Clock.awake.now(io);
+
     const streams = try collectChildStreams(allocator, stdout_pipe[0], stderr_pipe[0]);
+    const streams_completed = std.Io.Clock.awake.now(io);
     errdefer {
         allocator.free(streams.stdout);
         allocator.free(streams.stderr);
     }
 
     const status = try waitForPid(pid);
+    const wait_completed = std.Io.Clock.awake.now(io);
     child_waited = true;
+    const digest_start = wait_completed;
+    const stdout_digest = try digestIfNonEmpty(io, store, streams.stdout);
+    const stderr_digest = try digestIfNonEmpty(io, store, streams.stderr);
+    const digest_completed = std.Io.Clock.awake.now(io);
     return .{
         .status = status,
         .stdout = streams.stdout,
         .stderr = streams.stderr,
-        .stdout_digest = try digestIfNonEmpty(io, store, streams.stdout),
-        .stderr_digest = try digestIfNonEmpty(io, store, streams.stderr),
+        .stdout_digest = stdout_digest,
+        .stderr_digest = stderr_digest,
+        .runner_timing = .{
+            .parent_prepare_ns = elapsedNs(runner_start, fork_start),
+            .fork_ns = elapsedNs(fork_start, fork_completed),
+            .child_setup_ns = elapsedNs(fork_completed, setup_completed),
+            .process_io_ns = elapsedNs(setup_completed, streams_completed),
+            .wait_ns = elapsedNs(streams_completed, wait_completed),
+            .stdio_digest_ns = elapsedNs(digest_start, digest_completed),
+            .bind_mounts = options.bind_mounts.len,
+            .setup_signaled = setup_signaled,
+        },
     };
 }
 
@@ -396,6 +436,7 @@ const ForkAction = struct {
     stdin_pipe: [2]std.posix.fd_t,
     stdout_pipe: [2]std.posix.fd_t,
     stderr_pipe: [2]std.posix.fd_t,
+    setup_pipe: [2]std.posix.fd_t,
     chroot_dir: [:0]const u8,
     cwd: [:0]const u8,
     exec_path: [:0]const u8,
@@ -406,6 +447,8 @@ const ForkAction = struct {
     sandbox_uid: u32,
     sandbox_gid: u32,
 };
+
+const child_setup_fd: std.posix.fd_t = 3;
 
 fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     const linux = std.os.linux;
@@ -427,11 +470,16 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childClose(action.stdout_pipe[1]);
     childClose(action.stderr_pipe[0]);
     childClose(action.stderr_pipe[1]);
+    childClose(action.setup_pipe[0]);
+    if (action.setup_pipe[1] != child_setup_fd) {
+        childDup2(action.setup_pipe[1], child_setup_fd);
+        childClose(action.setup_pipe[1]);
+    }
 
     childSyscallName(linux.setpgid(0, 0), "setpgid");
     if (action.cgroup_procs_path) |path| childWriteFile(path, "0\n");
     childSyscallName(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "prctl_no_new_privs");
-    childCloseExtraFds();
+    childCloseExtraFdsFrom(child_setup_fd + 1);
     childSyscallName(linux.unshare(actionNamespaceFlags()), "unshare_namespaces");
     childBringUpLoopback();
     childSyscallName(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0), "mount_private");
@@ -439,6 +487,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
+    childWriteSetupComplete();
     _ = linux.execve(action.exec_path.ptr, action.argv, action.envp);
     childWriteLiteral("actiond child setup failed: execve\n");
     linux.exit(127);
@@ -502,8 +551,8 @@ fn childClose(fd: std.posix.fd_t) void {
     };
 }
 
-fn childCloseExtraFds() void {
-    const rc = std.os.linux.close_range(3, std.math.maxInt(std.posix.fd_t), .{
+fn childCloseExtraFdsFrom(first_fd: std.posix.fd_t) void {
+    const rc = std.os.linux.close_range(@intCast(first_fd), std.math.maxInt(std.posix.fd_t), .{
         .UNSHARE = true,
         .CLOEXEC = false,
     });
@@ -511,6 +560,11 @@ fn childCloseExtraFds() void {
         .SUCCESS, .NOSYS, .INVAL, .PERM => return,
         else => return,
     }
+}
+
+fn childWriteSetupComplete() void {
+    _ = std.os.linux.write(child_setup_fd, "1", 1);
+    childClose(child_setup_fd);
 }
 
 fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
@@ -633,6 +687,18 @@ fn collectChildStreams(
     };
 }
 
+fn readSetupSignal(fd: std.posix.fd_t) !bool {
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const rc = std.os.linux.read(fd, byte[0..].ptr, byte.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return rc == 1,
+            .INTR => continue,
+            else => return error.Unexpected,
+        }
+    }
+}
+
 fn readPipeChunk(
     allocator: std.mem.Allocator,
     fd: std.posix.fd_t,
@@ -651,6 +717,10 @@ fn readPipeChunk(
         .INTR => return false,
         else => return error.Unexpected,
     }
+}
+
+fn elapsedNs(start: std.Io.Timestamp, end: std.Io.Timestamp) i96 {
+    return start.durationTo(end).nanoseconds;
 }
 
 fn waitForPid(pid: std.os.linux.pid_t) !Status {

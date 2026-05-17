@@ -25,6 +25,29 @@ TIMING_RE = re.compile(
     r"output_files=(?P<output_files>\d+) "
     r"output_directories=(?P<output_directories>\d+)"
 )
+RUNNER_RE = re.compile(
+    r"runner timing (?P<digest>[0-9a-f]+)/(?P<size>\d+): "
+    r"parent_prepare_ns=(?P<parent_prepare_ns>\d+) "
+    r"fork_ns=(?P<fork_ns>\d+) "
+    r"child_setup_ns=(?P<child_setup_ns>\d+) "
+    r"process_io_ns=(?P<process_io_ns>\d+) "
+    r"wait_ns=(?P<wait_ns>\d+) "
+    r"stdio_digest_ns=(?P<stdio_digest_ns>\d+) "
+    r"bind_mounts=(?P<runner_bind_mounts>\d+) "
+    r"setup_signaled=(?P<setup_signaled>true|false)"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class RunnerTiming:
+    parent_prepare_ns: int
+    fork_ns: int
+    child_setup_ns: int
+    process_io_ns: int
+    wait_ns: int
+    stdio_digest_ns: int
+    bind_mounts: int
+    setup_signaled: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -40,32 +63,52 @@ class Timing:
     bind_mounts: int
     output_files: int
     output_directories: int
+    runner: RunnerTiming | None = None
 
 
 def parse_timings(log_path: pathlib.Path) -> list[Timing]:
     timings: list[Timing] = []
+    runner_timings: dict[str, RunnerTiming] = {}
     for raw_line in log_path.read_text(errors="replace").splitlines():
         line = ANSI_RE.sub("", raw_line)
         match = TIMING_RE.search(line)
-        if not match:
-            continue
-        groups = match.groupdict()
-        timings.append(
-            Timing(
-                digest=groups["digest"],
-                size=int(groups["size"]),
-                total_ns=int(groups["total_ns"]),
-                input_fetch_ns=int(groups["input_fetch_ns"]),
-                execution_ns=int(groups["execution_ns"]),
-                output_upload_ns=int(groups["output_upload_ns"]),
-                file_inputs=int(groups["file_inputs"]),
-                directory_inputs=int(groups["directory_inputs"]),
-                bind_mounts=int(groups["bind_mounts"]),
-                output_files=int(groups["output_files"]),
-                output_directories=int(groups["output_directories"]),
+        if match:
+            groups = match.groupdict()
+            timings.append(
+                Timing(
+                    digest=groups["digest"],
+                    size=int(groups["size"]),
+                    total_ns=int(groups["total_ns"]),
+                    input_fetch_ns=int(groups["input_fetch_ns"]),
+                    execution_ns=int(groups["execution_ns"]),
+                    output_upload_ns=int(groups["output_upload_ns"]),
+                    file_inputs=int(groups["file_inputs"]),
+                    directory_inputs=int(groups["directory_inputs"]),
+                    bind_mounts=int(groups["bind_mounts"]),
+                    output_files=int(groups["output_files"]),
+                    output_directories=int(groups["output_directories"]),
+                )
             )
-        )
-    return timings
+            continue
+
+        match = RUNNER_RE.search(line)
+        if match:
+            groups = match.groupdict()
+            runner_timings[groups["digest"]] = RunnerTiming(
+                parent_prepare_ns=int(groups["parent_prepare_ns"]),
+                fork_ns=int(groups["fork_ns"]),
+                child_setup_ns=int(groups["child_setup_ns"]),
+                process_io_ns=int(groups["process_io_ns"]),
+                wait_ns=int(groups["wait_ns"]),
+                stdio_digest_ns=int(groups["stdio_digest_ns"]),
+                bind_mounts=int(groups["runner_bind_mounts"]),
+                setup_signaled=groups["setup_signaled"] == "true",
+            )
+
+    return [
+        dataclasses.replace(item, runner=runner_timings.get(item.digest))
+        for item in timings
+    ]
 
 
 def ns_to_ms(value: int) -> float:
@@ -92,6 +135,44 @@ def int_stat_row(label: str, values: list[int]) -> str:
         f"| {label} | {min(values)} | {statistics.median(values):.0f} | "
         f"{statistics.mean(values):.1f} | {max(values)} |"
     )
+
+
+def runner_rows(timings: list[Timing]) -> list[str]:
+    with_runner = [item for item in timings if item.runner is not None]
+    if not with_runner:
+        return []
+
+    return [
+        "",
+        "## Runner Timing",
+        "",
+        "These values split the `execute` bucket. `process/io` starts after child setup signals right before `execve`; it includes the action process runtime and stdout/stderr drain.",
+        "",
+        "| Runner Stage | Min | Median | Mean | Max | Share of execute |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        stat_row("parent prepare", [item.runner.parent_prepare_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_row("fork", [item.runner.fork_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_row("child setup", [item.runner.child_setup_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_row("process/io", [item.runner.process_io_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_row("wait", [item.runner.wait_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        stat_row("stdio digest", [item.runner.stdio_digest_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
+        "",
+        "| Digest | Parent Prep | Fork | Child Setup | Process/IO | Wait | Stdio Digest | Setup Signaled |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        *[
+            (
+                f"| `{item.digest[:12]}` | {fmt_ms(ns_to_ms(item.runner.parent_prepare_ns))} | "
+                f"{fmt_ms(ns_to_ms(item.runner.fork_ns))} | "
+                f"{fmt_ms(ns_to_ms(item.runner.child_setup_ns))} | "
+                f"{fmt_ms(ns_to_ms(item.runner.process_io_ns))} | "
+                f"{fmt_ms(ns_to_ms(item.runner.wait_ns))} | "
+                f"{fmt_ms(ns_to_ms(item.runner.stdio_digest_ns))} | "
+                f"{item.runner.setup_signaled} |"
+            )
+            for item in sorted(with_runner, key=lambda value: value.file_inputs)
+            if item.runner is not None
+        ],
+    ]
 
 
 def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
@@ -151,6 +232,8 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             f"{item.file_inputs} | {item.directory_inputs} | {item.bind_mounts} | "
             f"{item.output_files} file, {item.output_directories} dir |"
         )
+
+    lines.extend(runner_rows(timings))
 
     if all(item.directory_inputs == 0 for item in timings):
         lines.extend(

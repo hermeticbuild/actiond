@@ -246,6 +246,9 @@ pub fn executeActionWithOptions(
         outcome.output_files.len,
         outcome.output_directories.len,
     );
+    if (outcome.runner_timing) |timing| {
+        logRunnerTiming(action_digest, timing);
+    }
     return outcome;
 }
 
@@ -489,6 +492,28 @@ fn logActionTiming(
             bind_mounts,
             output_files,
             output_directories,
+        },
+    );
+}
+
+fn logRunnerTiming(
+    action_digest: cas.Digest,
+    timing: action_runner.RunTiming,
+) void {
+    var hash: [64]u8 = undefined;
+    std.log.info(
+        "runner timing {s}/{d}: parent_prepare_ns={d} fork_ns={d} child_setup_ns={d} process_io_ns={d} wait_ns={d} stdio_digest_ns={d} bind_mounts={d} setup_signaled={}",
+        .{
+            action_digest.formatHex(&hash),
+            action_digest.size_bytes,
+            timing.parent_prepare_ns,
+            timing.fork_ns,
+            timing.child_setup_ns,
+            timing.process_io_ns,
+            timing.wait_ns,
+            timing.stdio_digest_ns,
+            timing.bind_mounts,
+            timing.setup_signaled,
         },
     );
 }
