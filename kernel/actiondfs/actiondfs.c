@@ -3,12 +3,10 @@
  * actiondfs - read-only action input manifest filesystem for actiond.
  *
  * Mount data:
- *   manifest=/path/to/manifest,cas=/cas/blobs/sha256
+ *   root=<input-root-directory-digest-hash>,cas=/cas/blobs/sha256
  *
- * Manifest format:
- *   actiondfs.v1
- *   d MODE PATH_HEX
- *   f MODE SIZE HASH_HEX PATH_HEX
+ * Directory/FileNode metadata is read lazily from REAPI Directory protos stored
+ * in the CAS. File contents are read by digest from the same CAS blob root.
  */
 
 #include <linux/cred.h>
@@ -20,6 +18,7 @@
 #include <linux/magic.h>
 #include <linux/module.h>
 #include <linux/mount.h>
+#include <linux/mutex.h>
 #include <linux/namei.h>
 #include <linux/pagemap.h>
 #include <linux/parser.h>
@@ -31,28 +30,30 @@
 #include <linux/vmalloc.h>
 
 #define ACTIONDFS_MAGIC 0x41444653
-#define ACTIONDFS_VERSION "actiondfs.v1"
-#define ACTIONDFS_MAX_MANIFEST_SIZE (64U * 1024U * 1024U)
+#define ACTIONDFS_MAX_DIRECTORY_PROTO_SIZE (64U * 1024U * 1024U)
 #define ACTIONDFS_DIR_MODE 0777
 
 struct actiondfs_node {
 	char *name;
+	size_t name_len;
 	u64 ino;
 	umode_t mode;
 	u64 size;
 	char hash[65];
+	bool loaded;
 	struct actiondfs_node *parent;
 	struct actiondfs_node *children;
 	struct actiondfs_node *next;
 };
 
 struct actiondfs_sb_info {
-	char *manifest_path;
 	char *cas_root;
+	char *root_hash;
 	struct path cas_path;
 	bool cas_path_valid;
 	struct actiondfs_node *root;
 	u64 next_ino;
+	struct mutex load_lock;
 };
 
 static const struct inode_operations actiondfs_dir_iops;
@@ -90,9 +91,10 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 	kfree(node);
 }
 
-static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi,
-						   const char *name,
-						   umode_t mode)
+static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info *sbi,
+						       const char *name,
+						       size_t name_len,
+						       umode_t mode)
 {
 	struct actiondfs_node *node;
 
@@ -100,15 +102,24 @@ static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi
 	if (!node)
 		return NULL;
 
-	node->name = kstrdup(name, GFP_KERNEL);
+	node->name = kmemdup_nul(name, name_len, GFP_KERNEL);
 	if (!node->name) {
 		kfree(node);
 		return NULL;
 	}
 
+	node->name_len = name_len;
 	node->ino = ++sbi->next_ino;
 	node->mode = mode;
+	node->loaded = true;
 	return node;
+}
+
+static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi,
+						   const char *name,
+						   umode_t mode)
+{
+	return actiondfs_alloc_node_len(sbi, name, strlen(name), mode);
 }
 
 static struct actiondfs_node *actiondfs_find_child(struct actiondfs_node *dir,
@@ -118,7 +129,7 @@ static struct actiondfs_node *actiondfs_find_child(struct actiondfs_node *dir,
 	struct actiondfs_node *child;
 
 	for (child = dir->children; child; child = child->next) {
-		if (strlen(child->name) == len && !memcmp(child->name, name, len))
+		if (child->name_len == len && !memcmp(child->name, name, len))
 			return child;
 	}
 	return NULL;
@@ -143,7 +154,7 @@ static int actiondfs_add_child(struct actiondfs_node *dir,
 
 	if (!actiondfs_is_dir(dir))
 		return -ENOTDIR;
-	if (actiondfs_find_child(dir, child->name, strlen(child->name)))
+	if (actiondfs_find_child(dir, child->name, child->name_len))
 		return -EEXIST;
 
 	child->parent = dir;
@@ -154,89 +165,58 @@ static int actiondfs_add_child(struct actiondfs_node *dir,
 	return 0;
 }
 
-static struct actiondfs_node *actiondfs_ensure_dir(struct actiondfs_sb_info *sbi,
-						   const char *path)
+static struct actiondfs_node *actiondfs_add_dir_child(struct actiondfs_sb_info *sbi,
+						      struct actiondfs_node *parent,
+						      const char *name,
+						      size_t name_len,
+						      const char *hash,
+						      bool loaded)
 {
-	struct actiondfs_node *dir = sbi->root;
-	const char *cursor = path;
+	struct actiondfs_node *dir;
 	int err;
 
-	if (!path || !*path)
-		return dir;
+	err = actiondfs_valid_component(name, name_len);
+	if (err)
+		return ERR_PTR(err);
+	if (actiondfs_find_child(parent, name, name_len))
+		return ERR_PTR(-EEXIST);
 
-	while (*cursor) {
-		const char *slash = strchrnul(cursor, '/');
-		size_t len = slash - cursor;
-		struct actiondfs_node *child;
-		char *name;
+	dir = actiondfs_alloc_node_len(sbi, name, name_len, S_IFDIR | ACTIONDFS_DIR_MODE);
+	if (!dir)
+		return ERR_PTR(-ENOMEM);
 
-		err = actiondfs_valid_component(cursor, len);
-		if (err)
-			return ERR_PTR(err);
-
-		child = actiondfs_find_child(dir, cursor, len);
-		if (child) {
-			if (!actiondfs_is_dir(child))
-				return ERR_PTR(-ENOTDIR);
-			dir = child;
-		} else {
-			name = kmemdup_nul(cursor, len, GFP_KERNEL);
-			if (!name)
-				return ERR_PTR(-ENOMEM);
-			child = actiondfs_alloc_node(sbi, name, S_IFDIR | ACTIONDFS_DIR_MODE);
-			kfree(name);
-			if (!child)
-				return ERR_PTR(-ENOMEM);
-			err = actiondfs_add_child(dir, child);
-			if (err) {
-				actiondfs_free_tree(child);
-				return ERR_PTR(err);
-			}
-			dir = child;
-		}
-
-		cursor = *slash ? slash + 1 : slash;
+	if (hash) {
+		memcpy(dir->hash, hash, 64);
+		dir->hash[64] = '\0';
 	}
+	dir->loaded = loaded;
 
+	err = actiondfs_add_child(parent, dir);
+	if (err) {
+		actiondfs_free_tree(dir);
+		return ERR_PTR(err);
+	}
 	return dir;
 }
 
-static int actiondfs_add_file(struct actiondfs_sb_info *sbi,
-			      const char *path,
-			      umode_t mode,
-			      u64 size,
-			      const char *hash)
+static int actiondfs_add_file_child(struct actiondfs_sb_info *sbi,
+				    struct actiondfs_node *parent,
+				    const char *name,
+				    size_t name_len,
+				    umode_t mode,
+				    u64 size,
+				    const char *hash)
 {
-	char *parent_path = NULL;
-	const char *name;
-	const char *slash;
-	struct actiondfs_node *parent;
 	struct actiondfs_node *file;
 	int err;
 
-	slash = strrchr(path, '/');
-	if (slash) {
-		parent_path = kmemdup_nul(path, slash - path, GFP_KERNEL);
-		if (!parent_path)
-			return -ENOMEM;
-		parent = actiondfs_ensure_dir(sbi, parent_path);
-		kfree(parent_path);
-		name = slash + 1;
-	} else {
-		parent = sbi->root;
-		name = path;
-	}
-
-	if (IS_ERR(parent))
-		return PTR_ERR(parent);
-
-	err = actiondfs_valid_component(name, strlen(name));
+	err = actiondfs_valid_component(name, name_len);
 	if (err)
 		return err;
-	if (actiondfs_find_child(parent, name, strlen(name)))
+	if (actiondfs_find_child(parent, name, name_len))
 		return -EEXIST;
 
-	file = actiondfs_alloc_node(sbi, name, S_IFREG | (mode & 0777));
+	file = actiondfs_alloc_node_len(sbi, name, name_len, S_IFREG | (mode & 0777));
 	if (!file)
 		return -ENOMEM;
 
@@ -263,38 +243,6 @@ static int actiondfs_hex_nibble(char c)
 	return -1;
 }
 
-static char *actiondfs_hex_decode(const char *hex)
-{
-	size_t hex_len = strlen(hex);
-	size_t out_len = hex_len / 2;
-	char *out;
-	size_t i;
-
-	if ((hex_len & 1) != 0)
-		return ERR_PTR(-EINVAL);
-
-	out = kmalloc(out_len + 1, GFP_KERNEL);
-	if (!out)
-		return ERR_PTR(-ENOMEM);
-
-	for (i = 0; i < out_len; i++) {
-		int high = actiondfs_hex_nibble(hex[i * 2]);
-		int low = actiondfs_hex_nibble(hex[i * 2 + 1]);
-		if (high < 0 || low < 0) {
-			kfree(out);
-			return ERR_PTR(-EINVAL);
-		}
-		out[i] = (high << 4) | low;
-	}
-	out[out_len] = '\0';
-
-	if (strlen(out) != out_len) {
-		kfree(out);
-		return ERR_PTR(-EINVAL);
-	}
-	return out;
-}
-
 static int actiondfs_valid_hash(const char *hash)
 {
 	size_t i;
@@ -308,112 +256,281 @@ static int actiondfs_valid_hash(const char *hash)
 	return 0;
 }
 
-static int actiondfs_parse_mode(const char *text, umode_t *mode)
+static int actiondfs_pb_read_varint(const u8 *data, size_t len,
+				    size_t *pos, u64 *value)
 {
-	unsigned int value;
+	u64 out = 0;
+	unsigned int shift = 0;
+
+	while (*pos < len && shift < 64) {
+		u8 byte = data[(*pos)++];
+
+		if (shift == 63 && (byte & 0xfe))
+			return -EINVAL;
+		out |= (u64)(byte & 0x7f) << shift;
+		if (!(byte & 0x80)) {
+			*value = out;
+			return 0;
+		}
+		shift += 7;
+	}
+	return -EINVAL;
+}
+
+static int actiondfs_pb_read_len(const u8 *data, size_t len, size_t *pos,
+				 const u8 **field, size_t *field_len)
+{
+	u64 length;
 	int err;
 
-	err = kstrtouint(text, 8, &value);
+	err = actiondfs_pb_read_varint(data, len, pos, &length);
 	if (err)
 		return err;
-	if (value & ~0777U)
+	if (length > len - *pos)
 		return -EINVAL;
-	*mode = value;
+	*field = data + *pos;
+	*field_len = length;
+	*pos += length;
 	return 0;
 }
 
-static int actiondfs_parse_line(struct actiondfs_sb_info *sbi, char *line)
+static int actiondfs_pb_skip(const u8 *data, size_t len, size_t *pos, u64 wire)
 {
-	char *type;
-	char *mode_text;
-	char *size_text;
-	char *hash;
-	char *path_hex;
-	char *path;
-	umode_t mode;
-	u64 size;
-	int err;
+	const u8 *field;
+	size_t field_len;
+	u64 value;
 
-	if (!*line)
-		return 0;
-
-	type = strsep(&line, " ");
-	mode_text = strsep(&line, " ");
-	if (!type || !mode_text)
-		return -EINVAL;
-
-	err = actiondfs_parse_mode(mode_text, &mode);
-	if (err)
-		return err;
-
-	if (!strcmp(type, "d")) {
-		struct actiondfs_node *dir;
-
-		path_hex = strsep(&line, " ");
-		if (!path_hex || (line && *line))
+	switch (wire) {
+	case 0:
+		return actiondfs_pb_read_varint(data, len, pos, &value);
+	case 1:
+		if (len - *pos < 8)
 			return -EINVAL;
-		path = actiondfs_hex_decode(path_hex);
-		if (IS_ERR(path))
-			return PTR_ERR(path);
-		dir = actiondfs_ensure_dir(sbi, path);
-		err = PTR_ERR_OR_ZERO(dir);
-		if (!err)
-			dir->mode = S_IFDIR | (mode & 0777);
-		kfree(path);
-		return err;
+		*pos += 8;
+		return 0;
+	case 2:
+		return actiondfs_pb_read_len(data, len, pos, &field, &field_len);
+	case 5:
+		if (len - *pos < 4)
+			return -EINVAL;
+		*pos += 4;
+		return 0;
+	default:
+		return -EINVAL;
 	}
-
-	if (strcmp(type, "f"))
-		return -EINVAL;
-
-	size_text = strsep(&line, " ");
-	hash = strsep(&line, " ");
-	path_hex = strsep(&line, " ");
-	if (!size_text || !hash || !path_hex || (line && *line))
-		return -EINVAL;
-
-	err = kstrtou64(size_text, 10, &size);
-	if (err)
-		return err;
-	err = actiondfs_valid_hash(hash);
-	if (err)
-		return err;
-	path = actiondfs_hex_decode(path_hex);
-	if (IS_ERR(path))
-		return PTR_ERR(path);
-	err = actiondfs_add_file(sbi, path, mode, size, hash);
-	kfree(path);
-	return err;
 }
 
-static int actiondfs_load_manifest(struct actiondfs_sb_info *sbi)
+struct actiondfs_reapi_digest {
+	char hash[65];
+	u64 size;
+	bool has_hash;
+};
+
+static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
+					struct actiondfs_reapi_digest *digest)
+{
+	size_t pos = 0;
+	int err;
+
+	memset(digest, 0, sizeof(*digest));
+	while (pos < len) {
+		const u8 *field;
+		size_t field_len;
+		u64 key;
+		u64 value;
+
+		err = actiondfs_pb_read_varint(data, len, &pos, &key);
+		if (err)
+			return err;
+
+		switch (key >> 3) {
+		case 1:
+			if ((key & 7) != 2)
+				return -EINVAL;
+			err = actiondfs_pb_read_len(data, len, &pos, &field, &field_len);
+			if (err)
+				return err;
+			if (field_len != 64)
+				return -EINVAL;
+			memcpy(digest->hash, field, 64);
+			digest->hash[64] = '\0';
+			err = actiondfs_valid_hash(digest->hash);
+			if (err)
+				return err;
+			digest->has_hash = true;
+			break;
+		case 2:
+			if ((key & 7) != 0)
+				return -EINVAL;
+			err = actiondfs_pb_read_varint(data, len, &pos, &value);
+			if (err)
+				return err;
+			digest->size = value;
+			break;
+		default:
+			err = actiondfs_pb_skip(data, len, &pos, key & 7);
+			if (err)
+				return err;
+		}
+	}
+
+	return digest->has_hash ? 0 : -EINVAL;
+}
+
+static int actiondfs_parse_reapi_file(struct actiondfs_sb_info *sbi,
+				      struct actiondfs_node *parent,
+				      const u8 *data, size_t len)
+{
+	struct actiondfs_reapi_digest digest;
+	const u8 *name = NULL;
+	size_t name_len = 0;
+	size_t pos = 0;
+	bool executable = false;
+	bool has_digest = false;
+	int err;
+
+	memset(&digest, 0, sizeof(digest));
+	while (pos < len) {
+		const u8 *field;
+		size_t field_len;
+		u64 key;
+		u64 value;
+
+		err = actiondfs_pb_read_varint(data, len, &pos, &key);
+		if (err)
+			return err;
+
+		switch (key >> 3) {
+		case 1:
+			if ((key & 7) != 2)
+				return -EINVAL;
+			err = actiondfs_pb_read_len(data, len, &pos, &field, &field_len);
+			if (err)
+				return err;
+			name = field;
+			name_len = field_len;
+			break;
+		case 2:
+			if ((key & 7) != 2)
+				return -EINVAL;
+			err = actiondfs_pb_read_len(data, len, &pos, &field, &field_len);
+			if (err)
+				return err;
+			err = actiondfs_parse_reapi_digest(field, field_len, &digest);
+			if (err)
+				return err;
+			has_digest = true;
+			break;
+		case 4:
+			if ((key & 7) != 0)
+				return -EINVAL;
+			err = actiondfs_pb_read_varint(data, len, &pos, &value);
+			if (err)
+				return err;
+			executable = value != 0;
+			break;
+		default:
+			err = actiondfs_pb_skip(data, len, &pos, key & 7);
+			if (err)
+				return err;
+		}
+	}
+
+	if (!name || !has_digest)
+		return -EINVAL;
+	return actiondfs_add_file_child(sbi, parent, name, name_len,
+					executable ? 0555 : 0444,
+					digest.size, digest.hash);
+}
+
+static int actiondfs_parse_reapi_directory_node(struct actiondfs_sb_info *sbi,
+						struct actiondfs_node *parent,
+						const u8 *data, size_t len)
+{
+	struct actiondfs_reapi_digest digest;
+	const u8 *name = NULL;
+	size_t name_len = 0;
+	size_t pos = 0;
+	bool has_digest = false;
+	int err;
+
+	memset(&digest, 0, sizeof(digest));
+	while (pos < len) {
+		const u8 *field;
+		size_t field_len;
+		u64 key;
+
+		err = actiondfs_pb_read_varint(data, len, &pos, &key);
+		if (err)
+			return err;
+
+		switch (key >> 3) {
+		case 1:
+			if ((key & 7) != 2)
+				return -EINVAL;
+			err = actiondfs_pb_read_len(data, len, &pos, &field, &field_len);
+			if (err)
+				return err;
+			name = field;
+			name_len = field_len;
+			break;
+		case 2:
+			if ((key & 7) != 2)
+				return -EINVAL;
+			err = actiondfs_pb_read_len(data, len, &pos, &field, &field_len);
+			if (err)
+				return err;
+			err = actiondfs_parse_reapi_digest(field, field_len, &digest);
+			if (err)
+				return err;
+			has_digest = true;
+			break;
+		default:
+			err = actiondfs_pb_skip(data, len, &pos, key & 7);
+			if (err)
+				return err;
+		}
+	}
+
+	if (!name || !has_digest)
+		return -EINVAL;
+	return PTR_ERR_OR_ZERO(actiondfs_add_dir_child(sbi, parent, name, name_len,
+						      digest.hash, false));
+}
+
+static int actiondfs_read_cas_blob(struct actiondfs_sb_info *sbi,
+				   const char *hash,
+				   u8 **out,
+				   size_t *out_len)
 {
 	struct file *file;
 	loff_t pos = 0;
 	loff_t size;
 	ssize_t nread;
-	char *buffer;
-	char *cursor;
-	char *line;
-	int err = 0;
+	u8 *buffer;
+	int err;
 
-	file = filp_open(sbi->manifest_path, O_RDONLY, 0);
+	err = actiondfs_valid_hash(hash);
+	if (err)
+		return err;
+
+	file = file_open_root(&sbi->cas_path, hash, O_RDONLY, 0);
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
 	size = i_size_read(file_inode(file));
-	if (size <= 0 || size > ACTIONDFS_MAX_MANIFEST_SIZE) {
+	if (size < 0 || size > ACTIONDFS_MAX_DIRECTORY_PROTO_SIZE) {
 		filp_close(file, NULL);
 		return -EINVAL;
 	}
 
-	buffer = kvzalloc(size + 1, GFP_KERNEL);
+	buffer = kvzalloc((size_t)(size ? size : 1), GFP_KERNEL);
 	if (!buffer) {
 		filp_close(file, NULL);
 		return -ENOMEM;
 	}
 
-	nread = kernel_read(file, buffer, size, &pos);
+	nread = kernel_read(file, buffer, (size_t)size, &pos);
 	filp_close(file, NULL);
 	if (nread < 0) {
 		kvfree(buffer);
@@ -423,22 +540,89 @@ static int actiondfs_load_manifest(struct actiondfs_sb_info *sbi)
 		kvfree(buffer);
 		return -EIO;
 	}
-	buffer[size] = '\0';
 
-	cursor = buffer;
-	line = strsep(&cursor, "\n");
-	if (!line || strcmp(line, ACTIONDFS_VERSION)) {
-		kvfree(buffer);
-		return -EINVAL;
-	}
+	*out = buffer;
+	*out_len = (size_t)size;
+	return 0;
+}
 
-	while ((line = strsep(&cursor, "\n")) != NULL) {
-		err = actiondfs_parse_line(sbi, line);
+static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
+						 struct actiondfs_node *dir)
+{
+	u8 *buffer;
+	size_t len;
+	size_t pos = 0;
+	int err;
+
+	if (dir->loaded)
+		return 0;
+
+	err = actiondfs_read_cas_blob(sbi, dir->hash, &buffer, &len);
+	if (err)
+		return err;
+
+	while (pos < len) {
+		const u8 *field;
+		size_t field_len;
+		u64 key;
+
+		err = actiondfs_pb_read_varint(buffer, len, &pos, &key);
 		if (err)
+			goto out;
+
+		switch (key >> 3) {
+		case 1:
+			if ((key & 7) != 2) {
+				err = -EINVAL;
+				goto out;
+			}
+			err = actiondfs_pb_read_len(buffer, len, &pos, &field, &field_len);
+			if (err)
+				goto out;
+			err = actiondfs_parse_reapi_file(sbi, dir, field, field_len);
+			if (err)
+				goto out;
 			break;
+		case 2:
+			if ((key & 7) != 2) {
+				err = -EINVAL;
+				goto out;
+			}
+			err = actiondfs_pb_read_len(buffer, len, &pos, &field, &field_len);
+			if (err)
+				goto out;
+			err = actiondfs_parse_reapi_directory_node(sbi, dir, field, field_len);
+			if (err)
+				goto out;
+			break;
+		default:
+			err = actiondfs_pb_skip(buffer, len, &pos, key & 7);
+			if (err)
+				goto out;
+		}
 	}
 
+	dir->loaded = true;
+out:
 	kvfree(buffer);
+	return err;
+}
+
+static int actiondfs_ensure_loaded(struct super_block *sb,
+				   struct actiondfs_node *dir)
+{
+	struct actiondfs_sb_info *sbi = actiondfs_sbi(sb);
+	int err = 0;
+
+	if (!actiondfs_is_dir(dir))
+		return -ENOTDIR;
+	if (dir->loaded)
+		return 0;
+
+	mutex_lock(&sbi->load_lock);
+	if (!dir->loaded)
+		err = actiondfs_load_reapi_directory_locked(sbi, dir);
+	mutex_unlock(&sbi->load_lock);
 	return err;
 }
 
@@ -457,10 +641,10 @@ static int actiondfs_parse_options(struct actiondfs_sb_info *sbi, void *data)
 	cursor = options;
 
 	while ((token = strsep(&cursor, ",")) != NULL) {
-		if (str_has_prefix(token, "manifest=")) {
-			kfree(sbi->manifest_path);
-			sbi->manifest_path = kstrdup(token + 9, GFP_KERNEL);
-			if (!sbi->manifest_path) {
+		if (str_has_prefix(token, "root=")) {
+			kfree(sbi->root_hash);
+			sbi->root_hash = kstrdup(token + 5, GFP_KERNEL);
+			if (!sbi->root_hash) {
 				kfree(options);
 				return -ENOMEM;
 			}
@@ -478,9 +662,11 @@ static int actiondfs_parse_options(struct actiondfs_sb_info *sbi, void *data)
 	}
 
 	kfree(options);
-	if (!sbi->manifest_path || !sbi->cas_root)
+	if (!sbi->cas_root || !sbi->root_hash)
 		return -EINVAL;
-	if (strchr(sbi->manifest_path, ',') || strchr(sbi->cas_root, ','))
+	if (actiondfs_valid_hash(sbi->root_hash))
+		return -EINVAL;
+	if (strchr(sbi->cas_root, ','))
 		return -EINVAL;
 	return 0;
 }
@@ -524,9 +710,14 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 	struct actiondfs_node *parent = dir->i_private;
 	struct actiondfs_node *child;
 	struct inode *inode = NULL;
+	int err;
 
 	if (dentry->d_name.len > NAME_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
+
+	err = actiondfs_ensure_loaded(dir->i_sb, parent);
+	if (err)
+		return ERR_PTR(err);
 
 	child = actiondfs_find_child(parent, dentry->d_name.name, dentry->d_name.len);
 	if (child) {
@@ -545,6 +736,11 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	struct actiondfs_node *dir = inode->i_private;
 	struct actiondfs_node *child;
 	loff_t pos = 2;
+	int err;
+
+	err = actiondfs_ensure_loaded(inode->i_sb, dir);
+	if (err)
+		return err;
 
 	if (!dir_emit_dots(file, ctx))
 		return 0;
@@ -554,7 +750,7 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 
 		if (pos < ctx->pos)
 			continue;
-		if (!dir_emit(ctx, child->name, strlen(child->name), child->ino, type))
+		if (!dir_emit(ctx, child->name, child->name_len, child->ino, type))
 			return 0;
 		ctx->pos = pos + 1;
 	}
@@ -646,8 +842,8 @@ static void actiondfs_put_super(struct super_block *sb)
 	actiondfs_free_tree(sbi->root);
 	if (sbi->cas_path_valid)
 		path_put(&sbi->cas_path);
-	kfree(sbi->manifest_path);
 	kfree(sbi->cas_root);
+	kfree(sbi->root_hash);
 	kfree(sbi);
 	sb->s_fs_info = NULL;
 }
@@ -668,6 +864,7 @@ static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
 		return -ENOMEM;
 
 	sb->s_fs_info = sbi;
+	mutex_init(&sbi->load_lock);
 	sb->s_magic = ACTIONDFS_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_blocksize = PAGE_SIZE;
@@ -689,9 +886,9 @@ static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (err)
 		goto fail;
 	sbi->cas_path_valid = true;
-	err = actiondfs_load_manifest(sbi);
-	if (err)
-		goto fail;
+	memcpy(sbi->root->hash, sbi->root_hash, 64);
+	sbi->root->hash[64] = '\0';
+	sbi->root->loaded = false;
 
 	root_inode = actiondfs_iget(sb, sbi->root);
 	if (IS_ERR(root_inode)) {

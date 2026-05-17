@@ -18,64 +18,12 @@ pub const DirectoryInput = struct {
     digest: cas.Digest,
 };
 
-pub const ManifestDirectory = struct {
-    path: []const u8,
-};
-
 pub const MaterializeOptions = struct {
     chroot_root_path: ?[]const u8 = null,
     directory_inputs: []const DirectoryInput = &.{},
     copy_all_executable_inputs: bool = true,
     copy_executable_inputs: []const []const u8 = &.{},
 };
-
-pub fn writeActiondfsManifest(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    root: std.Io.Dir,
-    manifest_path: []const u8,
-    inputs: []const Input,
-    directories: []const ManifestDirectory,
-) !void {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-
-    try out.writer.writeAll("actiondfs.v1\n");
-    for (directories) |directory| {
-        try validatePath(directory.path);
-        try out.writer.print("d 777 ", .{});
-        try writePathHex(&out.writer, directory.path);
-        try out.writer.writeByte('\n');
-    }
-    for (inputs) |input| {
-        try validatePath(input.path);
-        var hash: [64]u8 = undefined;
-        try out.writer.print(
-            "f {o} {d} {s} ",
-            .{
-                if (input.is_executable) @as(u16, 0o555) else @as(u16, 0o444),
-                input.digest.size_bytes,
-                input.digest.formatHex(&hash),
-            },
-        );
-        try writePathHex(&out.writer, input.path);
-        try out.writer.writeByte('\n');
-    }
-
-    try root.writeFile(io, .{
-        .sub_path = manifest_path,
-        .data = out.writer.buffered(),
-        .flags = .{ .read = true, .truncate = true },
-    });
-}
-
-fn writePathHex(writer: *std.Io.Writer, path: []const u8) !void {
-    const hex = "0123456789abcdef";
-    for (path) |byte| {
-        try writer.writeByte(hex[byte >> 4]);
-        try writer.writeByte(hex[byte & 0x0f]);
-    }
-}
 
 pub const Materialization = struct {
     bind_mounts: []action_runner.BindMount = &.{},
@@ -328,44 +276,6 @@ test "Materializer copies CAS blobs into an execroot" {
     );
     defer std.testing.allocator.free(restored_tool);
     try std.testing.expectEqualStrings("#!/bin/sh\n", restored_tool);
-}
-
-test "writeActiondfsManifest emits directories and executable metadata" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const data = cas.Digest.fromBytes("data");
-    const tool = cas.Digest.fromBytes("#!/bin/sh\n");
-
-    try writeActiondfsManifest(std.testing.io, std.testing.allocator, tmp.dir, "manifest", &.{
-        .{ .path = "src/data.txt", .digest = data },
-        .{ .path = "tool/run.sh", .digest = tool, .is_executable = true },
-    }, &.{
-        .{ .path = "src" },
-        .{ .path = "tool" },
-    });
-
-    const manifest = try tmp.dir.readFileAlloc(
-        std.testing.io,
-        "manifest",
-        std.testing.allocator,
-        .limited(4096),
-    );
-    defer std.testing.allocator.free(manifest);
-
-    var data_hash: [64]u8 = undefined;
-    var tool_hash: [64]u8 = undefined;
-    const expected = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "actiondfs.v1\n" ++
-            "d 777 737263\n" ++
-            "d 777 746f6f6c\n" ++
-            "f 444 4 {s} 7372632f646174612e747874\n" ++
-            "f 555 10 {s} 746f6f6c2f72756e2e7368\n",
-        .{ data.formatHex(&data_hash), tool.formatHex(&tool_hash) },
-    );
-    defer std.testing.allocator.free(expected);
-    try std.testing.expectEqualStrings(expected, manifest);
 }
 
 test "Materializer prepares read-only bind mounts for chroot inputs" {
