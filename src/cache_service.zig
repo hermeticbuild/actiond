@@ -21,6 +21,28 @@ pub fn findMissingBlobs(
     return .{ .missing_blob_digests = try missing.toOwnedSlice(allocator) };
 }
 
+pub fn deleteBlobs(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    request: reapi.FindMissingBlobsRequest,
+) !reapi.FindMissingBlobsResponse {
+    var failed: std.ArrayListUnmanaged(reapi.Digest) = .empty;
+    errdefer failed.deinit(allocator);
+
+    for (request.blob_digests) |digest| {
+        const local = cas.Digest.fromReapi(digest) catch {
+            try failed.append(allocator, digest);
+            continue;
+        };
+        store.deleteBlob(io, local) catch {
+            try failed.append(allocator, digest);
+        };
+    }
+
+    return .{ .missing_blob_digests = try failed.toOwnedSlice(allocator) };
+}
+
 pub fn batchUpdateBlobs(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -130,6 +152,30 @@ test "findMissingBlobs returns only absent digests" {
 
     try std.testing.expectEqual(@as(usize, 1), response.missing_blob_digests.len);
     try std.testing.expect(response.missing_blob_digests[0].eql(absent.toReapi(&absent_hash)));
+}
+
+test "deleteBlobs removes requested blobs and reports invalid digests" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    const present = try store.putBytes(std.testing.io, "present");
+    const absent = cas.Digest.fromBytes("absent");
+
+    var present_hash: [64]u8 = undefined;
+    var absent_hash: [64]u8 = undefined;
+    var response = try deleteBlobs(std.testing.io, std.testing.allocator, store, .{
+        .blob_digests = &.{
+            present.toReapi(&present_hash),
+            absent.toReapi(&absent_hash),
+            .{ .hash = "not-hex", .size_bytes = 1 },
+        },
+    });
+    defer response.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try store.has(std.testing.io, present));
+    try std.testing.expectEqual(@as(usize, 1), response.missing_blob_digests.len);
+    try std.testing.expectEqualStrings("not-hex", response.missing_blob_digests[0].hash);
 }
 
 test "batchUpdateBlobs verifies digest before storing" {

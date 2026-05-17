@@ -314,10 +314,14 @@ pub const Proxy = struct {
             defer deinitExecuteResponseOwned(allocator, &execute_response);
             const result = execute_response.result orelse continue;
 
-            try self.importActionResultBlobs(io, allocator, host_store, result);
+            const imported = try self.importActionResultBlobs(io, allocator, host_store, result);
+            defer allocator.free(imported);
             if (!do_not_cache) {
                 try host_action_cache.?.put(io, allocator, action_digest, result);
             }
+            self.cleanupGuestImportedBlobs(io, allocator, imported) catch |err| {
+                std.log.warn("failed to clean guest CAS staging blobs: {s}", .{@errorName(err)});
+            };
         }
     }
 
@@ -327,7 +331,7 @@ pub const Proxy = struct {
         allocator: std.mem.Allocator,
         host_store: cas.Store,
         result: reapi.ActionResult,
-    ) !void {
+    ) ![]cas.Digest {
         var queue = ImportQueue{};
         defer queue.deinit(allocator);
 
@@ -348,6 +352,8 @@ pub const Proxy = struct {
             }
         }
         try self.importQueuedBlobs(io, allocator, host_store, &queue);
+
+        return try queue.toOwnedDigestSlice(allocator);
     }
 
     fn enqueueTreeContents(
@@ -368,7 +374,8 @@ pub const Proxy = struct {
             switch (tag.field_number) {
                 1, 2 => {
                     var nested = try tree_reader.readMessage();
-                    _ = try host_store.putBytes(io, nested.bytes);
+                    const directory_digest = try host_store.putBytes(io, nested.bytes);
+                    try queue.add(allocator, directory_digest);
                     var directory = try reapi.Directory.decodeOwned(allocator, &nested);
                     defer directory.deinit(allocator);
                     for (directory.files) |file| {
@@ -417,6 +424,49 @@ pub const Proxy = struct {
             }
         }
         try self.flushBatchRead(io, allocator, host_store, &batch, &batch_size);
+    }
+
+    fn cleanupGuestImportedBlobs(
+        self: *Proxy,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        digests: []const cas.Digest,
+    ) !void {
+        if (digests.len == 0) return;
+
+        var hash_storage = try allocator.alloc([64]u8, digests.len);
+        defer allocator.free(hash_storage);
+        const request_digests = try allocator.alloc(reapi.Digest, digests.len);
+        defer allocator.free(request_digests);
+        for (digests, 0..) |digest, i| {
+            request_digests[i] = digest.toReapi(&hash_storage[i]);
+        }
+
+        const request_proto = try reapi.encodeAlloc(allocator, reapi.FindMissingBlobsRequest{
+            .blob_digests = request_digests,
+        });
+        defer allocator.free(request_proto);
+        const request_record = try grpc_record.encodeAlloc(allocator, .{ .payload = request_proto });
+        defer allocator.free(request_record);
+
+        var response_record = try self.transport.call(io, allocator, .{
+            .kind = .unary,
+            .method = reapi_dispatch.internal_cas_delete_blobs,
+            .body = request_record,
+        });
+        defer response_record.deinit(allocator);
+        switch (response_record.status) {
+            .ok => {},
+            .stream_chunk => return error.GuestApplicationError,
+            .application_error => return applicationError(response_record.body),
+        }
+
+        var reader = protobuf.Reader.init(try singlePayload(response_record.body));
+        var response = try reapi.FindMissingBlobsResponse.decodeOwned(allocator, &reader);
+        defer response.deinit(allocator);
+        if (response.missing_blob_digests.len != 0) {
+            std.log.warn("guest CAS cleanup failed for {d} staged blobs", .{response.missing_blob_digests.len});
+        }
     }
 
     fn flushBatchRead(
@@ -525,6 +575,16 @@ const ImportQueue = struct {
         const result = try self.seen.getOrPut(allocator, digest);
         if (result.found_existing) return;
         try self.pending.append(allocator, digest);
+    }
+
+    fn toOwnedDigestSlice(self: *ImportQueue, allocator: std.mem.Allocator) ![]cas.Digest {
+        const out = try allocator.alloc(cas.Digest, self.seen.count());
+        var it = self.seen.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |digest| : (i += 1) {
+            out[i] = digest.*;
+        }
+        return out;
     }
 };
 
@@ -849,6 +909,97 @@ const BlobFixture = struct {
     data: []const u8,
 };
 
+const FakeCleanupTransport = struct {
+    expected: []const cas.Digest,
+    calls: usize = 0,
+
+    fn transport(self: *FakeCleanupTransport) Transport {
+        return .{
+            .ctx = self,
+            .round_trip = roundTrip,
+            .start_client_streaming = startClientStreaming,
+            .stream_server_response = streamServerResponse,
+        };
+    }
+
+    fn roundTrip(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        request: control_protocol.Request,
+    ) !OwnedResponse {
+        _ = io;
+        const self: *FakeCleanupTransport = @ptrCast(@alignCast(ctx));
+        try std.testing.expectEqual(control_protocol.CallKind.unary, request.kind);
+        try std.testing.expectEqualStrings(reapi_dispatch.internal_cas_delete_blobs, request.method);
+        self.calls += 1;
+
+        var request_reader = protobuf.Reader.init(try singlePayload(request.body));
+        var delete_request = try reapi.FindMissingBlobsRequest.decodeOwned(allocator, &request_reader);
+        defer delete_request.deinit(allocator);
+        try std.testing.expectEqual(self.expected.len, delete_request.blob_digests.len);
+        for (self.expected) |expected| {
+            var found = false;
+            for (delete_request.blob_digests) |actual| {
+                if ((try cas.Digest.fromReapi(actual)).eql(expected)) {
+                    found = true;
+                    break;
+                }
+            }
+            try std.testing.expect(found);
+        }
+
+        const payload = try reapi.encodeAlloc(allocator, reapi.FindMissingBlobsResponse{});
+        defer allocator.free(payload);
+        return .{
+            .status = .ok,
+            .body = try grpc_record.encodeAlloc(allocator, .{ .payload = payload }),
+        };
+    }
+
+    fn startClientStreaming(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+    ) !ClientStream {
+        _ = ctx;
+        _ = io;
+        _ = allocator;
+        _ = method;
+        return error.UnexpectedRoundTrip;
+    }
+
+    fn streamServerResponse(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+    ) !void {
+        _ = ctx;
+        _ = io;
+        _ = allocator;
+        _ = method;
+        _ = body;
+        _ = writer;
+        return error.UnexpectedRoundTrip;
+    }
+};
+
+test "Proxy cleans imported guest blobs through the internal cleanup method" {
+    const digests = [_]cas.Digest{
+        cas.Digest.fromBytes("one"),
+        cas.Digest.fromBytes("two"),
+    };
+    var fake = FakeCleanupTransport{ .expected = &digests };
+    var proxy = Proxy{ .transport = fake.transport() };
+
+    try proxy.cleanupGuestImportedBlobs(std.testing.io, std.testing.allocator, &digests);
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
 const FakeBatchReadTransport = struct {
     blobs: []const BlobFixture,
     batch_read_calls: usize = 0,
@@ -998,7 +1149,7 @@ test "Proxy imports execute outputs with batched CAS reads" {
 
     var output_hash: [64]u8 = undefined;
     var tree_hash: [64]u8 = undefined;
-    try proxy.importActionResultBlobs(std.testing.io, std.testing.allocator, host_store, .{
+    const imported = try proxy.importActionResultBlobs(std.testing.io, std.testing.allocator, host_store, .{
         .output_files = &.{
             .{ .path = "out.txt", .digest = output_digest.toReapi(&output_hash) },
         },
@@ -1006,11 +1157,17 @@ test "Proxy imports execute outputs with batched CAS reads" {
             .{ .path = "tree", .tree_digest = tree_digest.toReapi(&tree_hash) },
         },
     });
+    defer std.testing.allocator.free(imported);
 
     try std.testing.expectEqual(@as(usize, 2), fake.batch_read_calls);
     try std.testing.expectEqual(@as(usize, 2), fake.first_batch_len);
     try std.testing.expectEqual(@as(usize, 1), fake.second_batch_len);
     try std.testing.expectEqual(@as(usize, 0), fake.byte_stream_calls);
+    try std.testing.expect(containsDigest(imported, output_digest));
+    try std.testing.expect(containsDigest(imported, tree_digest));
+    try std.testing.expect(containsDigest(imported, root_directory_digest));
+    try std.testing.expect(containsDigest(imported, child_directory_digest));
+    try std.testing.expect(containsDigest(imported, nested_file_digest));
 
     const output = try host_store.readAlloc(std.testing.io, std.testing.allocator, output_digest);
     defer std.testing.allocator.free(output);

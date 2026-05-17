@@ -26,6 +26,8 @@ pub fn run(io: std.Io) !void {
     defer ac_dir.close(io);
     var action_work_dir = try work_dir.createDirPathOpen(io, "actions", .{});
     defer action_work_dir.close(io);
+    var cleanup_dir = try std.Io.Dir.openDirAbsolute(io, "/work/cas-upper/upper", .{});
+    defer cleanup_dir.close(io);
 
     try cas.Store.init(cas_dir).ensureLayout(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
@@ -33,6 +35,7 @@ pub fn run(io: std.Io) !void {
     const server: reapi_dispatch.Server = .{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
+        .cleanup_store = cas.Store.initReady(cleanup_dir),
         .work_root = action_work_dir,
         .execution_options = .{
             .runtime_root_path = "/runtimes",

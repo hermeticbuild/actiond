@@ -123,6 +123,17 @@ pub const Store = struct {
         return true;
     }
 
+    pub fn deleteBlob(self: Store, io: std.Io, digest: Digest) !void {
+        if (digest.isEmpty()) return;
+
+        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
+        const path = blobPath(digest, &path_buffer);
+        self.root.deleteFile(io, path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| return e,
+        };
+    }
+
     pub fn hasTree(self: Store, io: std.Io, digest: Digest) !bool {
         var path_buffer: [tree_prefix.len + 64]u8 = undefined;
         const path = treeSubPath(digest, &path_buffer);
@@ -439,6 +450,19 @@ test "Store treats the empty digest as always present" {
     const bytes = try store.readAlloc(std.testing.io, std.testing.allocator, empty_digest);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("", bytes);
+}
+
+test "Store can remove only a blob file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    const digest = try store.putBytes(std.testing.io, "temporary");
+    try std.testing.expect(try store.has(std.testing.io, digest));
+
+    try store.deleteBlob(std.testing.io, digest);
+    try std.testing.expect(!try store.has(std.testing.io, digest));
+    try store.deleteBlob(std.testing.io, digest);
 }
 
 fn blobPath(digest: Digest, out: *[blob_prefix.len + 64]u8) []const u8 {
