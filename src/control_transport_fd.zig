@@ -10,7 +10,7 @@ pub const Error = error{
     WriteFailed,
 };
 
-const connection_pool_size = 8;
+const connection_pool_size = 32;
 
 const ConnectionSlot = struct {
     mutex: std.Io.Mutex = .init,
@@ -54,9 +54,7 @@ pub const Client = struct {
         request: control_protocol.Request,
     ) !guest_proxy.OwnedResponse {
         const self: *Client = @ptrCast(@alignCast(ctx));
-        const slot_index = self.next_slot.fetchAdd(1, .monotonic) % connection_pool_size;
-        const slot = &self.slots[slot_index];
-        try slot.mutex.lock(io);
+        const slot = try self.lockSlot(io);
         defer slot.mutex.unlock(io);
 
         const fd = try self.slotFd(slot);
@@ -76,9 +74,7 @@ pub const Client = struct {
         const stream = try allocator.create(ControlClientStream);
         errdefer allocator.destroy(stream);
 
-        const slot_index = self.next_slot.fetchAdd(1, .monotonic) % connection_pool_size;
-        const slot = &self.slots[slot_index];
-        try slot.mutex.lock(io);
+        const slot = try self.lockSlot(io);
         errdefer slot.mutex.unlock(io);
 
         const fd = try self.slotFd(slot);
@@ -109,9 +105,7 @@ pub const Client = struct {
         writer: body_sink.Writer,
     ) !void {
         const self: *Client = @ptrCast(@alignCast(ctx));
-        const slot_index = self.next_slot.fetchAdd(1, .monotonic) % connection_pool_size;
-        const slot = &self.slots[slot_index];
-        try slot.mutex.lock(io);
+        const slot = try self.lockSlot(io);
         defer slot.mutex.unlock(io);
 
         const fd = try self.slotFd(slot);
@@ -147,6 +141,18 @@ pub const Client = struct {
         _ = self;
         if (slot.fd) |fd| closeFd(fd);
         slot.fd = null;
+    }
+
+    fn lockSlot(self: *Client, io: std.Io) !*ConnectionSlot {
+        const start: usize = @intCast(self.next_slot.fetchAdd(1, .monotonic));
+        for (0..connection_pool_size) |offset| {
+            const slot = &self.slots[(start + offset) % connection_pool_size];
+            if (slot.mutex.tryLock()) return slot;
+        }
+
+        const slot = &self.slots[start % connection_pool_size];
+        try slot.mutex.lock(io);
+        return slot;
     }
 };
 
