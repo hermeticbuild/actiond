@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
@@ -17,6 +18,8 @@ const hex_chars = "0123456789abcdef";
 const copy_buffer_len = 128 * 1024;
 const temp_path_prefix = blob_prefix ++ ".tmp-";
 const tree_temp_path_prefix = tree_prefix ++ ".tmp-";
+const stale_retry_attempts = 128;
+const stale_retry_sleep_ns = 2 * std.time.ns_per_ms;
 
 var next_temp_id = std.atomic.Value(u64).init(0);
 
@@ -151,15 +154,34 @@ pub const Store = struct {
         digest: Digest,
     ) ![]u8 {
         if (digest.isEmpty()) return try allocator.alloc(u8, 0);
+        return self.readAllocOnce(io, allocator, digest);
+    }
 
-        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
-        const path = blobPath(digest, &path_buffer);
-        return self.root.readFileAlloc(io, path, allocator, .limited(digest.size_bytes + 1));
+    fn readAllocOnce(
+        self: Store,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        digest: Digest,
+    ) ![]u8 {
+        const len = std.math.cast(usize, digest.size_bytes) orelse return error.FileTooBig;
+        var file = try self.openBlob(io, digest);
+        defer file.close(io);
+
+        const bytes = try allocator.alloc(u8, len);
+        errdefer allocator.free(bytes);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const n = try readFd(file.handle, bytes[offset..]);
+            if (n == 0) return error.ReadFailed;
+            offset += n;
+        }
+        return bytes;
     }
 
     pub fn openBlob(self: Store, io: std.Io, digest: Digest) !std.Io.File {
         var path_buffer: [blob_prefix.len + 64]u8 = undefined;
         const path = blobPath(digest, &path_buffer);
+        if (comptime builtin.os.tag == .linux) return openFileLinuxRetry(self.root, path);
         return self.root.openFile(io, path, .{});
     }
 
@@ -179,15 +201,16 @@ pub const Store = struct {
             });
         }
 
-        var src_path_buffer: [blob_prefix.len + 64]u8 = undefined;
-        const src_path = blobPath(digest, &src_path_buffer);
-        var src = try self.root.openFile(io, src_path, .{});
+        var src = try self.openBlob(io, digest);
         defer src.close(io);
 
-        var dest = try dest_dir.createFile(io, dest_path, .{
-            .truncate = true,
-            .permissions = permissions,
-        });
+        var dest = if (comptime builtin.os.tag == .linux)
+            try createFileLinuxRetry(dest_dir, dest_path, permissions)
+        else
+            try dest_dir.createFile(io, dest_path, .{
+                .truncate = true,
+                .permissions = permissions,
+            });
         defer dest.close(io);
 
         var buffer: [copy_buffer_len]u8 = undefined;
@@ -484,18 +507,120 @@ pub fn treeSubPath(digest: Digest, out: *[tree_prefix.len + 64]u8) []const u8 {
 }
 
 fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
+    var stale_attempts: usize = 0;
     while (true) {
         const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
         switch (std.posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
+            .STALE => {
+                if (stale_attempts >= stale_retry_attempts) return error.ReadFailed;
+                stale_attempts += 1;
+                sleepStaleRetry();
+                continue;
+            },
             else => return error.ReadFailed,
+        }
+    }
+}
+
+fn openFileLinuxRetry(dir: std.Io.Dir, path: []const u8) !std.Io.File {
+    if (comptime builtin.os.tag != .linux) unreachable;
+
+    var path_z: [blob_prefix.len + 64:0]u8 = undefined;
+    if (path.len > path_z.len) return error.NameTooLong;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+
+    var stale_attempts: usize = 0;
+    while (true) {
+        const rc = std.os.linux.openat(
+            dir.handle,
+            &path_z,
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+            0,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
+            .INTR => continue,
+            .STALE => {
+                if (stale_attempts >= stale_retry_attempts) return error.FileNotFound;
+                stale_attempts += 1;
+                sleepStaleRetry();
+                continue;
+            },
+            .NOENT, .SRCH => return error.FileNotFound,
+            .ACCES => return error.AccessDenied,
+            .ISDIR => return error.IsDir,
+            .NOTDIR => return error.NotDir,
+            .NAMETOOLONG => return error.NameTooLong,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOMEM => return error.SystemResources,
+            .LOOP => return error.SymLinkLoop,
+            .FBIG, .OVERFLOW => return error.FileTooBig,
+            else => return error.Unexpected,
+        }
+    }
+}
+
+fn sleepStaleRetry() void {
+    if (comptime builtin.os.tag != .linux) return;
+    var request: std.os.linux.timespec = .{
+        .sec = 0,
+        .nsec = stale_retry_sleep_ns,
+    };
+    while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
+}
+
+fn createFileLinuxRetry(
+    dir: std.Io.Dir,
+    path: []const u8,
+    permissions: std.Io.File.Permissions,
+) !std.Io.File {
+    if (comptime builtin.os.tag != .linux) unreachable;
+
+    const path_z = try std.posix.toPosixPath(path);
+    const mode: std.os.linux.mode_t = @intCast(permissions.toMode());
+
+    var stale_attempts: usize = 0;
+    while (true) {
+        const rc = std.os.linux.openat(
+            dir.handle,
+            &path_z,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true },
+            mode,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
+            .INTR => continue,
+            .STALE => {
+                if (stale_attempts >= stale_retry_attempts) return error.FileNotFound;
+                stale_attempts += 1;
+                sleepStaleRetry();
+                continue;
+            },
+            .NOENT, .SRCH => return error.FileNotFound,
+            .ACCES => return error.AccessDenied,
+            .ISDIR => return error.IsDir,
+            .NOTDIR => return error.NotDir,
+            .NAMETOOLONG => return error.NameTooLong,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOMEM => return error.SystemResources,
+            .LOOP => return error.SymLinkLoop,
+            .FBIG, .OVERFLOW => return error.FileTooBig,
+            .NOSPC => return error.NoSpaceLeft,
+            .PERM => return error.PermissionDenied,
+            .EXIST => return error.PathAlreadyExists,
+            else => return error.Unexpected,
         }
     }
 }
 
 fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
     var offset: usize = 0;
+    var stale_attempts: usize = 0;
     while (offset < bytes.len) {
         const rc = std.posix.system.write(fd, bytes[offset..].ptr, bytes.len - offset);
         switch (std.posix.errno(rc)) {
@@ -505,6 +630,12 @@ fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
                 offset += n;
             },
             .INTR => continue,
+            .STALE => {
+                if (stale_attempts >= stale_retry_attempts) return error.WriteFailed;
+                stale_attempts += 1;
+                sleepStaleRetry();
+                continue;
+            },
             else => return error.WriteFailed,
         }
     }
