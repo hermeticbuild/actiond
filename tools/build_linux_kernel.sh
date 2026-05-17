@@ -142,9 +142,11 @@ kbuild_out="$(pwd)/$(dirname "${out}")/kbuild"
 case "$(uname -s)" in
   Darwin)
     image="${ACTIOND_KERNEL_DOCKER_IMAGE:-actiond-kernel-builder:24.04}"
-    if ! mapfile -t docker_cmd < <(docker_command); then
-      exit 1
-    fi
+    docker_output="$(docker_command)" || exit 1
+    docker_cmd=()
+    while IFS= read -r part; do
+      docker_cmd+=("${part}")
+    done <<<"${docker_output}"
     if [[ "${#docker_cmd[@]}" -eq 0 ]]; then
       exit 1
     fi
