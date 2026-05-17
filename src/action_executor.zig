@@ -234,6 +234,7 @@ pub fn executeActionWithOptions(
         }
         break :path value;
     } else work_root_path;
+    try prepareChrootBaseDirs(io, work_root);
 
     var actiondfs_workspace: ?ActiondfsWorkspace = null;
     defer if (actiondfs_workspace) |*workspace| workspace.deinit(io, allocator);
@@ -1358,6 +1359,11 @@ fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void
     try work_root.createDirPath(io, path[0..last_slash]);
 }
 
+fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
+    try chroot_root.createDirPath(io, "tmp");
+    try chroot_root.createDirPath(io, "var/tmp");
+}
+
 fn isExecutable(stat: std.Io.Dir.Stat) bool {
     if (comptime !std.Io.File.Permissions.has_executable_bit) return false;
     return stat.permissions.toMode() & 0o111 != 0;
@@ -2137,4 +2143,16 @@ test "prepareOutputParents accepts Bazel-style external output paths" {
         .output_paths = &.{output_path},
     });
     _ = try work_dir.statFile(std.testing.io, "bazel-out/darwin_arm64-fastbuild/bin/external/rules_zig++zig+zig_0.16.0_aarch64-macos", .{});
+}
+
+test "prepareChrootBaseDirs creates temporary directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    try prepareChrootBaseDirs(std.testing.io, work_dir);
+    try work_dir.access(std.testing.io, "tmp", .{});
+    try work_dir.access(std.testing.io, "var/tmp", .{});
 }
