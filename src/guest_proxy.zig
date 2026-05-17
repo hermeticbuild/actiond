@@ -1,5 +1,6 @@
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
+const action_executor = @import("action_executor.zig");
 const body_sink = @import("body_sink.zig");
 const bytestream = @import("bytestream.zig");
 const cas = @import("cas.zig");
@@ -257,6 +258,10 @@ pub const Proxy = struct {
         request_record: []const u8,
         writer: body_sink.Writer,
     ) !void {
+        if (self.local_server) |local_server| {
+            const action_digest = try executeRequestActionDigest(request_record);
+            try action_executor.materializeActionInputTrees(io, allocator, local_server.store, action_digest);
+        }
         const response_record = try self.forward(io, allocator, .server_streaming, reapi_dispatch.execution_execute, request_record);
         defer allocator.free(response_record);
         if (self.local_server) |local_server| {

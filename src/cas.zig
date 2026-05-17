@@ -1,8 +1,10 @@
 const std = @import("std");
+const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
 
 pub const Error = error{
     DigestMismatch,
+    InvalidDirectoryEntryName,
     InvalidDigestHash,
     InvalidDigestSize,
 };
@@ -14,6 +16,7 @@ pub const tree_prefix_len = tree_prefix.len;
 const hex_chars = "0123456789abcdef";
 const copy_buffer_len = 128 * 1024;
 const temp_path_prefix = blob_prefix ++ ".tmp-";
+const tree_temp_path_prefix = tree_prefix ++ ".tmp-";
 
 var next_temp_id = std.atomic.Value(u64).init(0);
 
@@ -206,12 +209,105 @@ pub const Store = struct {
         return try writer.finish(io, null);
     }
 
+    pub fn materializeTree(
+        self: Store,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        digest: Digest,
+    ) !void {
+        if (try self.hasTree(io, digest)) return;
+        try self.ensureLayoutIfNeeded(io);
+
+        var final_path_buffer: [tree_prefix.len + 64]u8 = undefined;
+        const final_path = treeSubPath(digest, &final_path_buffer);
+
+        while (true) {
+            const id = next_temp_id.fetchAdd(1, .monotonic);
+            var temp_path_buffer: [tree_temp_path_prefix.len + 20]u8 = undefined;
+            const temp_path = try std.fmt.bufPrint(&temp_path_buffer, "{s}{d}", .{ tree_temp_path_prefix, id });
+            self.root.createDir(io, temp_path, .default_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => |e| return e,
+            };
+            var temp_created = true;
+            defer if (temp_created) self.root.deleteTree(io, temp_path) catch {};
+
+            try self.materializeDirectoryContents(io, allocator, digest, temp_path);
+            self.root.rename(temp_path, self.root, final_path, io) catch |err| switch (err) {
+                error.DirNotEmpty => return,
+                else => |e| return e,
+            };
+            temp_created = false;
+            return;
+        }
+    }
+
     pub fn beginBlobWriter(self: Store, io: std.Io) !BlobWriter {
         return BlobWriter.begin(io, self);
     }
 
     fn ensureLayoutIfNeeded(self: Store, io: std.Io) !void {
         if (!self.layout_ready) try self.ensureLayout(io);
+    }
+
+    fn materializeDirectoryContents(
+        self: Store,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        digest: Digest,
+        dest_path: []const u8,
+    ) !void {
+        const directory_bytes = try self.readAlloc(io, allocator, digest);
+        defer allocator.free(directory_bytes);
+
+        var reader = protobuf.Reader.init(directory_bytes);
+        var directory = try reapi.Directory.decodeOwned(allocator, &reader);
+        defer directory.deinit(allocator);
+
+        for (directory.files) |file| {
+            try validateDirectoryEntryName(file.name);
+            const file_digest = try Digest.fromReapi(file.digest orelse return error.InvalidDigestSize);
+            const dest_file = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dest_path, file.name });
+            defer allocator.free(dest_file);
+            try self.materializeTreeFile(io, file_digest, dest_file, file.is_executable);
+        }
+
+        for (directory.directories) |child| {
+            try validateDirectoryEntryName(child.name);
+            const child_digest = try Digest.fromReapi(child.digest orelse return error.InvalidDigestSize);
+            const child_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dest_path, child.name });
+            defer allocator.free(child_path);
+            try self.root.createDir(io, child_path, .default_dir);
+            try self.materializeDirectoryContents(io, allocator, child_digest, child_path);
+        }
+    }
+
+    fn materializeTreeFile(
+        self: Store,
+        io: std.Io,
+        digest: Digest,
+        dest_path: []const u8,
+        is_executable: bool,
+    ) !void {
+        if (!is_executable) {
+            var src_path_buffer: [blob_prefix.len + 64]u8 = undefined;
+            const src_path = blobPath(digest, &src_path_buffer);
+            var should_copy = false;
+            self.root.hardLink(src_path, self.root, dest_path, io, .{}) catch |err| switch (err) {
+                error.PathAlreadyExists => return,
+                error.CrossDevice, error.OperationUnsupported, error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => should_copy = true,
+                else => |e| return e,
+            };
+            if (!should_copy) return;
+        }
+
+        try self.copyToFile(
+            io,
+            digest,
+            self.root,
+            dest_path,
+            if (is_executable) .executable_file else .default_file,
+        );
     }
 };
 
@@ -368,6 +464,14 @@ fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
     }
 }
 
+fn validateDirectoryEntryName(name: []const u8) !void {
+    if (name.len == 0) return error.InvalidDirectoryEntryName;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return error.InvalidDirectoryEntryName;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return error.InvalidDirectoryEntryName;
+    if (std.mem.eql(u8, name, ".")) return error.InvalidDirectoryEntryName;
+    if (std.mem.eql(u8, name, "..")) return error.InvalidDirectoryEntryName;
+}
+
 fn parseHexNibble(byte: u8) !u8 {
     return switch (byte) {
         '0'...'9' => byte - '0',
@@ -416,6 +520,55 @@ test "Store writes known blobs without rehashing and ignores existing blob" {
     try store.putKnownBytes(std.testing.io, digest, "hello");
     try std.testing.expect(try store.has(std.testing.io, digest));
     try std.testing.expectError(error.InvalidDigestSize, store.putKnownBytes(std.testing.io, digest, "hell"));
+}
+
+test "Store materializes directory protos as tree directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    const leaf_digest = try store.putBytes(std.testing.io, "leaf");
+    const tool_digest = try store.putBytes(std.testing.io, "#!/bin/sh\n");
+
+    var leaf_hash: [64]u8 = undefined;
+    const child_proto = try reapi.encodeAlloc(std.testing.allocator, reapi.Directory{
+        .files = &.{
+            .{ .name = "leaf.txt", .digest = leaf_digest.toReapi(&leaf_hash) },
+        },
+    });
+    defer std.testing.allocator.free(child_proto);
+    const child_digest = try store.putBytes(std.testing.io, child_proto);
+
+    var child_hash: [64]u8 = undefined;
+    var tool_hash: [64]u8 = undefined;
+    const root_proto = try reapi.encodeAlloc(std.testing.allocator, reapi.Directory{
+        .files = &.{
+            .{ .name = "tool.sh", .digest = tool_digest.toReapi(&tool_hash), .is_executable = true },
+        },
+        .directories = &.{
+            .{ .name = "sub", .digest = child_digest.toReapi(&child_hash) },
+        },
+    });
+    defer std.testing.allocator.free(root_proto);
+    const root_digest = try store.putBytes(std.testing.io, root_proto);
+
+    try store.materializeTree(std.testing.io, std.testing.allocator, root_digest);
+    try std.testing.expect(try store.hasTree(std.testing.io, root_digest));
+
+    var tree_path_buffer: [tree_prefix_len + 64]u8 = undefined;
+    const tree_path = treeSubPath(root_digest, &tree_path_buffer);
+    const leaf_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/sub/leaf.txt", .{tree_path});
+    defer std.testing.allocator.free(leaf_path);
+    const leaf = try tmp.dir.readFileAlloc(std.testing.io, leaf_path, std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(leaf);
+    try std.testing.expectEqualStrings("leaf", leaf);
+
+    const tool_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/tool.sh", .{tree_path});
+    defer std.testing.allocator.free(tool_path);
+    const tool_stat = try tmp.dir.statFile(std.testing.io, tool_path, .{});
+    if (comptime std.Io.File.Permissions.has_executable_bit) {
+        try std.testing.expect(tool_stat.permissions.toMode() & 0o111 != 0);
+    }
 }
 
 test "BlobWriter streams data into CAS" {
