@@ -245,6 +245,7 @@ pub fn executeActionWithOptions(
         bind_mounts.items.len,
         outcome.output_files.len,
         outcome.output_directories.len,
+        stressCaseFromCommand(command),
     );
     if (outcome.runner_timing) |timing| {
         logRunnerTiming(action_digest, timing);
@@ -280,6 +281,13 @@ fn libcRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
         return error.UnsupportedLibcRuntime;
     }
     return null;
+}
+
+fn stressCaseFromCommand(command: reapi.Command) []const u8 {
+    for (command.environment_variables) |variable| {
+        if (std.mem.eql(u8, variable.name, "ACTIOND_STRESS_CASE") and variable.value.len != 0) return variable.value;
+    }
+    return "unknown";
 }
 
 fn runtimeArch() ![]const u8 {
@@ -476,10 +484,11 @@ fn logActionTiming(
     bind_mounts: usize,
     output_files: usize,
     output_directories: usize,
+    stress_case: []const u8,
 ) void {
     var hash: [64]u8 = undefined;
     std.log.info(
-        "execute timing {s}/{d}: total_ns={d} input_fetch_ns={d} execution_ns={d} output_upload_ns={d} file_inputs={d} directory_inputs={d} bind_mounts={d} output_files={d} output_directories={d}",
+        "execute timing {s}/{d}: total_ns={d} input_fetch_ns={d} execution_ns={d} output_upload_ns={d} file_inputs={d} directory_inputs={d} bind_mounts={d} output_files={d} output_directories={d} stress_case={s}",
         .{
             action_digest.formatHex(&hash),
             action_digest.size_bytes,
@@ -492,6 +501,7 @@ fn logActionTiming(
             bind_mounts,
             output_files,
             output_directories,
+            stress_case,
         },
     );
 }

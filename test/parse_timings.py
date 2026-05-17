@@ -24,6 +24,7 @@ TIMING_RE = re.compile(
     r"bind_mounts=(?P<bind_mounts>\d+) "
     r"output_files=(?P<output_files>\d+) "
     r"output_directories=(?P<output_directories>\d+)"
+    r"(?: stress_case=(?P<stress_case>\S+))?"
 )
 RUNNER_RE = re.compile(
     r"runner timing (?P<digest>[0-9a-f]+)/(?P<size>\d+): "
@@ -63,6 +64,7 @@ class Timing:
     bind_mounts: int
     output_files: int
     output_directories: int
+    stress_case: str = "unknown"
     runner: RunnerTiming | None = None
 
 
@@ -87,6 +89,7 @@ def parse_timings(log_path: pathlib.Path) -> list[Timing]:
                     bind_mounts=int(groups["bind_mounts"]),
                     output_files=int(groups["output_files"]),
                     output_directories=int(groups["output_directories"]),
+                    stress_case=groups["stress_case"] or "unknown",
                 )
             )
             continue
@@ -137,6 +140,41 @@ def int_stat_row(label: str, values: list[int]) -> str:
     )
 
 
+def grouped_by_case(timings: list[Timing]) -> dict[str, list[Timing]]:
+    groups: dict[str, list[Timing]] = {}
+    for item in timings:
+        groups.setdefault(item.stress_case, []).append(item)
+    return groups
+
+
+def case_rows(timings: list[Timing]) -> list[str]:
+    groups = grouped_by_case(timings)
+    if len(groups) <= 1 and "unknown" in groups:
+        return []
+
+    rows = [
+        "",
+        "## Stage Timing By Stress Case",
+        "",
+        "| Stress Case | Actions | Total Median | Total Mean | Input Mean | Execute Mean | Output Mean | File Inputs Median | Dir Inputs Median | Bind Mounts Median |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name in sorted(groups):
+        items = groups[name]
+        rows.append(
+            f"| {name} | {len(items)} | "
+            f"{fmt_ms(statistics.median(ns_to_ms(item.total_ns) for item in items))} | "
+            f"{fmt_ms(statistics.mean(ns_to_ms(item.total_ns) for item in items))} | "
+            f"{fmt_ms(statistics.mean(ns_to_ms(item.input_fetch_ns) for item in items))} | "
+            f"{fmt_ms(statistics.mean(ns_to_ms(item.execution_ns) for item in items))} | "
+            f"{fmt_ms(statistics.mean(ns_to_ms(item.output_upload_ns) for item in items))} | "
+            f"{statistics.median(item.file_inputs for item in items):.0f} | "
+            f"{statistics.median(item.directory_inputs for item in items):.0f} | "
+            f"{statistics.median(item.bind_mounts for item in items):.0f} |"
+        )
+    return rows
+
+
 def runner_rows(timings: list[Timing]) -> list[str]:
     with_runner = [item for item in timings if item.runner is not None]
     if not with_runner:
@@ -157,11 +195,11 @@ def runner_rows(timings: list[Timing]) -> list[str]:
         stat_row("wait", [item.runner.wait_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
         stat_row("stdio digest", [item.runner.stdio_digest_ns for item in with_runner if item.runner], sum(item.execution_ns for item in with_runner)),
         "",
-        "| Digest | Parent Prep | Fork | Child Setup | Process/IO | Wait | Stdio Digest | Setup Signaled |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Stress Case | Digest | Parent Prep | Fork | Child Setup | Process/IO | Wait | Stdio Digest | Setup Signaled |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         *[
             (
-                f"| `{item.digest[:12]}` | {fmt_ms(ns_to_ms(item.runner.parent_prepare_ns))} | "
+                f"| {item.stress_case} | `{item.digest[:12]}` | {fmt_ms(ns_to_ms(item.runner.parent_prepare_ns))} | "
                 f"{fmt_ms(ns_to_ms(item.runner.fork_ns))} | "
                 f"{fmt_ms(ns_to_ms(item.runner.child_setup_ns))} | "
                 f"{fmt_ms(ns_to_ms(item.runner.process_io_ns))} | "
@@ -169,7 +207,7 @@ def runner_rows(timings: list[Timing]) -> list[str]:
                 f"{fmt_ms(ns_to_ms(item.runner.stdio_digest_ns))} | "
                 f"{item.runner.setup_signaled} |"
             )
-            for item in sorted(with_runner, key=lambda value: value.file_inputs)
+            for item in sorted(with_runner, key=lambda value: (value.stress_case, value.file_inputs, value.directory_inputs, value.digest))
             if item.runner is not None
         ],
     ]
@@ -216,16 +254,21 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
             int_stat_row("bind mounts", [item.bind_mounts for item in timings]),
             int_stat_row("output files", [item.output_files for item in timings]),
             int_stat_row("output directories", [item.output_directories for item in timings]),
+        ]
+    )
+    lines.extend(case_rows(timings))
+    lines.extend(
+        [
             "",
             "## Per Action",
             "",
-            "| Digest | Total | Input | Execute | Output | File Inputs | Dir Inputs | Bind Mounts | Outputs |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Stress Case | Digest | Total | Input | Execute | Output | File Inputs | Dir Inputs | Bind Mounts | Outputs |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
-    for item in sorted(timings, key=lambda value: value.file_inputs):
+    for item in sorted(timings, key=lambda value: (value.stress_case, value.file_inputs, value.directory_inputs, value.digest)):
         lines.append(
-            f"| `{item.digest[:12]}` | {fmt_ms(ns_to_ms(item.total_ns))} | "
+            f"| {item.stress_case} | `{item.digest[:12]}` | {fmt_ms(ns_to_ms(item.total_ns))} | "
             f"{fmt_ms(ns_to_ms(item.input_fetch_ns))} | "
             f"{fmt_ms(ns_to_ms(item.execution_ns))} | "
             f"{fmt_ms(ns_to_ms(item.output_upload_ns))} | "

@@ -1,4 +1,5 @@
 /bare/
+/nested_files/
 /source_dir/
 /tool/action-tool
 /MODULE.bazel.lock

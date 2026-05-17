@@ -46,9 +46,18 @@ host CAS directory.
 
 The `test/` directory is a standalone Bazel workspace used by `tools/e2e.sh`.
 It generates a remote-execution workload with many bare file inputs, nested
-source-directory inputs, declared tree-artifact inputs, output files, and output
-directories. The harness copies a Linux `e2e_action_tool` binary into
+individual file inputs, source-directory inputs declared as directory entries,
+declared tree-artifact inputs, output files, and output directories. Several
+actions intentionally reuse the same generated output directory so the timing
+summary can compare tree-artifact reuse against nested individual-file inputs.
+The harness copies a Linux `e2e_action_tool` binary into
 `test/tool/action-tool` before invoking Bazel against actiond.
+
+The stress timing parser has its own test in the standalone workspace:
+
+```bash
+(cd test && bazel test //:parse_timings_test)
+```
 
 When collecting executor timing data, keep the e2e temp directory so the
 actiond log survives:

@@ -1,4 +1,5 @@
-load(":stress.bzl", "stress_consumer", "stress_tree")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":stress.bzl", "stress_workload")
 
 filegroup(
     name = "bare_inputs",
@@ -6,40 +7,25 @@ filegroup(
 )
 
 filegroup(
-    name = "source_dir_inputs",
-    srcs = glob(["source_dir/**/*.txt"]),
+    name = "nested_individual_inputs",
+    srcs = glob(["nested_files/**/*.txt"]),
 )
 
-stress_tree(
-    name = "tree_seed",
-    srcs = [":bare_inputs"],
-    files = 32,
-    tool = "//tool:action-tool",
+filegroup(
+    name = "source_tree_inputs",
+    srcs = glob(
+        ["source_dir/pkg_*"],
+        exclude_directories = 0,
+    ),
 )
 
-stress_tree(
-    name = "tree_mixed",
-    execution_requirements = {"libc": "glibc2.35"},
-    srcs = [":source_dir_inputs"],
-    trees = [":tree_seed"],
-    files = 48,
-    tool = "//tool:action-tool",
-)
-
-stress_consumer(
+stress_workload(
     name = "stress_all",
-    execution_requirements = {"libc": "glibc2.35"},
-    expect_localhost_hosts = True,
-    expect_loopback = True,
-    expect_network_blocked = True,
-    srcs = [
-        ":bare_inputs",
-        ":source_dir_inputs",
-    ],
-    trees = [
-        ":tree_seed",
-        ":tree_mixed",
-    ],
-    files = 64,
     tool = "//tool:action-tool",
+)
+
+sh_test(
+    name = "parse_timings_test",
+    srcs = ["parse_timings_test.sh"],
+    data = ["parse_timings.py"],
 )
