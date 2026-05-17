@@ -701,7 +701,6 @@ fn appendExecutableInputPath(
 ) !bool {
     for (inputs) |input| {
         if (!std.mem.eql(u8, input.path, candidate)) continue;
-        if (!input.is_executable) return true;
         if (pathInCopyList(candidate, out.items)) return true;
         try out.append(allocator, try allocator.dupe(u8, candidate));
         return true;
@@ -1709,6 +1708,25 @@ test "selectExecutableInputCopyPaths keeps only the direct command executable" {
             .{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true },
             .{ .path = "inputs/data.txt", .digest = cas.Digest.empty(), .is_executable = true },
         },
+        "/workspace",
+        &paths,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
+    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
+}
+
+test "selectExecutableInputCopyPaths copies resolved argv0 even without executable bit" {
+    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (paths.items) |path| std.testing.allocator.free(path);
+        paths.deinit(std.testing.allocator);
+    }
+
+    try selectExecutableInputCopyPaths(
+        std.testing.allocator,
+        .{ .arguments = &.{"tool/action-tool"} },
+        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = false }},
         "/workspace",
         &paths,
     );

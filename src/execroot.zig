@@ -147,9 +147,13 @@ pub const Materializer = struct {
         options: MaterializeOptions,
         bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
     ) !void {
-        const permissions: std.Io.File.Permissions = if (input.is_executable) .executable_file else .default_file;
-        const copy_executable = input.is_executable and
-            (options.copy_all_executable_inputs or pathInList(input.path, options.copy_executable_inputs));
+        const copy_resolved_executable = pathInList(input.path, options.copy_executable_inputs);
+        const copy_executable = copy_resolved_executable or
+            (input.is_executable and options.copy_all_executable_inputs);
+        const permissions: std.Io.File.Permissions = if (input.is_executable or copy_resolved_executable)
+            .executable_file
+        else
+            .default_file;
         if (copy_executable or input.digest.isEmpty()) {
             if (!input.digest.isEmpty()) {
                 if (options.cas_blob_root_path) |blob_root_path| {
@@ -660,7 +664,7 @@ test "Materializer chooses staged blob root before immutable blob root" {
     try std.testing.expectEqualStrings(expected_source, materialization.bind_mounts[0].source);
 }
 
-test "Materializer copies selected executable from immutable blob root" {
+test "Materializer copies resolved executable from immutable blob root" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -683,7 +687,7 @@ test "Materializer copies selected executable from immutable blob root" {
 
     const materializer = Materializer.init(cas.Store.init(store_dir), work_dir);
     var materialization = try materializer.materializeInputs(std.testing.io, std.testing.allocator, &.{
-        .{ .path = "tools/run.sh", .digest = digest, .is_executable = true },
+        .{ .path = "tools/run.sh", .digest = digest, .is_executable = false },
     }, .{
         .chroot_root_path = work_root_buffer[0..work_root_len],
         .cas_blob_root_path = lower_blob_root,
