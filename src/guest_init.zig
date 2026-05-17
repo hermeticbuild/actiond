@@ -31,8 +31,13 @@ pub const module_paths = [_][:0]const u8{
     "/modules/virtiofs.ko",
 };
 
-pub const host_cas_mount: Mount = .{ .source = "cas", .target = "/host-cas", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
-pub const runtime_image_share_mount: Mount = .{ .source = "runtimes", .target = "/runtime-image", .fstype = "virtiofs", .flags = std.os.linux.MS.RDONLY };
+const readonly_virtiofs_flags = std.os.linux.MS.RDONLY |
+    std.os.linux.MS.NOSUID |
+    std.os.linux.MS.NODEV |
+    std.os.linux.MS.NOATIME;
+
+pub const host_cas_mount: Mount = .{ .source = "cas", .target = "/host-cas", .fstype = "virtiofs", .flags = readonly_virtiofs_flags };
+pub const runtime_image_share_mount: Mount = .{ .source = "runtimes", .target = "/runtime-image", .fstype = "virtiofs", .flags = readonly_virtiofs_flags };
 pub const runtime_image_share_path: [:0]const u8 = "/runtime-image/runtimes.sqfs";
 pub const runtime_block_devices = [_][:0]const u8{
     "/dev/vda",
@@ -375,7 +380,10 @@ test "guest init mount plan stays minimal" {
     try std.testing.expectEqual(@as(usize, 6), mounts.len);
     try std.testing.expectEqualStrings("virtiofs", host_cas_mount.fstype);
     try std.testing.expectEqualStrings("/host-cas", host_cas_mount.target);
-    try std.testing.expectEqual(std.os.linux.MS.RDONLY, host_cas_mount.flags);
+    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.RDONLY) != 0);
+    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.NOSUID) != 0);
+    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.NODEV) != 0);
+    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.NOATIME) != 0);
     try std.testing.expectEqualStrings("overlay", cas_overlay_mount.fstype);
     try std.testing.expectEqualStrings("/cas", cas_overlay_mount.target);
     try std.testing.expect(cas_overlay_mount.data != null);
