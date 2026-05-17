@@ -291,10 +291,9 @@ pub fn executeActionWithOptions(
     defer directory_inputs.deinit(allocator);
     defer freeDirectoryInputs(allocator, directory_inputs.items);
     const use_workspace_chroot = options.runtime_root_path != null;
-    const force_file_inputs = forceFileInputs(action.platform);
-    const use_actiondfs_inputs = use_workspace_chroot and !force_file_inputs and options.use_actiondfs;
+    const use_actiondfs_inputs = use_workspace_chroot and options.use_actiondfs;
     if (!use_actiondfs_inputs) {
-        const allow_directory_inputs = use_workspace_chroot and !force_file_inputs;
+        const allow_directory_inputs = use_workspace_chroot;
         try collectInputs(io, allocator, store, read_roots, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
     }
     var executable_copy_paths: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -549,19 +548,6 @@ fn stressCaseFromCommand(command: reapi.Command) []const u8 {
         if (std.mem.eql(u8, variable.name, "ACTIOND_STRESS_CASE") and variable.value.len != 0) return variable.value;
     }
     return "unknown";
-}
-
-fn forceFileInputsFromPlatform(platform: ?reapi.Platform) bool {
-    const value = platform orelse return false;
-    for (value.properties) |property| {
-        if (!std.mem.eql(u8, property.name, "actiond.input_mode")) continue;
-        return std.mem.eql(u8, property.value, "files");
-    }
-    return false;
-}
-
-fn forceFileInputs(platform: ?reapi.Platform) bool {
-    return forceFileInputsFromPlatform(platform);
 }
 
 fn selectExecutableInputCopyPaths(
@@ -1752,16 +1738,6 @@ test "libc runtime platform property accepts pinned runtimes" {
     try std.testing.expectError(error.UnsupportedLibcRuntime, libcRuntimeFromPlatform(.{
         .properties = &.{.{ .name = "libc", .value = "glibc2.17" }},
     }));
-}
-
-test "actiond input mode platform property can force file inputs" {
-    try std.testing.expect(forceFileInputsFromPlatform(.{
-        .properties = &.{.{ .name = "actiond.input_mode", .value = "files" }},
-    }));
-    try std.testing.expect(!forceFileInputsFromPlatform(.{
-        .properties = &.{.{ .name = "actiond.input_mode", .value = "trees" }},
-    }));
-    try std.testing.expect(!forceFileInputsFromPlatform(null));
 }
 
 test "selectExecutableInputCopyPaths keeps only the direct command executable" {

@@ -216,10 +216,7 @@ def stress_workload(name, tool):
         )
         stress_consumer(
             name = target,
-            execution_requirements = {
-                "actiond.input_mode": "files",
-                "libc": "glibc2.35",
-            },
+            execution_requirements = {"libc": "glibc2.35"},
             files = 8,
             srcs = [":" + group],
             stress_case = "nested_individual_files",
@@ -231,10 +228,7 @@ def stress_workload(name, tool):
         target = "bare_files_%s" % _pad2(i)
         stress_consumer(
             name = target,
-            execution_requirements = {
-                "actiond.input_mode": "files",
-                "libc": "glibc2.35",
-            },
+            execution_requirements = {"libc": "glibc2.35"},
             files = 8,
             srcs = [":bare_inputs"],
             stress_case = "bare_individual_files",
@@ -275,10 +269,7 @@ def stress_workload(name, tool):
         target = "generated_files_%s" % _pad2(i)
         stress_consumer(
             name = target,
-            execution_requirements = {
-                "actiond.input_mode": "files",
-                "libc": "glibc2.35",
-            },
+            execution_requirements = {"libc": "glibc2.35"},
             files = 8,
             srcs = [":generated_file_set"],
             stress_case = "generated_individual_files",
