@@ -873,11 +873,16 @@ fn yieldThread() void {
 }
 
 fn sleepMilliseconds(milliseconds: u32) void {
-    var request: std.c.timespec = .{
+    var request: std.posix.timespec = .{
         .sec = @intCast(milliseconds / std.time.ms_per_s),
         .nsec = @intCast((milliseconds % std.time.ms_per_s) * std.time.ns_per_ms),
     };
-    while (std.c.nanosleep(&request, &request) != 0) {}
+    while (true) {
+        switch (std.posix.errno(std.posix.system.nanosleep(&request, &request))) {
+            .INTR => continue,
+            else => return,
+        }
+    }
 }
 
 fn ignoreSigpipe() void {
