@@ -174,6 +174,7 @@ const Cgroup = struct {
 
     fn create(io: std.Io, allocator: std.mem.Allocator, limits: CgroupLimits) !Cgroup {
         if (comptime builtin.os.tag != .linux) return .{};
+        if (!limits.any()) return .{};
 
         var root = std.Io.Dir.openDirAbsolute(io, "/sys/fs/cgroup", .{}) catch return .{};
         defer root.close(io);
