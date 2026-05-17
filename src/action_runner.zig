@@ -505,8 +505,10 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
     childWriteSetupComplete();
-    _ = linux.execve(action.exec_path.ptr, action.argv, action.envp);
-    childWriteLiteral("actiond child setup failed: execve\n");
+    const execve_rc = linux.execve(action.exec_path.ptr, action.argv, action.envp);
+    childWriteLiteral("actiond child setup failed: execve ");
+    childWriteBytes(@tagName(std.posix.errno(execve_rc)));
+    childWriteLiteral("\n");
     linux.exit(127);
 }
 
@@ -634,6 +636,10 @@ fn childSyscallName(rc: usize, comptime name: []const u8) void {
 }
 
 fn childWriteLiteral(comptime bytes: []const u8) void {
+    _ = std.os.linux.write(std.posix.STDERR_FILENO, bytes.ptr, bytes.len);
+}
+
+fn childWriteBytes(bytes: []const u8) void {
     _ = std.os.linux.write(std.posix.STDERR_FILENO, bytes.ptr, bytes.len);
 }
 
