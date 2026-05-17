@@ -137,6 +137,10 @@ fn casReadRoots(options: ExecuteOptions) CasReadRoots {
     };
 }
 
+fn actiondfsInputBlobRootPath(options: ExecuteOptions) ?[]const u8 {
+    return options.input_cas_blob_root_path orelse options.cas_blob_root_path;
+}
+
 fn readCasBlobAlloc(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -377,7 +381,7 @@ pub fn executeActionWithOptions(
     var fallback_cas_blob_root_path: ?[]u8 = null;
     defer if (fallback_cas_blob_root_path) |path| allocator.free(path);
     if (use_actiondfs_inputs) {
-        const cas_blob_root_path = options.cas_blob_root_path orelse path: {
+        const cas_blob_root_path = actiondfsInputBlobRootPath(options) orelse path: {
             var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
             const value = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
@@ -2129,6 +2133,15 @@ test "prepareExecuteOptions caches CAS and runtime mount sources" {
     try std.testing.expect(cache.glibc2_35.lib != null);
     try std.testing.expect(cache.glibc2_35.usr_lib != null);
     try std.testing.expect(cache.glibc2_31.lib == null);
+}
+
+test "actiondfs uses input CAS root for blob reads" {
+    const options: ExecuteOptions = .{
+        .cas_blob_root_path = "/cas/blobs/sha256",
+        .input_cas_blob_root_path = "/host-cas/blobs/sha256",
+    };
+
+    try std.testing.expectEqualStrings("/host-cas/blobs/sha256", actiondfsInputBlobRootPath(options).?);
 }
 
 test "collectInputs materializes bindable tree directories" {
