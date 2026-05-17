@@ -10,6 +10,8 @@ genrule(
 genrule(
     name = "linux_kernel",
     srcs = [
+        "//kernel/actiondfs:srcs",
+        "//kernel/actiondfs:actiondfs.c",
         "linux.config",
         "//tools:build_linux_kernel.sh",
         "//tools/docker:kernel.Dockerfile",
@@ -17,7 +19,7 @@ genrule(
         "@linux_kernel_src//:all",
     ],
     outs = ["Image"],
-    cmd = "$(location //tools:build_linux_kernel.sh) $@ $(location linux.config) $(execpath @linux_kernel_src//:Makefile) $(location //tools/docker:kernel.Dockerfile)",
+    cmd = "$(location //tools:build_linux_kernel.sh) $@ $(location linux.config) $(execpath @linux_kernel_src//:Makefile) $(location //tools/docker:kernel.Dockerfile) $(location //kernel/actiondfs:actiondfs.c)",
     tags = [
         "local",
         "manual",

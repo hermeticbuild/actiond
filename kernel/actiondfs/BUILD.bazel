@@ -1,0 +1,11 @@
+exports_files(["actiondfs.c"])
+
+filegroup(
+    name = "srcs",
+    srcs = [
+        "Kconfig",
+        "Makefile",
+        "actiondfs.c",
+    ],
+    visibility = ["//visibility:public"],
+)

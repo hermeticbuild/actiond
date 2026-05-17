@@ -31,6 +31,26 @@ run_kbuild() {
   mv -f "${out}.tmp" "${out}"
 }
 
+integrate_actiondfs() {
+  local kernel_src="$1"
+  local actiondfs_src="$2"
+
+  if [[ -z "${actiondfs_src}" ]]; then
+    return 0
+  fi
+
+  actiondfs_src="$(cd "${actiondfs_src}" && pwd -P)"
+  mkdir -p "${kernel_src}/fs/actiondfs"
+  rsync -a --delete "${actiondfs_src}/" "${kernel_src}/fs/actiondfs/"
+
+  if ! grep -q 'CONFIG_ACTIONDFS_FS' "${kernel_src}/fs/Makefile"; then
+    printf '\nobj-$(CONFIG_ACTIONDFS_FS) += actiondfs/\n' >>"${kernel_src}/fs/Makefile"
+  fi
+  if ! grep -q 'fs/actiondfs/Kconfig' "${kernel_src}/fs/Kconfig"; then
+    printf '\nsource "fs/actiondfs/Kconfig"\n' >>"${kernel_src}/fs/Kconfig"
+  fi
+}
+
 localize_kernel_src() {
   local src="$1"
   local dst="$2"
@@ -94,6 +114,7 @@ if [[ "${1:-}" == "--inside-docker" ]]; then
     localize_kernel_src "${kernel_src}" "${ACTIOND_KERNEL_LOCAL_SRC}"
     kernel_src="${ACTIOND_KERNEL_LOCAL_SRC}"
   fi
+  integrate_actiondfs "${kernel_src}" "${ACTIOND_ACTIONDFS_SRC:-}"
   run_kbuild \
     "${kernel_src}" \
     "${ACTIOND_KERNEL_CONFIG:?}" \
@@ -102,8 +123,8 @@ if [[ "${1:-}" == "--inside-docker" ]]; then
   exit 0
 fi
 
-if [[ "$#" -ne 4 ]]; then
-  echo "usage: build_linux_kernel.sh <out> <config> <kernel-makefile> <dockerfile>" >&2
+if [[ "$#" -lt 4 || "$#" -gt 5 ]]; then
+  echo "usage: build_linux_kernel.sh <out> <config> <kernel-makefile> <dockerfile> [actiondfs-src]" >&2
   exit 2
 fi
 
@@ -111,6 +132,10 @@ out="$1"
 config="$2"
 kernel_makefile="$3"
 dockerfile="$4"
+actiondfs_src="${5:-}"
+if [[ -n "${actiondfs_src}" && -f "${actiondfs_src}" ]]; then
+  actiondfs_src="$(dirname "${actiondfs_src}")"
+fi
 kernel_src="$(dirname "${kernel_makefile}")"
 kbuild_out="$(pwd)/$(dirname "${out}")/kbuild"
 
@@ -140,12 +165,16 @@ case "$(uname -s)" in
       -e "ACTIOND_KERNEL_OUT=/work/${out}"
       -e "ACTIOND_KERNEL_LOCAL_SRC=/tmp/actiond-kernel-src"
     )
+    if [[ -n "${actiondfs_src}" ]]; then
+      docker_run_args+=(-e "ACTIOND_ACTIONDFS_SRC=/work/${actiondfs_src}")
+    fi
     if [[ -n "${ACTIOND_KERNEL_DOCKER_PLATFORM:-}" ]]; then
       docker_run_args=(--platform="${ACTIOND_KERNEL_DOCKER_PLATFORM}" "${docker_run_args[@]}")
     fi
     "${docker_cmd[@]}" run "${docker_run_args[@]}" "${image}" bash tools/build_linux_kernel.sh --inside-docker
     ;;
   *)
+    integrate_actiondfs "${kernel_src}" "${actiondfs_src}"
     run_kbuild "${kernel_src}" "${config}" "${kbuild_out}" "${out}"
     ;;
 esac
