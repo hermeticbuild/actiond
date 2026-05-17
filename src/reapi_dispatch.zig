@@ -36,6 +36,7 @@ pub const Server = struct {
     store: cas.Store,
     action_cache_store: ?action_cache.Store = null,
     cleanup_store: ?cas.Store = null,
+    cleanup_visible_store: ?cas.Store = null,
     work_root: ?std.Io.Dir = null,
     execution_options: action_executor.ExecuteOptions = .{},
 
@@ -90,7 +91,10 @@ pub const Server = struct {
             var reader = protobuf.Reader.init(payload);
             var request = try reapi.FindMissingBlobsRequest.decodeOwned(allocator, &reader);
             defer request.deinit(allocator);
-            var response = try cache_service.deleteBlobs(io, allocator, cleanup_store, request);
+            var response = if (self.cleanup_visible_store) |visible_store|
+                try cache_service.deleteBlobsWhenVisible(io, allocator, cleanup_store, visible_store, request)
+            else
+                try cache_service.deleteBlobs(io, allocator, cleanup_store, request);
             defer response.deinit(allocator);
             return try encodeResponse(allocator, response);
         }

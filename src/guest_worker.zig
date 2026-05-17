@@ -15,6 +15,7 @@ pub const Error = error{
     UnsupportedHost,
 };
 
+pub const guest_cas_blob_root_path = "/cas/blobs/sha256";
 pub const host_cas_blob_root_path = "/host-cas/blobs/sha256";
 
 pub fn run(io: std.Io) !void {
@@ -23,6 +24,8 @@ pub fn run(io: std.Io) !void {
     const allocator = std.heap.smp_allocator;
     var cas_dir = try std.Io.Dir.openDirAbsolute(io, "/cas", .{});
     defer cas_dir.close(io);
+    var host_cas_dir = try std.Io.Dir.openDirAbsolute(io, "/host-cas", .{});
+    defer host_cas_dir.close(io);
     var work_dir = try std.Io.Dir.openDirAbsolute(io, "/work", .{});
     defer work_dir.close(io);
     var ac_dir = try work_dir.createDirPathOpen(io, "ac", .{});
@@ -37,13 +40,14 @@ pub fn run(io: std.Io) !void {
 
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
-        .cas_blob_root_path = host_cas_blob_root_path,
+        .cas_blob_root_path = guest_cas_blob_root_path,
     });
 
     const server: reapi_dispatch.Server = .{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
         .cleanup_store = cas.Store.initReady(cleanup_dir),
+        .cleanup_visible_store = cas.Store.initReady(host_cas_dir),
         .work_root = action_work_dir,
         .execution_options = execution_options.options,
     };
@@ -322,7 +326,8 @@ test "guest worker is Linux-only" {
     }
 }
 
-test "guest worker points actiondfs at raw read-only host CAS" {
+test "guest worker uses CAS overlay for execution and host CAS for cleanup visibility" {
+    try std.testing.expectEqualStrings("/cas/blobs/sha256", guest_cas_blob_root_path);
     try std.testing.expectEqualStrings("/host-cas/blobs/sha256", host_cas_blob_root_path);
 }
 

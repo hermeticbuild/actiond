@@ -39,9 +39,11 @@ Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.
 
 The VM guest mounts the host CAS share read-only at `/host-cas` and uses a
 tmpfs overlay at `/cas` for guest-side writes. actiondfs reads input blobs from
-`/host-cas/blobs/sha256`; `/cas` is for guest-produced blobs that the host
-imports and then deletes from the guest staging upperdir. VM e2e therefore
-validates API-visible execution behavior for one running VM.
+`/cas/blobs/sha256`, so downstream actions can still see freshly produced blobs
+while virtiofs catches up. The host imports guest-produced blobs and then asks
+the guest to delete the staging upperdir copy once `/host-cas` is visible from
+inside the guest. VM e2e therefore validates API-visible execution behavior for
+one running VM.
 
 ## Stress Workspace
 
