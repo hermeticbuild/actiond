@@ -49,3 +49,23 @@ It generates a remote-execution workload with many bare file inputs, nested
 source-directory inputs, declared tree-artifact inputs, output files, and output
 directories. The harness copies a Linux `e2e_action_tool` binary into
 `test/tool/action-tool` before invoking Bazel against actiond.
+
+When collecting executor timing data, keep the e2e temp directory so the
+actiond log survives:
+
+```bash
+ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
+```
+
+Then update the timing summary next to the stress workspace:
+
+```bash
+test/parse_timings.py /path/to/actiond.log \
+  --mode vm \
+  --command 'ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm' \
+  --output test/STRESS_TIMINGS.md
+```
+
+Keep `test/STRESS_TIMINGS.md` current whenever the stress workload, executor
+timing instrumentation, execroot materialization, VM proxying, or output import
+path changes.
