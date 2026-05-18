@@ -207,11 +207,6 @@ run_linux_e2e() {
   trap - EXIT
 }
 
-kernel_path() {
-  run_bazel build //vm:linux_kernel_zst >&2 || return
-  bazel_output //vm:linux_kernel_zst
-}
-
 run_vm_e2e() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "vm e2e must run on macOS with Virtualization.framework" >&2
@@ -241,9 +236,13 @@ run_vm_e2e() {
     run_bazel build //cmd/darwin_actiond:darwin-actiond-standalone
     server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-standalone)"
   else
-    run_bazel build //cmd/darwin_actiond:darwin-actiond-signed //vm:initramfs //runtimes:runtimes_squashfs
+    run_bazel build \
+      //cmd/darwin_actiond:darwin-actiond-signed \
+      //vm:linux_kernel_zst \
+      //vm:initramfs \
+      //runtimes:runtimes_squashfs
     local kernel initramfs runtimes
-    kernel="$(kernel_path)"
+    kernel="$(bazel_output //vm:linux_kernel_zst)"
     initramfs="$(bazel_output //vm:initramfs)"
     runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
     server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
