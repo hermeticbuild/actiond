@@ -287,7 +287,9 @@ pub const WriteGrpcStream = struct {
 };
 
 fn shouldLogCasUpload(record_count: usize, bytes: u64, elapsed_ns: i96) bool {
-    return record_count >= 128 or bytes >= 1024 * 1024 or elapsed_ns >= 10 * std.time.ns_per_ms;
+    return record_count >= 128 or
+        bytes >= 1024 * 1024 or
+        (bytes >= 64 * 1024 and elapsed_ns >= 10 * std.time.ns_per_ms);
 }
 
 fn elapsedNs(start: std.Io.Timestamp, end: std.Io.Timestamp) i96 {

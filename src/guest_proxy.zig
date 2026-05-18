@@ -800,7 +800,8 @@ fn logVmProxyRpc(
 }
 
 fn shouldLogCasUpload(request_bytes: usize, elapsed_ns: i96) bool {
-    return request_bytes >= 1024 * 1024 or elapsed_ns >= 10 * std.time.ns_per_ms;
+    return request_bytes >= 1024 * 1024 or
+        (request_bytes >= 64 * 1024 and elapsed_ns >= 10 * std.time.ns_per_ms);
 }
 
 fn elapsedNs(start: std.Io.Timestamp, end: std.Io.Timestamp) i96 {
