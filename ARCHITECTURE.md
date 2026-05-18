@@ -178,13 +178,13 @@ mount namespace mounts:
   lazily from the read-only host CAS mounted at `/host-cas`
 - stock overlayfs at `/workspace`, using per-action upper/work directories
 
-The kernel module also registers performance comparison variants. `actiondfs`
+The kernel module also registers a performance comparison variant. `actiondfs`
 uses pure binary search over the canonical sorted file and directory lists.
-`actiondfs_hybrid16`, `actiondfs_hybrid32`, and `actiondfs_hybrid64` binary
-search until the remaining range is at most that threshold, then finish with a
-linear scan. `actiondfs_vec` is kept as a compatibility name for the threshold
-32 hybrid. Production VM execution uses the canonical `actiondfs` filesystem
-unless `darwin-actiond serve-vm` is launched with `--actiondfs-fstype=...`.
+`actiondfs_hybrid32` binary searches until the remaining range is at most 32,
+then finishes with a linear scan. `actiondfs_vec` is kept as a compatibility
+name for the same threshold-32 hybrid. Production VM execution uses the
+canonical `actiondfs` filesystem unless `darwin-actiond serve-vm` is launched
+with `--actiondfs-fstype=...`.
 
 Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
 inode metadata. CAS blobs remain immutable data files and are not chmodded.

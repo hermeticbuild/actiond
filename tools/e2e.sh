@@ -266,7 +266,7 @@ run_vm_fs_compare() {
   export ACTIOND_E2E_KEEP_TMP=1
 
   local fstype
-  for fstype in actiondfs actiondfs_hybrid16 actiondfs_hybrid32 actiondfs_hybrid64; do
+  for fstype in actiondfs actiondfs_hybrid32; do
     export ACTIOND_ACTIONDFS_FSTYPE="${fstype}"
     run_vm_e2e
     local result_root="${last_e2e_root}"
@@ -287,7 +287,7 @@ run_vm_fs_compare() {
     unset ACTIOND_ACTIONDFS_FSTYPE
   fi
 
-  for fstype in actiondfs actiondfs_hybrid16 actiondfs_hybrid32 actiondfs_hybrid64; do
+  for fstype in actiondfs actiondfs_hybrid32; do
     echo "${fstype} summary: ${compare_root}/${fstype}.md" >&2
   done
 }

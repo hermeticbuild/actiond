@@ -38,9 +38,7 @@
 
 enum actiondfs_lookup_mode {
 	ACTIONDFS_LOOKUP_CANONICAL,
-	ACTIONDFS_LOOKUP_HYBRID16,
 	ACTIONDFS_LOOKUP_HYBRID32,
-	ACTIONDFS_LOOKUP_HYBRID64,
 };
 
 struct actiondfs_node {
@@ -239,12 +237,8 @@ static struct actiondfs_node *actiondfs_find_child_hybrid(struct actiondfs_node 
 static size_t actiondfs_linear_threshold(enum actiondfs_lookup_mode lookup_mode)
 {
 	switch (lookup_mode) {
-	case ACTIONDFS_LOOKUP_HYBRID16:
-		return 16;
 	case ACTIONDFS_LOOKUP_HYBRID32:
 		return 32;
-	case ACTIONDFS_LOOKUP_HYBRID64:
-		return 64;
 	case ACTIONDFS_LOOKUP_CANONICAL:
 	default:
 		return 0;
@@ -1218,22 +1212,10 @@ static int actiondfs_vec_fill_super(struct super_block *sb, void *data, int sile
 					 ACTIONDFS_LOOKUP_HYBRID32);
 }
 
-static int actiondfs_hybrid16_fill_super(struct super_block *sb, void *data, int silent)
-{
-	return actiondfs_fill_super_mode(sb, data, silent,
-					 ACTIONDFS_LOOKUP_HYBRID16);
-}
-
 static int actiondfs_hybrid32_fill_super(struct super_block *sb, void *data, int silent)
 {
 	return actiondfs_fill_super_mode(sb, data, silent,
 					 ACTIONDFS_LOOKUP_HYBRID32);
-}
-
-static int actiondfs_hybrid64_fill_super(struct super_block *sb, void *data, int silent)
-{
-	return actiondfs_fill_super_mode(sb, data, silent,
-					 ACTIONDFS_LOOKUP_HYBRID64);
 }
 
 static struct dentry *actiondfs_mount(struct file_system_type *fs_type,
@@ -1253,15 +1235,6 @@ static struct dentry *actiondfs_vec_mount(struct file_system_type *fs_type,
 			   actiondfs_vec_fill_super);
 }
 
-static struct dentry *actiondfs_hybrid16_mount(struct file_system_type *fs_type,
-					       int flags,
-					       const char *dev_name,
-					       void *data)
-{
-	return mount_nodev(fs_type, flags | SB_RDONLY, data,
-			   actiondfs_hybrid16_fill_super);
-}
-
 static struct dentry *actiondfs_hybrid32_mount(struct file_system_type *fs_type,
 					       int flags,
 					       const char *dev_name,
@@ -1269,15 +1242,6 @@ static struct dentry *actiondfs_hybrid32_mount(struct file_system_type *fs_type,
 {
 	return mount_nodev(fs_type, flags | SB_RDONLY, data,
 			   actiondfs_hybrid32_fill_super);
-}
-
-static struct dentry *actiondfs_hybrid64_mount(struct file_system_type *fs_type,
-					       int flags,
-					       const char *dev_name,
-					       void *data)
-{
-	return mount_nodev(fs_type, flags | SB_RDONLY, data,
-			   actiondfs_hybrid64_fill_super);
 }
 
 static struct file_system_type actiondfs_fs_type = {
@@ -1294,13 +1258,6 @@ static struct file_system_type actiondfs_vec_fs_type = {
 	.kill_sb = kill_anon_super,
 };
 
-static struct file_system_type actiondfs_hybrid16_fs_type = {
-	.owner = THIS_MODULE,
-	.name = "actiondfs_hybrid16",
-	.mount = actiondfs_hybrid16_mount,
-	.kill_sb = kill_anon_super,
-};
-
 static struct file_system_type actiondfs_hybrid32_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "actiondfs_hybrid32",
@@ -1308,19 +1265,10 @@ static struct file_system_type actiondfs_hybrid32_fs_type = {
 	.kill_sb = kill_anon_super,
 };
 
-static struct file_system_type actiondfs_hybrid64_fs_type = {
-	.owner = THIS_MODULE,
-	.name = "actiondfs_hybrid64",
-	.mount = actiondfs_hybrid64_mount,
-	.kill_sb = kill_anon_super,
-};
-
 static struct file_system_type *actiondfs_fs_types[] = {
 	&actiondfs_fs_type,
 	&actiondfs_vec_fs_type,
-	&actiondfs_hybrid16_fs_type,
 	&actiondfs_hybrid32_fs_type,
-	&actiondfs_hybrid64_fs_type,
 };
 
 static int __init actiondfs_init(void)

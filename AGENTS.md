@@ -76,9 +76,9 @@ run:
 tools/e2e.sh vm-fs-compare
 ```
 
-That mode runs the stress workspace with `actiondfs`, `actiondfs_hybrid16`,
-`actiondfs_hybrid32`, and `actiondfs_hybrid64`, keeps the VM logs, and writes
-parsed summaries under the printed comparison directory.
+That mode runs the stress workspace with `actiondfs` and
+`actiondfs_hybrid32`, keeps the VM logs, and writes parsed summaries under the
+printed comparison directory.
 
 Then update the timing summary next to the stress workspace:
 

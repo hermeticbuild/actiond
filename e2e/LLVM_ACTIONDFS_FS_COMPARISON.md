@@ -7,12 +7,11 @@ it with:
 e2e/llvm_fs_compare.sh
 ```
 
-The current script compares `actiondfs`, `actiondfs_hybrid16`,
-`actiondfs_hybrid32`, and `actiondfs_hybrid64`. Each run starts a fresh
-`darwin-actiond serve-vm` worker, runs `bazel clean --expunge`, builds
-`@llvm-project//llvm:llvm-tblgen`, and writes parsed timing summaries under the
-printed comparison directory. The latest comparison output root is also written
-to `/tmp/actiond-last-llvm-fs-compare-path`.
+The current script compares `actiondfs` and `actiondfs_hybrid32`. Each run
+starts a fresh `darwin-actiond serve-vm` worker, runs `bazel clean --expunge`,
+builds `@llvm-project//llvm:llvm-tblgen`, and writes parsed timing summaries
+under the printed comparison directory. The latest comparison output root is
+also written to `/tmp/actiond-last-llvm-fs-compare-path`.
 
 ## Latest Checked-In Result
 
