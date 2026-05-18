@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-workspace="${ACTIOND_LLVM_SMOKE_WORKSPACE:-/Users/dzbarsky/bootstrapped2}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace="${ACTIOND_LLVM_SMOKE_WORKSPACE:-${repo_root}}"
+target="${ACTIOND_LLVM_SMOKE_TARGET:-@llvm-project//llvm:llvm-tblgen}"
+target_platform="${ACTIOND_LLVM_SMOKE_TARGET_PLATFORM:-@llvm//platforms:linux_arm64_musl}"
+host_platform="${ACTIOND_LLVM_SMOKE_HOST_PLATFORM:-${target_platform}}"
 executor="${ACTIOND_LLVM_SMOKE_EXECUTOR:-grpc://127.0.0.1:8998}"
 cache="${ACTIOND_LLVM_SMOKE_CACHE:-${executor}}"
 jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
+build_mode_flags=(
+  -c opt
+  --strip=always
+  --stripopt=--strip-all
+)
 
 cd "${workspace}"
 
@@ -12,9 +21,10 @@ if [[ "${ACTIOND_LLVM_SMOKE_SKIP_CLEAN:-0}" != "1" ]]; then
   bazel clean --expunge
 fi
 
-bazel build --config=prebuilt @llvm-project//llvm:llvm-tblgen \
-  --platforms=//platforms:linux_arm64_musl \
-  --host_platform=//platforms:linux_arm64_musl \
+bazel build "${target}" \
+  "${build_mode_flags[@]}" \
+  --platforms="${target_platform}" \
+  --host_platform="${host_platform}" \
   --remote_executor="${executor}" \
   --remote_cache="${cache}" \
   --experimental_remote_downloader= \

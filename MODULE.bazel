@@ -11,6 +11,12 @@ bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "llvm", version = "0.8.1")
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
 single_version_override(
+    module_name = "llvm",
+    patch_strip = 1,
+    patches = ["//third_party/patches:llvm_musl_root_package_copy.patch"],
+    version = "0.8.1",
+)
+single_version_override(
     module_name = "zstd",
     patch_strip = 1,
     patches = ["//third_party/patches:zstd_no_pthread.patch"],
@@ -41,6 +47,26 @@ osx.frameworks(names = [
     "Virtualization",
 ])
 use_repo(osx, "macos_sdk")
+
+llvm_source = use_extension("@llvm//extensions:llvm_source.bzl", "llvm_source")
+llvm_source.version(llvm_version = "22.1.4")
+use_repo(llvm_source, "llvm-raw", "llvm_config", "llvm_zlib", "llvm_zstd")
+
+llvm_project = use_extension("@llvm//extensions:llvm.bzl", "llvm")
+llvm_project.configure(
+    targets = [
+        "AArch64",
+        "AMDGPU",
+        "ARM",
+        "BPF",
+        "NVPTX",
+        "RISCV",
+        "SystemZ",
+        "WebAssembly",
+        "X86",
+    ],
+)
+use_repo(llvm_project, "llvm-project")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 

@@ -6,11 +6,12 @@ stress workspace.
 
 ## LLVM tblgen VM Smoke
 
-`llvm_tblgen_smoke.sh` builds `@llvm-project//llvm:llvm-tblgen` from
-`/Users/dzbarsky/bootstrapped2` against an already-running actiond VM worker.
-It uses the bootstrapped workspace's musl Linux target and host platforms so the
-build avoids glibc runtime actions and generated exec tools are Linux arm64
-musl binaries:
+`llvm_tblgen_smoke.sh` builds `@llvm-project//llvm:llvm-tblgen` from this
+repo's `@llvm` module dependency against an already-running actiond VM worker.
+It uses `@llvm//platforms:linux_arm64_musl` for both the target and host
+platforms, so generated exec tools are Linux arm64 musl binaries that can run
+inside the VM. The smoke builds with `-c opt --strip=always
+--stripopt=--strip-all`:
 
 ```bash
 e2e/llvm_tblgen_smoke.sh
@@ -23,12 +24,16 @@ upload.
 ## LLVM VM Smoke Runner
 
 `run_llvm_vm_smoke.sh` starts a fresh VM worker, runs the LLVM tblgen smoke,
-and writes parsed timing summaries under an output directory:
+then runs the same target locally on the macOS host with the same musl target
+platform. It writes parsed VM timing summaries and a mac-host elapsed-time
+summary under an output directory:
 
 ```bash
 e2e/run_llvm_vm_smoke.sh
 ```
 
 By default it uses an 8 CPU, 4096 MiB VM. The last output directory is written
-to `/tmp/actiond-last-llvm-vm-smoke-path`. The current checked-in timing summary
-is in `LLVM_VM_SMOKE_TIMINGS.md`.
+to `/tmp/actiond-last-llvm-vm-smoke-path`. Set `ACTIOND_LLVM_SMOKE_MAC_HOST=0`
+to skip the mac-host baseline, or `ACTIOND_LLVM_SMOKE_VM=0` to run only the
+mac-host baseline. The current checked-in timing summary is in
+`LLVM_VM_SMOKE_TIMINGS.md`.

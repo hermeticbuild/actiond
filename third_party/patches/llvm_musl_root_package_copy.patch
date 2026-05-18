@@ -1,0 +1,12 @@
+diff --git a/3rd_party/libc/musl/musl.BUILD.bazel b/3rd_party/libc/musl/musl.BUILD.bazel
+index 8729061..a04cde3 100644
+--- a/3rd_party/libc/musl/musl.BUILD.bazel
++++ b/3rd_party/libc/musl/musl.BUILD.bazel
+@@ -190,6 +190,7 @@ ALLTYPES_HEADERS = {
+         ],
+         out = "generated/{arch}/includes".format(arch = arch),
+         allow_overwrites = True,
++        include_srcs_packages = ["", "**"],
+         root_paths = [
+             "include",
+             "arch/generic",

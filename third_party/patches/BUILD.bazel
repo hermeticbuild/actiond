@@ -1,1 +1,4 @@
-exports_files(["zstd_no_pthread.patch"])
+exports_files([
+    "llvm_musl_root_package_copy.patch",
+    "zstd_no_pthread.patch",
+])

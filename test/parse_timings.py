@@ -335,7 +335,7 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
     generated_at = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
     lines: list[str] = [
-        "# Stress Timing Summary",
+        "# Executor Timing Summary",
         "",
         f"- Generated: `{generated_at}`",
         f"- Mode: `{args.mode}`",
@@ -452,7 +452,7 @@ def main() -> int:
     parser.add_argument("--output", type=pathlib.Path, help="markdown file to write")
     parser.add_argument("--mode", default="unknown", help="execution mode label, such as vm or linux")
     parser.add_argument("--command", default="", help="command used to produce the run")
-    parser.add_argument("--bazel-elapsed", default="", help="Bazel elapsed time reported for the stress workspace")
+    parser.add_argument("--bazel-elapsed", default="", help="Bazel elapsed time reported for the workload")
     parser.add_argument("--workload", default="", help="short workload description")
     args = parser.parse_args()
 
