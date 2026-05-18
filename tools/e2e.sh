@@ -13,7 +13,7 @@ Modes:
   linux   Start linux-actiond on this Linux host and run test/ via Bazel remote execution.
   vm      Start darwin-actiond serve-vm and run test/ via Bazel remote execution.
   vm-fs-compare
-          Run VM stress with actiondfs_vec, actiondfs, and actiondfs_bucket.
+          Run VM stress with actiondfs and the hybrid lookup variants.
   all     Run build plus the host-appropriate e2e mode when configured.
 
 Environment:
@@ -266,7 +266,7 @@ run_vm_fs_compare() {
   export ACTIOND_E2E_KEEP_TMP=1
 
   local fstype
-  for fstype in actiondfs_vec actiondfs actiondfs_bucket; do
+  for fstype in actiondfs actiondfs_hybrid16 actiondfs_hybrid32 actiondfs_hybrid64; do
     export ACTIOND_ACTIONDFS_FSTYPE="${fstype}"
     run_vm_e2e
     local result_root="${last_e2e_root}"
@@ -287,7 +287,7 @@ run_vm_fs_compare() {
     unset ACTIOND_ACTIONDFS_FSTYPE
   fi
 
-  for fstype in actiondfs_vec actiondfs actiondfs_bucket; do
+  for fstype in actiondfs actiondfs_hybrid16 actiondfs_hybrid32 actiondfs_hybrid64; do
     echo "${fstype} summary: ${compare_root}/${fstype}.md" >&2
   done
 }
