@@ -311,6 +311,11 @@ pub fn dispatchControlRequest(
     server: reapi_dispatch.Server,
     request: control_protocol.Request,
 ) ![]u8 {
+    if (request.kind == .unary and std.mem.eql(u8, request.method, control_protocol.actiondfs_stats_method)) {
+        if (request.body.len != 0) return error.InvalidCallKind;
+        return try readActiondfsStats(io, allocator);
+    }
+
     return switch (request.kind) {
         .unary => try server.handleUnary(io, allocator, request.method, request.body),
         .server_streaming => try server.handleServerStreaming(io, allocator, request.method, request.body),
@@ -321,6 +326,34 @@ pub fn dispatchControlRequest(
         .client_streaming_finish,
         => error.InvalidCallKind,
     };
+}
+
+fn readActiondfsStats(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, "/proc/actiondfs_stats", .{});
+    defer file.close(io);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const n = try readFd(file.handle, &buffer);
+        if (n == 0) break;
+        try out.appendSlice(allocator, buffer[0..n]);
+        if (out.items.len > 1024 * 1024) return error.MessageTooLarge;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
+    while (true) {
+        const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+    }
 }
 
 fn writeResponse(connection: vsock.Connection, response: control_protocol.Response) !void {
@@ -366,4 +399,16 @@ test "guest worker dispatches control requests" {
     var messages = grpc_record.Iterator.init(response_body);
     const message = (try messages.next()).?;
     try std.testing.expect(message.payload.len > 0);
+}
+
+test "guest worker rejects malformed actiondfs stats requests before touching proc" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const server = reapi_dispatch.Server.init(cas.Store.init(tmp.dir));
+    try std.testing.expectError(error.InvalidCallKind, dispatchControlRequest(std.testing.io, std.testing.allocator, server, .{
+        .kind = .unary,
+        .method = control_protocol.actiondfs_stats_method,
+        .body = "unexpected",
+    }));
 }

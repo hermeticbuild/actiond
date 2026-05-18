@@ -10,6 +10,7 @@ const magic = "ACTD";
 const version: u8 = 1;
 pub const encoded_header_len = 18;
 const max_message_bytes = 512 * 1024 * 1024;
+pub const actiondfs_stats_method = "/actiond.internal.Guest/ActiondfsStats";
 
 pub const CallKind = enum(u8) {
     unary = 0,

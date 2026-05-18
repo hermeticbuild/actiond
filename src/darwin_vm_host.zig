@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const zstd = if (builtin.os.tag == .macos) @import("c") else struct {};
 const action_cache = @import("action_cache.zig");
 const cas = @import("cas.zig");
+const control_protocol = @import("control_protocol.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
 const embedded_payload = @import("embedded_payload.zig");
@@ -35,6 +36,7 @@ pub const ServeVmOptions = struct {
     cpus: u32 = 2,
     start_timeout_ms: u32 = 30_000,
     connect_timeout_ms: u32 = 60_000,
+    actiondfs_stats_path: ?[]const u8 = null,
 };
 
 pub fn parseServeVmArgs(args: []const []const u8) !ServeVmOptions {
@@ -102,6 +104,12 @@ pub fn parseServeVmArgs(args: []const []const u8) !ServeVmOptions {
             options.connect_timeout_ms = try parseU32(args[i]);
         } else if (std.mem.startsWith(u8, arg, "--connect-timeout-ms=")) {
             options.connect_timeout_ms = try parseU32(arg["--connect-timeout-ms=".len..]);
+        } else if (std.mem.eql(u8, arg, "--actiondfs-stats-path")) {
+            i += 1;
+            if (i >= args.len) return error.MissingServeArgumentValue;
+            options.actiondfs_stats_path = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--actiondfs-stats-path=")) {
+            options.actiondfs_stats_path = arg["--actiondfs-stats-path=".len..];
         } else {
             return error.UnknownServeArgument;
         }
@@ -194,6 +202,11 @@ pub fn serve(
 
     var fd_client = control_transport_fd.Client{ .opener = vm.opener() };
     defer fd_client.deinit(io);
+    if (options.actiondfs_stats_path) |path| {
+        const stats_path = try allocator.dupe(u8, path);
+        const stats_thread = try std.Thread.spawn(.{}, actiondfsStatsThread, .{ io, allocator, &fd_client, stats_path });
+        stats_thread.detach();
+    }
     var local_server = reapi_dispatch.Server{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
@@ -205,6 +218,56 @@ pub fn serve(
     return grpc_http2_server.serveDispatcher(io, allocator, .{
         .listen = options.listen,
     }, proxy.dispatcher());
+}
+
+fn actiondfsStatsThread(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    client: *control_transport_fd.Client,
+    path: []const u8,
+) void {
+    while (true) {
+        writeActiondfsStatsSnapshot(io, allocator, client, path) catch |err| {
+            std.log.warn("actiondfs stats snapshot failed: {s}", .{@errorName(err)});
+        };
+        sleepMilliseconds(1_000);
+    }
+}
+
+fn writeActiondfsStatsSnapshot(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    client: *control_transport_fd.Client,
+    path: []const u8,
+) !void {
+    var response = try client.transport().call(io, allocator, .{
+        .kind = .unary,
+        .method = control_protocol.actiondfs_stats_method,
+        .body = "",
+    });
+    defer response.deinit(allocator);
+    if (response.status != .ok) return error.GuestApplicationError;
+
+    try createParentDirs(io, path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = response.body,
+        .flags = .{ .read = true, .permissions = .default_file },
+    });
+}
+
+fn createParentDirs(io: std.Io, path: []const u8) !void {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
+    if (slash == 0) return;
+    try std.Io.Dir.cwd().createDirPath(io, path[0..slash]);
+}
+
+fn sleepMilliseconds(milliseconds: u32) void {
+    var request: std.c.timespec = .{
+        .sec = @intCast(milliseconds / std.time.ms_per_s),
+        .nsec = @intCast((milliseconds % std.time.ms_per_s) * std.time.ns_per_ms),
+    };
+    while (std.c.nanosleep(&request, &request) != 0) {}
 }
 
 fn parseU32(value: []const u8) !u32 {
@@ -383,6 +446,7 @@ test "parseServeVmArgs accepts VM flags" {
         "--start-timeout-ms=1234",
         "--connect-timeout-ms",
         "5678",
+        "--actiondfs-stats-path=/tmp/actiondfs_stats.txt",
     });
 
     try std.testing.expectEqualStrings("127.0.0.1:9999", options.listen);
@@ -395,6 +459,7 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqual(@as(u32, 3), options.cpus);
     try std.testing.expectEqual(@as(u32, 1234), options.start_timeout_ms);
     try std.testing.expectEqual(@as(u32, 5678), options.connect_timeout_ms);
+    try std.testing.expectEqualStrings("/tmp/actiondfs_stats.txt", options.actiondfs_stats_path.?);
 }
 
 test "parseServeVmArgs permits embedded VM artifacts" {

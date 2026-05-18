@@ -89,6 +89,7 @@ run_smoke() {
     --kernel="${kernel}" \
     --initramfs="${initramfs}" \
     --runtime-image="${runtimes}" \
+    --actiondfs-stats-path="${output_root}/actiondfs_stats.txt" \
     >"${server_log}" 2>&1 &
   server_pid="$!"
 
@@ -114,6 +115,7 @@ run_smoke() {
 
   cleanup_server 0
   echo "timing summary: ${timings}" >&2
+  echo "actiondfs stats: ${output_root}/actiondfs_stats.txt" >&2
 }
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
