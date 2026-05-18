@@ -171,6 +171,43 @@ stress_consumer = rule(
     },
 )
 
+def _stress_aggregate_impl(ctx):
+    out_file = ctx.actions.declare_file(ctx.label.name + ".txt")
+    transitive = [dep[DefaultInfo].files for dep in ctx.attr.deps]
+    inputs = depset(transitive = transitive)
+
+    args = ctx.actions.args()
+    args.add("--out-file", out_file.path)
+    for src in ctx.files.deps:
+        args.add("--scan", src.path)
+    args.set_param_file_format("multiline")
+    args.use_param_file("@%s", use_always = True)
+    ctx.actions.run(
+        executable = ctx.executable.tool,
+        inputs = inputs,
+        outputs = [out_file],
+        arguments = [args],
+        env = _stress_env(ctx),
+        execution_requirements = ctx.attr.execution_requirements,
+        mnemonic = "ActiondStressAggregate",
+        progress_message = "Aggregating stress outputs %{label}",
+    )
+    return DefaultInfo(files = depset([out_file]))
+
+stress_aggregate = rule(
+    implementation = _stress_aggregate_impl,
+    attrs = {
+        "deps": attr.label_list(),
+        "execution_requirements": attr.string_dict(),
+        "stress_case": attr.string(),
+        "tool": attr.label(
+            allow_single_file = True,
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
 def stress_workload(name, tool):
     stress_targets = []
 
@@ -277,7 +314,10 @@ def stress_workload(name, tool):
         )
         stress_targets.append(":" + target)
 
-    native.filegroup(
+    stress_aggregate(
         name = name,
-        srcs = stress_targets,
+        deps = stress_targets,
+        execution_requirements = {"libc": "glibc2.35"},
+        stress_case = "aggregate",
+        tool = tool,
     )

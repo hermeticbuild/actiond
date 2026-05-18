@@ -81,6 +81,7 @@ build_vm_artifacts() {
 run_smoke() {
   local build_log="${output_root}/llvm_tblgen_smoke.log"
   local measured_server_log="${output_root}/darwin-actiond-vm.measured.log"
+  local remote_grpc_log="${ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG:-}"
   local timings="${output_root}/timings.md"
   local server
   local kernel
@@ -122,9 +123,13 @@ run_smoke() {
     ACTIOND_LLVM_SMOKE_HOST_PLATFORM="${target_platform}" \
     ACTIOND_LLVM_SMOKE_SERVER_LOG="${server_log}" \
     ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG="${measured_server_log}" \
+    ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG="${remote_grpc_log}" \
     ACTIOND_LLVM_SMOKE_SKIP_CLEAN=0 \
     "${repo_root}/e2e/llvm_tblgen_smoke.sh" >"${build_log}" 2>&1; then
     echo "LLVM smoke failed; build log: ${build_log}" >&2
+    if [[ -n "${remote_grpc_log}" ]]; then
+      echo "remote gRPC log: ${remote_grpc_log}" >&2
+    fi
     tail -200 "${build_log}" >&2 || true
     return 1
   fi

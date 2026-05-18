@@ -27,6 +27,8 @@ Environment:
   ACTIOND_E2E_NESTED_GROUPS=8
   ACTIOND_E2E_NESTED_FILES_PER_GROUP=96
   ACTIOND_E2E_STANDALONE=1
+  ACTIOND_E2E_JOBS=8
+  ACTIOND_E2E_REMOTE_GRPC_LOG=/path/to/remote_grpc.log
 EOF
 }
 
@@ -126,16 +128,26 @@ wait_for_port() {
 }
 
 run_stress_workspace() {
+  local -a remote_grpc_log_flags=()
+  if [[ -n "${ACTIOND_E2E_REMOTE_GRPC_LOG:-}" ]]; then
+    remote_grpc_log_flags+=(--remote_grpc_log="${ACTIOND_E2E_REMOTE_GRPC_LOG}")
+  fi
+
   (
     cd "${test_workspace}"
     bazel clean --expunge >/dev/null
     bazel build //:stress_all \
+      --bes_backend= \
+      --bes_upload_mode=nowait_for_upload_complete \
       --remote_executor="grpc://${endpoint}" \
       --remote_cache="grpc://${endpoint}" \
       --noremote_accept_cached \
       --remote_local_fallback=false \
       --remote_upload_local_results=false \
+      --remote_download_outputs=toplevel \
+      "${remote_grpc_log_flags[@]}" \
       --disk_cache= \
+      --jobs="${ACTIOND_E2E_JOBS:-8}" \
       --spawn_strategy=remote \
       --genrule_strategy=remote
   )

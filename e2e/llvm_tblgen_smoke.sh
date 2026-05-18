@@ -12,6 +12,7 @@ cache="${ACTIOND_LLVM_SMOKE_CACHE:-${executor}}"
 jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
 server_log="${ACTIOND_LLVM_SMOKE_SERVER_LOG:-}"
 measured_server_log="${ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG:-}"
+remote_grpc_log="${ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG:-}"
 build_mode_flags=(
   -c opt
   --strip=always
@@ -25,8 +26,12 @@ build_remote() {
   local accept_cached="${2:-0}"
   local download_outputs="${3:-toplevel}"
   local cache_flags=()
+  local grpc_log_flags=()
   if [[ "${accept_cached}" != "1" ]]; then
     cache_flags+=(--noremote_accept_cached)
+  fi
+  if [[ -n "${remote_grpc_log}" ]]; then
+    grpc_log_flags+=(--remote_grpc_log="${remote_grpc_log}")
   fi
   bazel build "${label}" \
     "${build_mode_flags[@]}" \
@@ -39,6 +44,7 @@ build_remote() {
     --noremote_cache_compression \
     --remote_download_outputs="${download_outputs}" \
     "${cache_flags[@]}" \
+    "${grpc_log_flags[@]}" \
     --remote_local_fallback=false \
     --remote_upload_local_results=false \
     --disk_cache= \
@@ -53,7 +59,7 @@ fi
 
 if [[ -n "${warmup_target}" ]]; then
   echo "LLVM smoke warmup: ${warmup_target}" >&2
-  build_remote "${warmup_target}" 0 all
+  build_remote "${warmup_target}" 0 toplevel
 fi
 
 measured_offset=0
