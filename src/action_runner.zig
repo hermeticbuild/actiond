@@ -10,6 +10,7 @@ pub const Error = error{
 
 const max_stream_bytes = 16 * 1024 * 1024;
 const cgroup_period_us: u64 = 100_000;
+const child_poll_timeout_ms = 100;
 
 fn actionNamespaceFlags() usize {
     const linux = std.os.linux;
@@ -419,24 +420,23 @@ fn runCommandChroot(
     closeFd(setup_pipe[0]);
     const setup_completed = std.Io.Clock.awake.now(io);
 
-    const streams = try collectChildStreams(allocator, stdout_pipe[0], stderr_pipe[0]);
-    const streams_completed = std.Io.Clock.awake.now(io);
+    const child_result = try collectChildResult(io, allocator, stdout_pipe[0], stderr_pipe[0], pid, cgroup);
+    const streams_completed = child_result.streams_completed;
+    const wait_completed = child_result.wait_completed;
+    child_waited = true;
     errdefer {
-        allocator.free(streams.stdout);
-        allocator.free(streams.stderr);
+        allocator.free(child_result.stdout);
+        allocator.free(child_result.stderr);
     }
 
-    const status = try waitForPid(pid);
-    const wait_completed = std.Io.Clock.awake.now(io);
-    child_waited = true;
     const digest_start = wait_completed;
-    const stdout_digest = try digestIfNonEmpty(io, store, streams.stdout);
-    const stderr_digest = try digestIfNonEmpty(io, store, streams.stderr);
+    const stdout_digest = try digestIfNonEmpty(io, store, child_result.stdout);
+    const stderr_digest = try digestIfNonEmpty(io, store, child_result.stderr);
     const digest_completed = std.Io.Clock.awake.now(io);
     return .{
-        .status = status,
-        .stdout = streams.stdout,
-        .stderr = streams.stderr,
+        .status = child_result.status,
+        .stdout = child_result.stdout,
+        .stderr = child_result.stderr,
         .stdout_digest = stdout_digest,
         .stderr_digest = stderr_digest,
         .runner_timing = .{
@@ -677,23 +677,38 @@ fn terminateChild(
     pid: std.os.linux.pid_t,
     cgroup: Cgroup,
 ) void {
+    terminateActionProcesses(io, allocator, pid, cgroup);
+    _ = waitForPid(pid) catch {};
+}
+
+fn terminateActionProcesses(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    pid: std.os.linux.pid_t,
+    cgroup: Cgroup,
+) void {
     const linux = std.os.linux;
     cgroup.kill(io, allocator);
     _ = linux.kill(-pid, .KILL);
     _ = linux.kill(pid, .KILL);
-    _ = waitForPid(pid) catch {};
 }
 
-const CollectedStreams = struct {
+const ChildResult = struct {
     stdout: []u8,
     stderr: []u8,
+    status: Status,
+    streams_completed: std.Io.Timestamp,
+    wait_completed: std.Io.Timestamp,
 };
 
-fn collectChildStreams(
+fn collectChildResult(
+    io: std.Io,
     allocator: std.mem.Allocator,
     stdout_fd: std.posix.fd_t,
     stderr_fd: std.posix.fd_t,
-) !CollectedStreams {
+    pid: std.os.linux.pid_t,
+    cgroup: Cgroup,
+) !ChildResult {
     var stdout: std.ArrayListUnmanaged(u8) = .empty;
     errdefer stdout.deinit(allocator);
     var stderr: std.ArrayListUnmanaged(u8) = .empty;
@@ -704,8 +719,19 @@ fn collectChildStreams(
         .{ .fd = stderr_fd, .events = std.os.linux.POLL.IN | std.os.linux.POLL.HUP | std.os.linux.POLL.ERR, .revents = 0 },
     };
     var open_count: usize = 2;
+    var status: ?Status = null;
+    var waited_while_streams_open = false;
+
     while (open_count != 0) {
-        const rc = std.os.linux.poll(&poll_fds, poll_fds.len, -1);
+        if (status == null) {
+            if (try waitForPidNoHang(pid)) |value| {
+                status = value;
+                waited_while_streams_open = true;
+                terminateActionProcesses(io, allocator, pid, cgroup);
+            }
+        }
+
+        const rc = std.os.linux.poll(&poll_fds, poll_fds.len, child_poll_timeout_ms);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,
@@ -726,11 +752,29 @@ fn collectChildStreams(
                 open_count -= 1;
             }
         }
+
+        if (status == null) {
+            if (try waitForPidNoHang(pid)) |value| {
+                status = value;
+                waited_while_streams_open = true;
+                terminateActionProcesses(io, allocator, pid, cgroup);
+            }
+        }
     }
+
+    const streams_completed = std.Io.Clock.awake.now(io);
+    const final_status = status orelse try waitForPid(pid);
+    const wait_completed = if (waited_while_streams_open)
+        streams_completed
+    else
+        std.Io.Clock.awake.now(io);
 
     return .{
         .stdout = try stdout.toOwnedSlice(allocator),
         .stderr = try stderr.toOwnedSlice(allocator),
+        .status = final_status,
+        .streams_completed = streams_completed,
+        .wait_completed = wait_completed,
     };
 }
 
@@ -781,6 +825,27 @@ fn waitForPid(pid: std.os.linux.pid_t) !Status {
         }
     }
 
+    return statusFromRawWait(raw_status);
+}
+
+fn waitForPidNoHang(pid: std.os.linux.pid_t) !?Status {
+    var raw_status: u32 = 0;
+    while (true) {
+        const rc = std.os.linux.waitpid(pid, &raw_status, std.os.linux.W.NOHANG);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                if (rc == 0) return null;
+                break;
+            },
+            .INTR => continue,
+            else => return error.Unexpected,
+        }
+    }
+
+    return statusFromRawWait(raw_status);
+}
+
+fn statusFromRawWait(raw_status: u32) Status {
     if (std.os.linux.W.IFEXITED(raw_status)) {
         return .{ .exited = std.os.linux.W.EXITSTATUS(raw_status) };
     }
