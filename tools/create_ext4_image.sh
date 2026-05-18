@@ -59,15 +59,9 @@ if command -v mkfs.ext4 >/dev/null 2>&1; then
   trap 'rm -f "${tmp}"' EXIT
   create_sparse_image "${tmp}" "${size_mib}"
   mkfs.ext4 -F -q "${tmp}"
-elif command -v nix >/dev/null 2>&1; then
-  dir="$(cd "$(dirname "${image}")" && pwd)"
-  tmp="${dir}/.${base}.tmp.$$"
-  trap 'rm -f "${tmp}"' EXIT
-  create_sparse_image "${tmp}" "${size_mib}"
-  nix shell nixpkgs#e2fsprogs -c mkfs.ext4 -F -q "${tmp}"
 else
   if ! command -v docker >/dev/null 2>&1; then
-    echo "mkfs.ext4 is unavailable and neither nix nor docker is installed; cannot format ${image}" >&2
+    echo "mkfs.ext4 is unavailable and docker is not installed; cannot format ${image}" >&2
     exit 1
   fi
   docker_cmd=(docker)
