@@ -194,6 +194,8 @@ static const struct inode_operations actiondfs_file_iops;
 static const struct file_operations actiondfs_dir_fops;
 static const struct file_operations actiondfs_file_fops;
 static const struct address_space_operations actiondfs_aops;
+static size_t actiondfs_readdir_start_index(loff_t ctx_pos, loff_t base,
+					    size_t count);
 
 static struct actiondfs_sb_info *actiondfs_sbi(struct super_block *sb)
 {
@@ -1689,7 +1691,7 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	struct inode *inode = file_inode(file);
 	struct actiondfs_node *dir = inode->i_private;
 	size_t i;
-	loff_t pos = 2;
+	loff_t base = 2;
 	int err;
 
 	err = actiondfs_ensure_loaded(inode->i_sb, dir);
@@ -1704,22 +1706,23 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	if (dir->cached_dir) {
 		struct actiondfs_cached_dir *cached = dir->cached_dir;
 
-		for (i = 0; i < cached->file_count; i++, pos++) {
+		i = actiondfs_readdir_start_index(ctx->pos, base, cached->file_count);
+		for (; i < cached->file_count; i++) {
 			struct actiondfs_cached_child *child = &cached->file_children[i];
+			loff_t pos = base + i;
 
-			if (pos < ctx->pos)
-				continue;
 			if (!dir_emit(ctx, child->name, child->name_len, 0, DT_REG))
 				return 0;
 			actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
 			ctx->pos = pos + 1;
 		}
+		base += cached->file_count;
 
-		for (i = 0; i < cached->dir_count; i++, pos++) {
+		i = actiondfs_readdir_start_index(ctx->pos, base, cached->dir_count);
+		for (; i < cached->dir_count; i++) {
 			struct actiondfs_cached_child *child = &cached->dir_children[i];
+			loff_t pos = base + i;
 
-			if (pos < ctx->pos)
-				continue;
 			if (!dir_emit(ctx, child->name, child->name_len, 0, DT_DIR))
 				return 0;
 			actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
@@ -1728,28 +1731,42 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 		return 0;
 	}
 
-	for (i = 0; i < dir->file_count; i++, pos++) {
+	i = actiondfs_readdir_start_index(ctx->pos, base, dir->file_count);
+	for (; i < dir->file_count; i++) {
 		struct actiondfs_node *child = dir->file_children[i];
+		loff_t pos = base + i;
 
-		if (pos < ctx->pos)
-			continue;
 		if (!dir_emit(ctx, child->name, child->name_len, child->ino, DT_REG))
 			return 0;
 		actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
 		ctx->pos = pos + 1;
 	}
+	base += dir->file_count;
 
-	for (i = 0; i < dir->dir_count; i++, pos++) {
+	i = actiondfs_readdir_start_index(ctx->pos, base, dir->dir_count);
+	for (; i < dir->dir_count; i++) {
 		struct actiondfs_node *child = dir->dir_children[i];
+		loff_t pos = base + i;
 
-		if (pos < ctx->pos)
-			continue;
 		if (!dir_emit(ctx, child->name, child->name_len, child->ino, DT_DIR))
 			return 0;
 		actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
 		ctx->pos = pos + 1;
 	}
 	return 0;
+}
+
+static size_t actiondfs_readdir_start_index(loff_t ctx_pos, loff_t base,
+					    size_t count)
+{
+	loff_t delta;
+
+	if (ctx_pos <= base)
+		return 0;
+	delta = ctx_pos - base;
+	if (delta >= (loff_t)count)
+		return count;
+	return (size_t)delta;
 }
 
 static int actiondfs_read_folio(struct file *file, struct folio *folio)
