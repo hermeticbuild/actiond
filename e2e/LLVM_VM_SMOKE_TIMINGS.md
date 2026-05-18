@@ -13,11 +13,11 @@ written to `/tmp/actiond-last-llvm-vm-smoke-path`.
 
 ## Latest Checked-In Result
 
-- Generated: `2026-05-17 23:33:58 EDT`
+- Generated: `2026-05-18 10:02:31 EDT`
 - Command: `e2e/run_llvm_vm_smoke.sh`
-- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.UoFQR7`
+- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.SWSmmb`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
-- Bazel elapsed: `632.048s`
+- Bazel elapsed: `304.864s`
 - Remote executions: `4469`
 
 ## Stage Timing
@@ -26,10 +26,10 @@ All values are milliseconds.
 
 | Stage                   |    Min |     p25 |     p50 |     p75 |      p95 |     Mean |       Max |
 | ----------------------- | -----: | ------: | ------: | ------: | -------: | -------: | --------: |
-| total                   | 35.303 | 729.248 | 840.234 | 995.507 | 2426.904 | 1024.392 | 26461.370 |
-| input fetch/materialize |  0.866 |   1.920 |   2.150 |   2.524 |    3.854 |    2.431 |    49.391 |
-| execute                 | 29.586 | 725.049 | 835.964 | 989.951 | 2417.001 | 1018.403 | 26348.139 |
-| output upload/collect   |  0.611 |   1.296 |   1.552 |   2.200 |    9.434 |    3.558 |  1758.227 |
+| total                   | 12.576 | 189.657 | 226.411 | 302.125 | 1703.820 |  438.992 | 26658.858 |
+| input fetch/materialize |  1.018 |   2.289 |   2.905 |   3.863 |    6.785 |    3.488 |   134.219 |
+| execute                 | 10.616 | 183.923 | 220.207 | 296.086 | 1687.573 |  430.824 | 26546.206 |
+| output upload/collect   |  0.537 |   1.569 |   2.225 |   3.667 |   11.510 |    4.680 |  1904.868 |
 
 ## Runner Timing
 
@@ -38,12 +38,12 @@ filesystem reads issued by the action through the mounted actiondfs tree.
 
 | Runner Stage   |    Min |     p25 |     p50 |     p75 |      p95 |    Mean |       Max |
 | -------------- | -----: | ------: | ------: | ------: | -------: | ------: | --------: |
-| parent prepare |  0.063 |   0.098 |   0.114 |   0.139 |    0.299 |   0.160 |    19.061 |
-| fork           |  0.071 |   0.201 |   0.240 |   0.272 |    0.391 |   0.253 |     2.104 |
-| child setup    |  0.003 |   0.193 |   0.216 |   0.260 |    0.529 |   0.277 |     5.537 |
-| process/io     | 28.666 | 721.681 | 831.834 | 984.308 | 2353.963 | 1007.170 | 26339.150 |
-| wait           |  0.006 |   2.176 |   2.874 |   4.404 |   63.035 |  10.481 |   243.954 |
-| stdio digest   |  0.001 |   0.002 |   0.003 |   0.003 |    0.005 |   0.004 |     0.659 |
+| parent prepare |  0.058 |   0.109 |   0.134 |   0.165 |    0.391 |   0.194 |    21.353 |
+| fork           |  0.087 |   0.169 |   0.199 |   0.235 |    0.487 |   0.238 |     6.692 |
+| child setup    |  0.002 |   0.189 |   0.234 |   0.349 |    0.971 |   0.371 |    13.146 |
+| process/io     | 10.034 | 179.942 | 215.072 | 290.392 | 1586.686 | 416.418 | 26536.243 |
+| wait           |  0.107 |   2.535 |   3.575 |   5.696 |   77.100 |  13.543 |   368.954 |
+| stdio digest   |  0.001 |   0.002 |   0.002 |   0.003 |    0.005 |   0.004 |     0.640 |
 
 ## Notes
 

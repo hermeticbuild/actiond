@@ -908,48 +908,53 @@ static struct file *actiondfs_open_cas_blob(struct actiondfs_sb_info *sbi,
 	}
 }
 
-static void actiondfs_drop_node_blob(struct actiondfs_node *node)
+static void actiondfs_drop_node_blob_locked(struct actiondfs_node *node)
 {
 	struct file *file = NULL;
 
-	mutex_lock(&node->blob_lock);
 	if (node->blob_file) {
 		file = node->blob_file;
 		node->blob_file = NULL;
 	}
-	mutex_unlock(&node->blob_lock);
 
 	if (file)
 		filp_close(file, NULL);
 }
 
-static struct file *actiondfs_get_node_blob(struct actiondfs_sb_info *sbi,
-					    struct actiondfs_node *node)
+static ssize_t actiondfs_read_node_blob(struct actiondfs_sb_info *sbi,
+					struct actiondfs_node *node,
+					void *addr, size_t wanted,
+					loff_t offset)
 {
 	struct file *file;
+	loff_t pos = offset;
+	ssize_t nread;
 	int err;
 
 	err = actiondfs_valid_hash(node->hash);
 	if (err)
-		return ERR_PTR(err);
+		return err;
 
 	mutex_lock(&node->blob_lock);
 	file = node->blob_file;
 	if (file) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
-		get_file(file);
-		mutex_unlock(&node->blob_lock);
-		return file;
+	} else {
+		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES);
+		file = actiondfs_open_cas_blob(sbi, node->hash);
+		if (IS_ERR(file)) {
+			err = PTR_ERR(file);
+			mutex_unlock(&node->blob_lock);
+			return err;
+		}
+		node->blob_file = file;
 	}
 
-	actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES);
-	file = actiondfs_open_cas_blob(sbi, node->hash);
-	if (!IS_ERR(file)) {
-		node->blob_file = file;
-		get_file(file);
-	}
+	nread = kernel_read(file, addr, wanted, &pos);
+	if (nread == -ESTALE)
+		actiondfs_drop_node_blob_locked(node);
 	mutex_unlock(&node->blob_lock);
-	return file;
+	return nread;
 }
 
 static int actiondfs_pb_read_varint(const u8 *data, size_t len,
@@ -1797,8 +1802,7 @@ static int actiondfs_read_folio(struct file *file, struct folio *folio)
 	struct inode *inode = file_inode(file);
 	struct actiondfs_node *node = inode->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
-	struct file *blob = NULL;
-	void *addr;
+	u8 *addr;
 	loff_t offset = folio_pos(folio);
 	size_t folio_len = folio_size(folio);
 	size_t wanted = 0;
@@ -1806,7 +1810,6 @@ static int actiondfs_read_folio(struct file *file, struct folio *folio)
 	int err = 0;
 
 	addr = kmap_local_folio(folio, 0);
-	memset(addr, 0, folio_len);
 
 	if (offset < node->size)
 		wanted = min_t(u64, folio_len, node->size - offset);
@@ -1817,37 +1820,29 @@ static int actiondfs_read_folio(struct file *file, struct folio *folio)
 		actiondfs_stat_inc(ACTIONDFS_STAT_READ_FOLIOS);
 		actiondfs_stat_add(ACTIONDFS_STAT_READ_FOLIO_BYTES, (u64)wanted);
 		do {
-			loff_t pos = offset;
-
-			blob = actiondfs_get_node_blob(sbi, node);
-			if (IS_ERR(blob)) {
-				err = PTR_ERR(blob);
-				blob = NULL;
-			} else {
-				nread = kernel_read(blob, addr, wanted, &pos);
-				if (nread < 0)
-					err = nread;
-				else if (nread != wanted)
-					err = -EIO;
-				else
-					err = 0;
-				filp_close(blob, NULL);
-				blob = NULL;
-			}
-			if (err == -ESTALE)
-				actiondfs_drop_node_blob(node);
+			nread = actiondfs_read_node_blob(sbi, node, addr, wanted,
+							 offset);
+			if (nread < 0)
+				err = nread;
+			else if (nread != wanted)
+				err = -EIO;
+			else
+				err = 0;
 		} while (actiondfs_retry_read_folio_stale(err, &stale_attempts));
 
 		if (err)
 			goto out;
+
+		if (wanted < folio_len)
+			memset(addr + wanted, 0, folio_len - wanted);
+	} else {
+		memset(addr, 0, folio_len);
 	}
 
 	folio_mark_uptodate(folio);
 
 out:
 	kunmap_local(addr);
-	if (blob)
-		filp_close(blob, NULL);
 	folio_unlock(folio);
 	return err;
 }
