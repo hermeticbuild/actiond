@@ -15,10 +15,11 @@ also written to `/tmp/actiond-last-llvm-fs-compare-path`.
 
 ## Latest Checked-In Result
 
-Generated on 2026-05-17 after enabling the shared parsed Directory cache.
+Generated on 2026-05-17 after adding the `actiondfs_old` no-cache baseline and
+sparse per-mount cached child materialization in `actiondfs`.
 
 - Command: `e2e/llvm_fs_compare.sh`
-- Comparison output: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-fs-compare.92FZsl`
+- Comparison output: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-fs-compare.aYzE13`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
 - Actions: 4,469 remote executions per variant
 
@@ -28,21 +29,21 @@ All timing values are milliseconds except Bazel elapsed.
 
 | FS                   | Bazel elapsed | Total p50 | Total mean | Input p50 | Fixed/no-wait p50 | Process/IO p50 | Output p50 |
 | -------------------- | ------------: | --------: | ---------: | --------: | ----------------: | -------------: | ---------: |
-| `actiondfs`          |      609.392s |   814.256 |    989.512 |     2.089 |             4.425 |        805.868 |      1.524 |
-| `actiondfs_hybrid32` |      618.077s |   798.814 |    997.906 |     2.032 |             4.257 |        791.084 |      1.472 |
+| `actiondfs_old`      |      624.272s |   797.786 |   1003.265 |     2.136 |             5.703 |        787.329 |      2.740 |
+| `actiondfs`          |      612.943s |   793.774 |    994.546 |     2.087 |             4.401 |        786.047 |      1.504 |
 
 ## Stage Timing
 
 | Stage                   | FS                   |    Min |     p25 |     p50 |     p75 |      p95 |    Mean |       Max |
 | ----------------------- | -------------------- | -----: | ------: | ------: | ------: | -------: | ------: | --------: |
-| total                   | `actiondfs`          | 35.166 | 718.151 | 814.256 | 940.497 | 2335.747 | 989.512 | 27636.321 |
-| total                   | `actiondfs_hybrid32` | 40.534 | 704.760 | 798.814 | 921.346 | 2337.044 | 997.906 | 27322.631 |
-| input fetch/materialize | `actiondfs`          |  1.178 |   1.879 |   2.089 |   2.397 |    3.433 |   2.277 |    21.974 |
-| input fetch/materialize | `actiondfs_hybrid32` |  0.984 |   1.838 |   2.032 |   2.325 |    3.847 |   2.341 |    84.229 |
-| execute                 | `actiondfs`          | 29.035 | 713.859 | 810.177 | 935.265 | 2325.293 | 983.696 | 27524.079 |
-| execute                 | `actiondfs_hybrid32` | 16.577 | 701.109 | 795.213 | 917.373 | 2327.627 | 992.228 | 27211.286 |
-| output upload/collect   | `actiondfs`          |  0.579 |   1.300 |   1.524 |   2.090 |    9.561 |   3.539 |  1305.125 |
-| output upload/collect   | `actiondfs_hybrid32` |  0.529 |   1.257 |   1.472 |   2.068 |    9.457 |   3.337 |  1476.515 |
+| total                   | `actiondfs_old`      | 25.014 | 698.771 | 797.786 | 946.038 | 2492.443 | 1003.265 | 28090.655 |
+| total                   | `actiondfs`          | 33.243 | 701.693 | 793.774 | 931.148 | 2474.662 |  994.546 | 27703.582 |
+| input fetch/materialize | `actiondfs_old`      |  1.127 |   1.900 |   2.136 |   2.531 |    4.041 |    2.496 |   154.973 |
+| input fetch/materialize | `actiondfs`          |  0.899 |   1.870 |   2.087 |   2.406 |    3.638 |    2.315 |    28.714 |
+| execute                 | `actiondfs_old`      | 22.032 | 693.336 | 791.743 | 940.094 | 2477.791 |  995.640 | 27978.339 |
+| execute                 | `actiondfs`          | 27.829 | 697.494 | 789.602 | 927.126 | 2461.397 |  988.315 | 27593.837 |
+| output upload/collect   | `actiondfs_old`      |  0.801 |   2.222 |   2.740 |   4.477 |   13.472 |    5.129 |  1683.380 |
+| output upload/collect   | `actiondfs`          |  0.458 |   1.282 |   1.504 |   2.042 |   10.099 |    3.916 |  2137.459 |
 
 ## Runner Timing
 
@@ -51,23 +52,27 @@ the action through the mounted filesystem.
 
 | Runner Stage   | FS                   |    Min |     p25 |     p50 |     p75 |      p95 |    Mean |       Max |
 | -------------- | -------------------- | -----: | ------: | ------: | ------: | -------: | ------: | --------: |
-| parent prepare | `actiondfs`          |  0.065 |   0.097 |   0.112 |   0.138 |    0.310 |   0.151 |    19.183 |
-| parent prepare | `actiondfs_hybrid32` |  0.064 |   0.097 |   0.113 |   0.140 |    0.245 |   0.165 |    22.418 |
-| fork           | `actiondfs`          |  0.069 |   0.211 |   0.252 |   0.289 |    0.424 |   0.267 |     4.339 |
-| fork           | `actiondfs_hybrid32` |  0.077 |   0.191 |   0.234 |   0.278 |    0.387 |   0.248 |     2.784 |
-| child setup    | `actiondfs`          |  0.003 |   0.192 |   0.213 |   0.252 |    0.528 |   0.275 |     4.811 |
-| child setup    | `actiondfs_hybrid32` |  0.003 |   0.191 |   0.210 |   0.246 |    0.529 |   0.281 |     7.498 |
-| process/io     | `actiondfs`          | 28.177 | 710.122 | 805.868 | 930.227 | 2263.243 | 972.641 | 27515.412 |
-| process/io     | `actiondfs_hybrid32` | 15.691 | 697.243 | 791.084 | 912.769 | 2264.761 | 981.049 | 27200.838 |
-| wait           | `actiondfs`          |  0.004 |   2.491 |   3.212 |   4.642 |   61.345 |  10.303 |   176.440 |
-| wait           | `actiondfs_hybrid32` |  0.008 |   2.403 |   3.100 |   4.559 |   60.373 |  10.425 |   241.022 |
-| stdio digest   | `actiondfs`          |  0.001 |   0.002 |   0.002 |   0.003 |    0.004 |   0.003 |     0.557 |
-| stdio digest   | `actiondfs_hybrid32` |  0.001 |   0.002 |   0.002 |   0.003 |    0.004 |   0.003 |     0.564 |
+| parent prepare | `actiondfs_old`      |  0.065 |   0.100 |   0.114 |   0.142 |    0.296 |   0.175 |    28.489 |
+| parent prepare | `actiondfs`          |  0.060 |   0.098 |   0.115 |   0.142 |    0.384 |   0.177 |    26.622 |
+| fork           | `actiondfs_old`      |  0.061 |   0.189 |   0.208 |   0.237 |    0.352 |   0.225 |     1.266 |
+| fork           | `actiondfs`          |  0.070 |   0.218 |   0.281 |   0.324 |    0.477 |   0.290 |     1.754 |
+| child setup    | `actiondfs_old`      |  0.002 |   0.189 |   0.212 |   0.254 |    0.501 |   0.270 |     5.201 |
+| child setup    | `actiondfs`          |  0.003 |   0.189 |   0.211 |   0.254 |    0.551 |   0.272 |     5.175 |
+| process/io     | `actiondfs_old`      | 21.405 | 689.278 | 787.329 | 933.913 | 2405.297 | 984.404 | 27969.079 |
+| process/io     | `actiondfs`          | 26.794 | 694.074 | 786.047 | 922.350 | 2395.695 | 977.294 | 27584.076 |
+| wait           | `actiondfs_old`      |  0.212 |   2.436 |   3.164 |   4.623 |   61.153 |  10.508 |   217.380 |
+| wait           | `actiondfs`          |  0.339 |   2.127 |   2.800 |   4.202 |   63.575 |  10.222 |   125.217 |
+| stdio digest   | `actiondfs_old`      |  0.001 |   0.002 |   0.002 |   0.003 |    0.004 |   0.003 |     0.932 |
+| stdio digest   | `actiondfs`          |  0.001 |   0.002 |   0.003 |   0.003 |    0.005 |   0.003 |     0.895 |
 
 ## Interpretation
 
-`actiondfs_hybrid32` improved the median per-action path slightly, especially
-`process/io`, but the full Bazel wall-clock still favored canonical
-`actiondfs` by 8.685s, about 1.4%. The difference is small enough that the
-production default should stay `actiondfs` until repeated LLVM runs show a
-consistent wall-clock win for the hybrid.
+Cached `actiondfs` beat the no-cache `actiondfs_old` baseline by 11.329s of
+Bazel wall time, about 1.8%. Median total action time improved by 4.012ms,
+median fixed overhead without wait improved by 1.302ms, and median output
+collection improved by 1.236ms. The p95 and mean totals also improved.
+
+The gain is real but modest because `process/io` dominates this workload. The
+cache mostly trims repeated Directory parsing and per-mount child allocation,
+then shows up as lower fixed overhead and fewer long input-materialization
+outliers.
