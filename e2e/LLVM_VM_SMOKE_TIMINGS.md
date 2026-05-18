@@ -52,6 +52,22 @@ subset of the VM `llvm-tblgen` graph.
 - Mac-host Bazel elapsed: `103.509s`
 - Mac-host processes: `2310 processes: 2 action cache hit, 204 internal, 2106 darwin-sandbox`
 
+## Run Comparison
+
+| Metric                  | Previous |      New |     Delta |
+| ----------------------- | -------: | -------: | --------: |
+| VM measured build       | 183.865s | 115.276s | -68.589s |
+| Mac-host measured build | 114.642s | 103.509s | -11.133s |
+| VM gap vs mac-host      | +69.223s | +11.767s | -57.456s |
+| VM warmup               | 208.903s | 119.817s | -89.086s |
+
+| VM Stage                | Previous Mean |  New Mean |      Delta |
+| ----------------------- | ------------: | --------: | ---------: |
+| total                   |     661.268ms | 355.384ms | -305.884ms |
+| input fetch/materialize |       4.624ms |   0.387ms |   -4.237ms |
+| execute                 |     651.309ms | 351.650ms | -299.659ms |
+| output upload/collect   |       5.336ms |   3.343ms |   -1.993ms |
+
 ## VM Stage Timing
 
 All values are milliseconds.
