@@ -33,49 +33,49 @@ subset of the VM `llvm-tblgen` graph.
 
 ## Latest Checked-In Result
 
-- Generated: `2026-05-18 15:11:12 EDT`
+- Generated: `2026-05-18 19:48:51 EDT`
 - Command: `e2e/run_llvm_vm_smoke.sh`
-- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.98mzRF`
+- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.qKL7wM`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
 - VM warmup target: `//e2e:llvm_exec_warmup`
 - Target platform: `@llvm//platforms:linux_arm64_musl`
 - VM host platform: `@llvm//platforms:linux_arm64_musl`
 - Build mode: `-c opt --strip=always --stripopt=--strip-all`
-- VM warmup elapsed: `208.903s`
+- VM warmup elapsed: `119.817s`
 - VM warmup processes: `2207 processes: 190 internal, 2017 remote`
-- VM Bazel elapsed: `183.865s`
+- VM Bazel elapsed: `115.276s`
 - VM executions: `2106`
 - VM timing records parsed: `2106`
-- VM Bazel processes: `2310 processes: 204 internal, 2106 remote`
-- Mac-host warmup elapsed: `61.985s`
+- VM Bazel processes: `2310 processes: 4 action cache hit, 204 internal, 2106 remote`
+- Mac-host warmup elapsed: `53.758s`
 - Mac-host warmup processes: `703 processes: 157 internal, 546 darwin-sandbox`
-- Mac-host Bazel elapsed: `114.642s`
+- Mac-host Bazel elapsed: `103.509s`
 - Mac-host processes: `2310 processes: 2 action cache hit, 204 internal, 2106 darwin-sandbox`
 
 ## VM Stage Timing
 
 All values are milliseconds.
 
-| Stage                   |    Min |     p25 |     p50 |     p75 |      p95 |    Mean |       Max |
-| ----------------------- | -----: | ------: | ------: | ------: | -------: | ------: | --------: |
-| total                   | 33.403 | 214.940 | 263.475 | 463.395 | 2666.949 | 661.268 | 15514.374 |
-| input fetch/materialize |  1.193 |   2.804 |   3.584 |   4.837 |    9.702 |   4.624 |   204.571 |
-| execute                 | 14.731 | 208.003 | 257.134 | 451.572 | 2655.573 | 651.309 | 15486.625 |
-| output upload/collect   |  0.717 |   1.824 |   2.698 |   4.309 |   13.898 |   5.336 |  1844.774 |
+| Stage                   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |       Max |
+| ----------------------- | ----: | -----: | -----: | -----: | -------: | ------: | --------: |
+| total                   | 8.565 | 44.714 | 59.586 | 94.307 | 2029.841 | 355.384 | 10151.611 |
+| input fetch/materialize | 0.121 |  0.169 |  0.208 |  0.389 |    0.877 |   0.387 |    17.359 |
+| execute                 | 5.413 | 43.557 | 58.327 | 92.327 | 2017.664 | 351.650 | 10130.017 |
+| output upload/collect   | 0.168 |  0.378 |  0.497 |  1.258 |   15.145 |   3.343 |   656.042 |
 
 ## Runner Timing
 
 `process/io` includes the action process runtime, stdout/stderr drain, and lazy
 filesystem reads issued by the action through the mounted actiondfs tree.
 
-| Runner Stage   |    Min |     p25 |     p50 |     p75 |      p95 |    Mean |       Max |
-| -------------- | -----: | ------: | ------: | ------: | -------: | ------: | --------: |
-| parent prepare |  0.077 |   0.122 |   0.152 |   0.209 |    0.452 |   0.205 |     6.238 |
-| fork           |  0.124 |   0.225 |   0.254 |   0.298 |    0.609 |   0.302 |     4.305 |
-| child setup    |  0.003 |   0.206 |   0.270 |   0.448 |    1.536 |   0.474 |    10.404 |
-| process/io     | 13.507 | 203.028 | 250.813 | 444.407 | 2532.944 | 628.614 | 15247.840 |
-| wait           |  0.263 |   3.154 |   4.566 |   7.655 |  115.403 |  21.628 |   656.632 |
-| stdio digest   |  0.001 |   0.002 |   0.003 |   0.003 |    0.006 |   0.004 |     0.573 |
+| Runner Stage   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |       Max |
+| -------------- | ----: | -----: | -----: | -----: | -------: | ------: | --------: |
+| parent prepare | 0.067 |  0.105 |  0.141 |  0.219 |    0.532 |   0.222 |    18.367 |
+| fork           | 0.171 |  0.377 |  0.436 |  1.124 |    4.599 |   1.109 |    31.977 |
+| child setup    | 0.002 |  0.298 |  1.063 |  3.164 |   10.039 |   2.702 |    60.060 |
+| process/io     | 0.818 | 36.165 | 48.565 | 79.597 | 2001.443 | 340.796 | 10121.955 |
+| wait           | 0.000 |  2.245 |  4.047 |  8.193 |   19.182 |   6.703 |   227.150 |
+| stdio digest   | 0.002 |  0.004 |  0.006 |  0.007 |    0.011 |   0.009 |     1.904 |
 
 ## Notes
 
@@ -89,3 +89,9 @@ their respective exec-config warmups: `2310` total processes and `2106` action
 executions. The VM warmup is larger because it builds Linux-musl exec tools and
 runtimes inside the VM; the mac-host warmup builds the analogous macOS exec
 tools locally. The measured phase is the apples-to-apples target build.
+
+Compared with the previous checked-in run, the measured VM phase improved from
+`183.865s` to `115.276s`. The largest visible stage change is input
+fetch/materialization, whose mean dropped from `4.624ms` to `0.387ms`; most
+remaining time is inside the action process and lazy actiondfs reads, which are
+counted under `execute/process/io`.
