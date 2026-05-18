@@ -19,9 +19,8 @@ into the CAS.
 
 - macOS host binary.
 - `serve-vm` starts and supervises a Virtualization.framework Linux VM.
-- Handles public REAPI CAS, ByteStream, ActionCache, Capabilities, and GetTree
-  calls on the host.
-- Proxies only `Execution/Execute` into the VM.
+- Proxies public REAPI traffic into the guest over virtio-vsock.
+- Does not keep a second host CAS in VM mode.
 
 `linux-actiond`
 
@@ -64,7 +63,7 @@ The VM is intentionally small:
 - initramfs with only `linux-actiond-guest`
 - no network devices
 - virtio-vsock control channel
-- virtiofs host CAS share
+- writable virtio block device for the guest CAS
 - read-only virtiofs runtime image share
 - no SSH, package manager, systemd, graphics, audio, or user login
 
@@ -117,7 +116,7 @@ of forcing the HTTP/2 layer to build one giant response buffer.
 
 ## Darwin VM Request Routing
 
-The macOS VM path is deliberately asymmetric:
+The macOS VM path keeps all REAPI state inside the Linux guest:
 
 ```text
 Bazel
@@ -125,47 +124,47 @@ Bazel
   | gRPC / REAPI
   v
 darwin-actiond
-  |-- CAS / ByteStream / AC / Capabilities / GetTree: handled on host
   |
-  `-- Execute: proxied over vsock
-        |
-        v
-     linux-actiond-guest
+  | framed gRPC payloads over virtio-vsock
+  v
+linux-actiond-guest
+  |
+  | CAS / ByteStream / AC / Capabilities / GetTree / Execute
+  v
+guest ext4 CAS on virtio-blk
 ```
 
-Only `Execute` needs the Linux VM. Keeping CAS and ActionCache on the host
-avoids needless host-to-guest copies for uploads, downloads, cache probes, and
-action cache operations.
-
-`Execute` responses are still inspected by the host after the guest returns so
-that output blobs can be imported from the guest CAS overlay back into the host
-CAS before the response is sent to Bazel.
+The host process still owns the public TCP listener and VM lifecycle, but CAS,
+ActionCache, and output storage are handled by `linux-actiond-guest` against the
+native guest filesystem.
 
 ## CAS Layout and Data Flow
 
-The host CAS lives under the actiond root and uses content-addressed paths for
-blobs and materialized tree directories.
+The CAS uses content-addressed paths for blobs and materialized tree
+directories.
 
 In VM mode:
 
-- the host CAS is exported read-only via virtiofs
-- the guest mounts it at `/host-cas`
-- the guest exposes `/cas` as an overlay:
-  - lowerdir: `/host-cas`
-  - upperdir: tmpfs under `/work`
+- `darwin-actiond` attaches a writable raw disk image as a virtio block device
+- the guest mounts that disk as ext4 at `/cas`
+- `linux-actiond-guest` stores CAS blobs, materialized trees, and ActionCache
+  state there
+- per-action workspaces remain tmpfs under `/work`
 
-This gives the guest read access to host inputs and a writable CAS view for
-newly produced outputs, without letting the guest mutate the host CAS directly.
+This removes the previous host-CAS-plus-virtiofs hot path. Client uploads and
+downloads cross the VM boundary as REAPI/ByteStream traffic, but action input
+reads and action output writes hit a native Linux filesystem once the data is in
+the guest CAS.
 
 ### Uploads
 
-Client uploads go straight to the host:
+Client uploads are forwarded to the guest:
 
 ```text
-Bazel ByteStream/Write -> darwin-actiond -> host CAS
+Bazel ByteStream/Write -> darwin-actiond -> vsock -> guest CAS
 ```
 
-They do not pass through the VM.
+The host does not mirror uploaded blobs into a second CAS.
 
 ### Inputs
 
@@ -175,7 +174,7 @@ action, the guest passes the REAPI input-root digest to actiondfs. The child
 mount namespace mounts:
 
 - `actiondfs` as the lower filesystem, resolving REAPI directory and file nodes
-  lazily from the read-only host CAS mounted at `/host-cas`
+  lazily from the guest CAS mounted at `/cas`
 - stock overlayfs at `/workspace`, using per-action upper/work directories
 
 `actiondfs` caches parsed non-root Directory protos by digest and materializes
@@ -207,25 +206,15 @@ which lets Docker e2e run on ordinary host kernels:
   whole directories
 - output parent directories are created in the writable execroot
 
-Hardlinks are not used as a fallback. In the VM, host CAS is virtiofs and the
-execroot is a different filesystem view, so cross-filesystem hardlink attempts
-would be the wrong primitive.
+Hardlinks are not used as a fallback. The VM uses actiondfs plus overlayfs for
+inputs, while Linux-direct uses bind mounts.
 
 ### Outputs
 
 The guest writes action outputs into its writable action root, then stores
-declared output files and directory trees into the guest `/cas` overlay.
-
-After `Execute` returns:
-
-1. the host parses the `ExecuteResponse`
-2. the host walks output file, stdout, stderr, and output tree digests
-3. missing output blobs are read from the guest over internal ByteStream
-4. bytes stream directly into a host CAS blob writer
-5. the host ActionCache is updated unless the action requested no caching
-
-This means inputs are not copied into the VM, and only produced outputs cross
-from guest to host.
+declared output files and directory trees directly into the guest `/cas`.
+`ExecuteResponse` is returned to the host as normal gRPC payload bytes; there is
+no post-Execute host import step in VM mode.
 
 ## Execution Lifecycle
 
@@ -280,7 +269,7 @@ and avoids direct writes to CAS inputs.
 `darwin-actiond serve-vm` adds a VM boundary around the same Linux executor.
 macOS only exposes:
 
-- read-only virtiofs CAS directory
+- writable virtio block device containing the guest ext4 CAS
 - read-only virtiofs directory containing `runtimes.sqfs`
 - virtio-vsock control channel
 - serial stderr for logs
@@ -391,27 +380,22 @@ actiond guess whether an arbitrary action needs a glibc runtime mounted into the
 chroot.
 
 The VM e2e is the test that proves the Virtualization.framework path can boot,
-connect over vsock, execute actions, and import outputs back to host CAS.
-It is also the actiondfs coverage path, because the built-in filesystem is only
+connect over vsock, execute actions, and serve CAS from the guest ext4 image. It
+is also the actiondfs coverage path, because the built-in filesystem is only
 present in the Bazel-built VM kernel.
 
 ## Performance Notes
 
 The main copy-minimizing choices are:
 
-- host handles public CAS and ActionCache methods
+- VM mode keeps CAS and ActionCache on a native guest ext4 filesystem
 - VM action inputs are served by an actiondfs input-root lowerdir plus stock
   overlayfs upperdir instead of per-file bind mounts or hardlink forests
 - Linux-host action inputs are bind-mounted instead of copied
 - tree directories are bind-mounted at directory granularity when available
-- guest output import streams bytes into host CAS writers
 - runtimes are mounted from SquashFS instead of unpacked into the initramfs
 - kernel and initramfs are compressed for distribution, then inflated once per
   worker root as needed
-
-The remaining unavoidable VM-mode data movement is output import from guest CAS
-overlay to host CAS. That is the price of keeping the host CAS read-only inside
-the VM.
 
 ## Current Caveats
 

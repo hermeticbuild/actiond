@@ -1,17 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zstd = if (builtin.os.tag == .macos) @import("c") else struct {};
-const action_cache = @import("action_cache.zig");
-const cas = @import("cas.zig");
 const control_protocol = @import("control_protocol.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
 const embedded_payload = @import("embedded_payload.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 const guest_proxy = @import("guest_proxy.zig");
-const reapi_dispatch = @import("reapi_dispatch.zig");
 
 pub const Error = error{
+    InvalidCasImage,
     MissingServeArgumentValue,
     MissingVmInitramfs,
     MissingVmKernel,
@@ -28,7 +26,8 @@ const zstd_magic = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd };
 pub const ServeVmOptions = struct {
     listen: []const u8 = "127.0.0.1:8980",
     root: []const u8 = "/tmp/actiond-vm",
-    cas: ?[]const u8 = null,
+    cas_image: ?[]const u8 = null,
+    cas_image_size_mib: u64 = 32 * 1024,
     kernel: ?[]const u8 = null,
     initramfs: ?[]const u8 = null,
     runtime_image: ?[]const u8 = null,
@@ -56,12 +55,18 @@ pub fn parseServeVmArgs(args: []const []const u8) !ServeVmOptions {
             options.root = args[i];
         } else if (std.mem.startsWith(u8, arg, "--root=")) {
             options.root = arg["--root=".len..];
-        } else if (std.mem.eql(u8, arg, "--cas")) {
+        } else if (std.mem.eql(u8, arg, "--cas-image")) {
             i += 1;
             if (i >= args.len) return error.MissingServeArgumentValue;
-            options.cas = args[i];
-        } else if (std.mem.startsWith(u8, arg, "--cas=")) {
-            options.cas = arg["--cas=".len..];
+            options.cas_image = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--cas-image=")) {
+            options.cas_image = arg["--cas-image=".len..];
+        } else if (std.mem.eql(u8, arg, "--cas-image-size-mib")) {
+            i += 1;
+            if (i >= args.len) return error.MissingServeArgumentValue;
+            options.cas_image_size_mib = try parseU64(args[i]);
+        } else if (std.mem.startsWith(u8, arg, "--cas-image-size-mib=")) {
+            options.cas_image_size_mib = try parseU64(arg["--cas-image-size-mib=".len..]);
         } else if (std.mem.eql(u8, arg, "--kernel")) {
             i += 1;
             if (i >= args.len) return error.MissingServeArgumentValue;
@@ -126,20 +131,13 @@ pub fn serve(
     var root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{});
     defer root_dir.close(io);
 
-    const owned_cas_path = if (options.cas == null)
-        try std.fs.path.join(allocator, &.{ options.root, "cas" })
+    const owned_cas_image_path = if (options.cas_image == null)
+        try std.fs.path.join(allocator, &.{ options.root, "cas.ext4" })
     else
         "";
-    defer if (options.cas == null) allocator.free(owned_cas_path);
-    const cas_path = options.cas orelse owned_cas_path;
-
-    var cas_dir = try std.Io.Dir.cwd().createDirPathOpen(io, cas_path, .{});
-    defer cas_dir.close(io);
-    try cas.Store.init(cas_dir).ensureLayout(io);
-
-    var ac_dir = try root_dir.createDirPathOpen(io, "ac", .{});
-    defer ac_dir.close(io);
-    try action_cache.Store.init(ac_dir).ensureLayout(io);
+    defer if (options.cas_image == null) allocator.free(owned_cas_image_path);
+    const cas_image_path = options.cas_image orelse owned_cas_image_path;
+    try ensureCasImageFile(io, cas_image_path, options.cas_image_size_mib);
 
     const embedded_kernel = if (options.kernel == null)
         try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.kernel_name)
@@ -177,11 +175,11 @@ pub fn serve(
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas={s}\n", .{
+    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas_image={s}\n", .{
         boot_kernel_path,
         boot_initramfs_path,
         runtime_image_path orelse "<none>",
-        cas_path,
+        cas_image_path,
     });
     try stderr.flush();
 
@@ -189,7 +187,7 @@ pub fn serve(
         .kernel_path = boot_kernel_path,
         .initramfs_path = boot_initramfs_path,
         .runtime_image_path = runtime_image_path,
-        .cas_path = cas_path,
+        .cas_image_path = cas_image_path,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
         .start_timeout_ms = options.start_timeout_ms,
@@ -207,13 +205,9 @@ pub fn serve(
         const stats_thread = try std.Thread.spawn(.{}, actiondfsStatsThread, .{ io, allocator, &fd_client, stats_path });
         stats_thread.detach();
     }
-    var local_server = reapi_dispatch.Server{
-        .store = cas.Store.initReady(cas_dir),
-        .action_cache_store = action_cache.Store.initReady(ac_dir),
-    };
     var proxy = guest_proxy.Proxy{
         .transport = fd_client.transport(),
-        .local_server = &local_server,
+        .local_server = null,
     };
     return grpc_http2_server.serveDispatcher(io, allocator, .{
         .listen = options.listen,
@@ -260,6 +254,22 @@ fn createParentDirs(io: std.Io, path: []const u8) !void {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
     if (slash == 0) return;
     try std.Io.Dir.cwd().createDirPath(io, path[0..slash]);
+}
+
+fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !void {
+    if (std.Io.Dir.cwd().statFile(io, path, .{})) |stat| {
+        if (stat.kind != .file) return error.InvalidCasImage;
+        return;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    try createParentDirs(io, path);
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    const size_bytes = try std.math.mul(u64, size_mib, 1024 * 1024);
+    try file.setLength(io, size_bytes);
 }
 
 fn sleepMilliseconds(milliseconds: u32) void {
@@ -438,8 +448,9 @@ test "parseServeVmArgs accepts VM flags" {
         "/tmp/Image",
         "--initramfs=/tmp/initramfs.cpio.zst",
         "--runtime-image=/tmp/runtimes.sqfs",
-        "--cas",
-        "/tmp/actiond-cas",
+        "--cas-image",
+        "/tmp/actiond-cas.ext4",
+        "--cas-image-size-mib=4096",
         "--memory-mib=768",
         "--cpus",
         "3",
@@ -454,7 +465,8 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqualStrings("/tmp/Image", options.kernel.?);
     try std.testing.expectEqualStrings("/tmp/initramfs.cpio.zst", options.initramfs.?);
     try std.testing.expectEqualStrings("/tmp/runtimes.sqfs", options.runtime_image.?);
-    try std.testing.expectEqualStrings("/tmp/actiond-cas", options.cas.?);
+    try std.testing.expectEqualStrings("/tmp/actiond-cas.ext4", options.cas_image.?);
+    try std.testing.expectEqual(@as(u64, 4096), options.cas_image_size_mib);
     try std.testing.expectEqual(@as(u64, 768), options.memory_mib);
     try std.testing.expectEqual(@as(u32, 3), options.cpus);
     try std.testing.expectEqual(@as(u32, 1234), options.start_timeout_ms);

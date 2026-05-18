@@ -63,7 +63,7 @@ void *actiond_vm_start(
     const char *kernel_path,
     const char *initramfs_path,
     const char *runtime_image_path,
-    const char *cas_path,
+    const char *cas_image_path,
     uint64_t memory_mib,
     uint32_t cpu_count,
     uint32_t start_timeout_ms,
@@ -78,18 +78,23 @@ void *actiond_vm_start(
 
         NSURL *kernelURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:kernel_path]];
         NSURL *initramfsURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:initramfs_path]];
-        NSURL *casURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:cas_path] isDirectory:YES];
+        NSURL *casImageURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:cas_image_path]];
 
         VZLinuxBootLoader *bootLoader = [[VZLinuxBootLoader alloc] initWithKernelURL:kernelURL];
         bootLoader.initialRamdiskURL = initramfsURL;
         bootLoader.commandLine = @"console=hvc0 init=/init panic=-1 quiet";
 
-        VZSharedDirectory *casDirectory = [[VZSharedDirectory alloc] initWithURL:casURL readOnly:YES];
-        VZSingleDirectoryShare *casShare = [[VZSingleDirectoryShare alloc] initWithDirectory:casDirectory];
-        VZVirtioFileSystemDeviceConfiguration *casFs = [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"cas"];
-        casFs.share = casShare;
-        NSMutableArray<VZDirectorySharingDeviceConfiguration *> *directoryDevices =
-            [NSMutableArray arrayWithObject:casFs];
+        NSError *casError = nil;
+        VZDiskImageStorageDeviceAttachment *casAttachment =
+            [[VZDiskImageStorageDeviceAttachment alloc] initWithURL:casImageURL readOnly:NO error:&casError];
+        if (casAttachment == nil) {
+            actiond_set_nserror(errbuf, errbuf_len, casError);
+            return NULL;
+        }
+        VZVirtioBlockDeviceConfiguration *casBlock =
+            [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:casAttachment];
+        NSMutableArray *storageDevices = [NSMutableArray arrayWithObject:casBlock];
+        NSMutableArray *directoryDevices = [NSMutableArray array];
 
         VZVirtualMachineConfiguration *configuration = [[VZVirtualMachineConfiguration alloc] init];
         configuration.bootLoader = bootLoader;
@@ -120,8 +125,9 @@ void *actiond_vm_start(
             }
             VZVirtioBlockDeviceConfiguration *runtimeBlock =
                 [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:runtimeAttachment];
-            configuration.storageDevices = @[ runtimeBlock ];
+            [storageDevices addObject:runtimeBlock];
         }
+        configuration.storageDevices = storageDevices;
         configuration.directorySharingDevices = directoryDevices;
 
         VZVirtioConsoleDeviceSerialPortConfiguration *serial = [[VZVirtioConsoleDeviceSerialPortConfiguration alloc] init];

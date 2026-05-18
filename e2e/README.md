@@ -21,6 +21,11 @@ Start `darwin-actiond serve-vm` on `127.0.0.1:8998` before running it. The
 script runs `bazel clean --expunge` by default so a fresh worker CAS gets a full
 upload.
 
+VM mode expects a writable ext4 CAS image attached as virtio-blk. The runner
+creates one automatically with `tools/create_ext4_image.sh`; set
+`ACTIOND_VM_CAS_IMAGE=/path/cas.ext4` to reuse a persistent image, and
+`ACTIOND_VM_CAS_IMAGE_SIZE_MIB=32768` to adjust the default sparse size.
+
 ## LLVM VM Smoke Runner
 
 `run_llvm_vm_smoke.sh` starts a fresh VM worker, runs the LLVM tblgen smoke,

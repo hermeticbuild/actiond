@@ -19,6 +19,8 @@ Environment:
   ACTIOND_E2E_HOST=127.0.0.1
   ACTIOND_VM_MEMORY_MIB=1024
   ACTIOND_VM_CPUS=4
+  ACTIOND_VM_CAS_IMAGE=/path/to/cas.ext4
+  ACTIOND_VM_CAS_IMAGE_SIZE_MIB=8192
   ACTIOND_E2E_BARE_COUNT=160
   ACTIOND_E2E_SOURCE_DIRS=8
   ACTIOND_E2E_SOURCE_FILES_PER_DIR=32
@@ -207,12 +209,18 @@ run_vm_e2e() {
   prepare_stress_workspace aarch64
 
   local server root log
+  local cas_image cas_image_size_mib
   local -a server_args
   root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-vm-e2e.XXXXXX")"
   log="${root}/darwin-actiond-vm.log"
+  cas_image="${ACTIOND_VM_CAS_IMAGE:-${root}/server/cas.ext4}"
+  cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
+  "${repo_root}/tools/create_ext4_image.sh" "${cas_image}" "${cas_image_size_mib}"
   server_args=(
     --listen="${endpoint}"
     --root="${root}/server"
+    --cas-image="${cas_image}"
+    --cas-image-size-mib="${cas_image_size_mib}"
     --memory-mib="${ACTIOND_VM_MEMORY_MIB:-1024}"
     --cpus="${ACTIOND_VM_CPUS:-4}"
   )

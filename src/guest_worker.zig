@@ -9,7 +9,6 @@ const control_protocol = @import("control_protocol.zig");
 const grpc_record = @import("grpc_record.zig");
 const reapi = @import("reapi.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
-const staged_cas_index = @import("staged_cas_index.zig");
 const vsock = @import("vsock.zig");
 
 pub const Error = error{
@@ -17,8 +16,6 @@ pub const Error = error{
 };
 
 pub const guest_cas_blob_root_path = "/cas/blobs/sha256";
-pub const host_cas_blob_root_path = "/host-cas/blobs/sha256";
-pub const staged_cas_blob_root_path = "/work/cas-upper/upper/blobs/sha256";
 
 pub fn run(io: std.Io) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
@@ -26,38 +23,26 @@ pub fn run(io: std.Io) !void {
     const allocator = std.heap.smp_allocator;
     var cas_dir = try std.Io.Dir.openDirAbsolute(io, "/cas", .{});
     defer cas_dir.close(io);
-    var host_cas_dir = try std.Io.Dir.openDirAbsolute(io, "/host-cas", .{});
-    defer host_cas_dir.close(io);
     var work_dir = try std.Io.Dir.openDirAbsolute(io, "/work", .{});
     defer work_dir.close(io);
-    var ac_dir = try work_dir.createDirPathOpen(io, "ac", .{});
-    defer ac_dir.close(io);
     var action_work_dir = try work_dir.createDirPathOpen(io, "actions", .{});
     defer action_work_dir.close(io);
-    var cleanup_dir = try std.Io.Dir.openDirAbsolute(io, "/work/cas-upper/upper", .{});
-    defer cleanup_dir.close(io);
 
     try cas.Store.init(cas_dir).ensureLayout(io);
+    var ac_dir = try cas_dir.createDirPathOpen(io, "ac", .{});
+    defer ac_dir.close(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
-
-    var staged_index = staged_cas_index.Index{};
-    defer staged_index.deinit(io, allocator);
 
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
         .use_actiondfs = true,
         .cas_blob_root_path = guest_cas_blob_root_path,
-        .input_cas_blob_root_path = host_cas_blob_root_path,
-        .staged_cas_blob_root_path = staged_cas_blob_root_path,
-        .staged_cas_index = &staged_index,
+        .input_cas_blob_root_path = guest_cas_blob_root_path,
     });
 
     const server: reapi_dispatch.Server = .{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
-        .cleanup_store = cas.Store.initReady(cleanup_dir),
-        .cleanup_visible_store = cas.Store.initReady(host_cas_dir),
-        .cleanup_staged_index = &staged_index,
         .work_root = action_work_dir,
         .execution_options = execution_options.options,
     };
@@ -369,10 +354,8 @@ test "guest worker is Linux-only" {
     }
 }
 
-test "guest worker uses CAS overlay for execution and host CAS for cleanup visibility" {
+test "guest worker uses guest-native CAS for actiondfs reads" {
     try std.testing.expectEqualStrings("/cas/blobs/sha256", guest_cas_blob_root_path);
-    try std.testing.expectEqualStrings("/host-cas/blobs/sha256", host_cas_blob_root_path);
-    try std.testing.expectEqualStrings("/work/cas-upper/upper/blobs/sha256", staged_cas_blob_root_path);
 }
 
 fn encodeGrpcRequest(allocator: std.mem.Allocator, value: anytype) ![]u8 {

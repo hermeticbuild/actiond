@@ -36,10 +36,9 @@ const readonly_virtiofs_flags = std.os.linux.MS.RDONLY |
     std.os.linux.MS.NODEV |
     std.os.linux.MS.NOATIME;
 
-pub const host_cas_mount: Mount = .{ .source = "cas", .target = "/host-cas", .fstype = "virtiofs", .flags = readonly_virtiofs_flags };
 pub const runtime_image_share_mount: Mount = .{ .source = "runtimes", .target = "/runtime-image", .fstype = "virtiofs", .flags = readonly_virtiofs_flags };
 pub const runtime_image_share_path: [:0]const u8 = "/runtime-image/runtimes.sqfs";
-pub const runtime_block_devices = [_][:0]const u8{
+pub const block_devices = [_][:0]const u8{
     "/dev/vda",
     "/dev/vdb",
     "/dev/vdc",
@@ -55,12 +54,11 @@ const loop_set_fd: u32 = 0x4C00;
 const loop_major: u32 = 7;
 const max_fixed_loop_devices = 8;
 pub const runtimes_mount_target: [:0]const u8 = "/runtimes";
-pub const cas_overlay_mount: Mount = .{
-    .source = "overlay",
-    .target = "/cas",
-    .fstype = "overlay",
-    .data = "lowerdir=/host-cas,upperdir=/work/cas-upper/upper,workdir=/work/cas-upper/work",
-};
+pub const cas_mount_target: [:0]const u8 = "/cas";
+pub const cas_mount_fstype: [:0]const u8 = "ext4";
+const cas_mount_flags = std.os.linux.MS.NOSUID |
+    std.os.linux.MS.NODEV |
+    std.os.linux.MS.NOATIME;
 pub const worker_argv = [_][]const u8{ "/actiond", "--guest-worker" };
 
 pub fn run(io: std.Io) !void {
@@ -76,15 +74,25 @@ pub fn run(io: std.Io) !void {
     for (module_paths) |module_path| {
         try loadOptionalModule(stderr, module_path);
     }
-    try ensureDir(io, "work/cas-upper/upper");
-    try ensureDir(io, "work/cas-upper/work");
-    try mount(stderr, host_cas_mount);
-    try mount(stderr, cas_overlay_mount);
+    try mountCasStore(io, stderr);
     try mountRuntimeImage(io, stderr);
     stderr.writeAll("linux-actiond guest init mounted filesystems; starting worker\n") catch {};
     stderr.flush() catch {};
 
     return std.process.replace(io, .{ .argv = &worker_argv });
+}
+
+fn mountCasStore(io: std.Io, stderr: *std.Io.Writer) !void {
+    if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+
+    for (0..runtime_device_wait_attempts) |_| {
+        if (try mountFirstCasDevice(io, stderr)) return;
+        sleepRuntimeDevicePollInterval();
+    }
+
+    stderr.writeAll("CAS block device not found or not formatted as ext4\n") catch {};
+    stderr.flush() catch {};
+    return error.MountFailed;
 }
 
 fn mountRuntimeImage(io: std.Io, stderr: *std.Io.Writer) !void {
@@ -239,10 +247,17 @@ fn ensureLoopNode(path: [:0]const u8, minor: u32) void {
 }
 
 fn mountFirstRuntimeDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
-    for (runtime_block_devices) |device| {
+    for (block_devices) |device| {
         if (try tryMountRuntimeDevice(stderr, device)) return true;
     }
     return try mountSysBlockRuntimeDevice(io, stderr);
+}
+
+fn mountFirstCasDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
+    for (block_devices) |device| {
+        if (try tryMountCasDevice(stderr, device)) return true;
+    }
+    return try mountSysBlockCasDevice(io, stderr);
 }
 
 fn mountSysBlockRuntimeDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
@@ -257,6 +272,22 @@ fn mountSysBlockRuntimeDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
         var device_buffer: [128]u8 = undefined;
         const device = std.fmt.bufPrintZ(&device_buffer, "/dev/{s}", .{entry.name}) catch continue;
         if (try tryMountRuntimeDevice(stderr, device)) return true;
+    }
+    return false;
+}
+
+fn mountSysBlockCasDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
+    var sys_block = std.Io.Dir.cwd().openDir(io, "/sys/block", .{ .iterate = true }) catch return false;
+    defer sys_block.close(io);
+
+    var it = sys_block.iterate();
+    while (it.next(io) catch return false) |entry| {
+        if (entry.kind != .directory and entry.kind != .sym_link) continue;
+        if (!isCandidateBlockDevice(entry.name)) continue;
+
+        var device_buffer: [128]u8 = undefined;
+        const device = std.fmt.bufPrintZ(&device_buffer, "/dev/{s}", .{entry.name}) catch continue;
+        if (try tryMountCasDevice(stderr, device)) return true;
     }
     return false;
 }
@@ -289,11 +320,47 @@ fn tryMountRuntimeDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
             stderr.flush() catch {};
             return true;
         },
-        .INVAL, .NODEV, .NXIO, .NOENT => return false,
+        .INVAL, .NODEV, .NXIO, .NOENT, .BUSY => return false,
         else => |errno| {
             stderr.print("mount runtime image {s} on {s} failed: {s}\n", .{
                 device,
                 runtimes_mount_target,
+                @tagName(errno),
+            }) catch {};
+            stderr.flush() catch {};
+            return error.MountFailed;
+        },
+    }
+}
+
+fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
+    const linux = std.os.linux;
+    const fd_rc = linux.open(device.ptr, .{ .CLOEXEC = true }, 0);
+    switch (std.posix.errno(fd_rc)) {
+        .SUCCESS => _ = linux.close(@intCast(fd_rc)),
+        .NOENT, .NXIO, .NODEV, .NOTBLK => return false,
+        else => return false,
+    }
+
+    const data: [:0]const u8 = "errors=remount-ro";
+    const rc = linux.mount(
+        device.ptr,
+        cas_mount_target.ptr,
+        cas_mount_fstype.ptr,
+        cas_mount_flags,
+        @intFromPtr(data.ptr),
+    );
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => {
+            stderr.print("mounted guest CAS from {s}\n", .{device}) catch {};
+            stderr.flush() catch {};
+            return true;
+        },
+        .INVAL, .NODEV, .NXIO, .NOENT, .BUSY => return false,
+        else => |errno| {
+            stderr.print("mount guest CAS {s} on {s} failed: {s}\n", .{
+                device,
+                cas_mount_target,
                 @tagName(errno),
             }) catch {};
             stderr.flush() catch {};
@@ -378,15 +445,11 @@ fn loadOptionalModule(stderr: *std.Io.Writer, path: [:0]const u8) !void {
 
 test "guest init mount plan stays minimal" {
     try std.testing.expectEqual(@as(usize, 6), mounts.len);
-    try std.testing.expectEqualStrings("virtiofs", host_cas_mount.fstype);
-    try std.testing.expectEqualStrings("/host-cas", host_cas_mount.target);
-    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.RDONLY) != 0);
-    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.NOSUID) != 0);
-    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.NODEV) != 0);
-    try std.testing.expect((host_cas_mount.flags & std.os.linux.MS.NOATIME) != 0);
-    try std.testing.expectEqualStrings("overlay", cas_overlay_mount.fstype);
-    try std.testing.expectEqualStrings("/cas", cas_overlay_mount.target);
-    try std.testing.expect(cas_overlay_mount.data != null);
+    try std.testing.expectEqualStrings("ext4", cas_mount_fstype);
+    try std.testing.expectEqualStrings("/cas", cas_mount_target);
+    try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOSUID) != 0);
+    try std.testing.expect((cas_mount_flags & std.os.linux.MS.NODEV) != 0);
+    try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOATIME) != 0);
     try std.testing.expectEqual(@as(usize, 4), module_paths.len);
     try std.testing.expectEqualStrings("/actiond", worker_argv[0]);
     try std.testing.expectEqualStrings("--guest-worker", worker_argv[1]);

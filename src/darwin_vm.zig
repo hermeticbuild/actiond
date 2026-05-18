@@ -14,7 +14,7 @@ pub const Options = struct {
     kernel_path: []const u8,
     initramfs_path: []const u8,
     runtime_image_path: ?[]const u8 = null,
-    cas_path: []const u8,
+    cas_image_path: []const u8,
     memory_mib: u64 = 512,
     cpu_count: u32 = 2,
     start_timeout_ms: u32 = 30_000,
@@ -36,15 +36,15 @@ pub const Machine = struct {
         defer allocator.free(initramfs_path);
         const runtime_image_path = if (options.runtime_image_path) |path| try absolutePathZ(io, allocator, path) else null;
         defer if (runtime_image_path) |path| allocator.free(path);
-        const cas_path = try absolutePathZ(io, allocator, options.cas_path);
-        defer allocator.free(cas_path);
+        const cas_image_path = try absolutePathZ(io, allocator, options.cas_image_path);
+        defer allocator.free(cas_image_path);
 
         var errbuf: [1024]u8 = [_]u8{0} ** 1024;
         const handle = actiond_vm_start(
             kernel_path.ptr,
             initramfs_path.ptr,
             if (runtime_image_path) |path| path.ptr else null,
-            cas_path.ptr,
+            cas_image_path.ptr,
             options.memory_mib,
             options.cpu_count,
             options.start_timeout_ms,
@@ -146,7 +146,7 @@ extern fn actiond_vm_start(
     kernel_path: [*:0]const u8,
     initramfs_path: [*:0]const u8,
     runtime_image_path: ?[*:0]const u8,
-    cas_path: [*:0]const u8,
+    cas_image_path: [*:0]const u8,
     memory_mib: u64,
     cpu_count: u32,
     start_timeout_ms: u32,
@@ -170,7 +170,7 @@ test "darwin VM start is macOS-only" {
         try std.testing.expectError(error.UnsupportedHost, Machine.start(std.testing.io, std.testing.allocator, .{
             .kernel_path = "/kernel",
             .initramfs_path = "/initramfs",
-            .cas_path = "/cas",
+            .cas_image_path = "/cas.ext4",
         }));
     }
 }

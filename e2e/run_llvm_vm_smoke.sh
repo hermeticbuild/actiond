@@ -13,6 +13,8 @@ memory_mib="${ACTIOND_VM_MEMORY_MIB:-4096}"
 cpus="${ACTIOND_VM_CPUS:-8}"
 jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
 output_root="${ACTIOND_LLVM_VM_SMOKE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-llvm-vm-smoke.XXXXXX")}"
+cas_image="${ACTIOND_VM_CAS_IMAGE:-${output_root}/server/cas.ext4}"
+cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-32768}"
 run_vm="${ACTIOND_LLVM_SMOKE_VM:-1}"
 run_mac_host="${ACTIOND_LLVM_SMOKE_MAC_HOST:-1}"
 build_mode_flags=(
@@ -87,6 +89,7 @@ run_smoke() {
   local elapsed
 
   mkdir -p "${output_root}"
+  "${repo_root}/tools/create_ext4_image.sh" "${cas_image}" "${cas_image_size_mib}"
   server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
   kernel="$(bazel_output //vm:linux_kernel_zst)"
   initramfs="$(bazel_output //vm:initramfs)"
@@ -96,6 +99,8 @@ run_smoke() {
   "${server}" serve-vm \
     --listen="${endpoint}" \
     --root="${output_root}/server" \
+    --cas-image="${cas_image}" \
+    --cas-image-size-mib="${cas_image_size_mib}" \
     --memory-mib="${memory_mib}" \
     --cpus="${cpus}" \
     --kernel="${kernel}" \

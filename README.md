@@ -58,6 +58,11 @@ bazel-bin/cmd/darwin_actiond/darwin-actiond-standalone serve-vm \
   --root=/tmp/actiond-vm
 ```
 
+VM mode stores CAS and ActionCache state inside the guest on an ext4 disk image
+attached as virtio-blk. By default the image path is
+`/tmp/actiond-vm/cas.ext4`; pass `--cas-image=/path/cas.ext4` to reuse a
+specific preformatted image.
+
 The standalone binary embeds:
 
 - compressed Linux kernel `Image.zst`
@@ -66,7 +71,7 @@ The standalone binary embeds:
 
 At startup, `darwin-actiond` extracts those payloads, inflates the boot files
 that Virtualization.framework needs as raw files, starts the VM, and proxies
-REAPI `Execute` calls into the guest over virtio-vsock.
+REAPI calls into the guest over virtio-vsock.
 
 ### Linux Host Worker
 
@@ -148,8 +153,7 @@ This is active systems work, not a polished product. The core path works:
 - REAPI CAS/ByteStream/ActionCache/Execution surface
 - Linux chroot execution
 - macOS VM execution
-- read-only host CAS in the VM
-- output import back to host CAS
+- guest-native CAS in VM mode
 - compressed VM/runtime packaging
 
 The design prioritizes correctness, hermeticity, and measurable copies before

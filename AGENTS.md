@@ -37,13 +37,12 @@ ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
 
 Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.
 
-The VM guest mounts the host CAS share read-only at `/host-cas` and uses a
-tmpfs overlay at `/cas` for guest-side writes. actiondfs reads input blobs from
-`/host-cas/blobs/sha256` to avoid overlay/virtiofs stale-handle behavior. The
-host imports guest-produced blobs and then asks the guest to delete the staging
-upperdir copy once `/host-cas` is visible from inside the guest, so downstream
-actions read the stable host-visible copy. VM e2e therefore validates
-API-visible execution behavior for one running VM.
+The VM guest owns the REAPI CAS and ActionCache on a writable ext4 disk image
+attached as a virtio block device and mounted at `/cas`. The host-side
+`darwin-actiond serve-vm` does not keep a second host CAS in VM mode; it
+forwards CAS, ByteStream, ActionCache, Capabilities, and Execute requests over
+vsock to `linux-actiond` in the guest. VM e2e therefore validates API-visible
+execution behavior for one running VM and a native guest filesystem.
 
 ## Stress Workspace
 
