@@ -178,28 +178,29 @@ mount namespace mounts:
   lazily from the read-only host CAS mounted at `/host-cas`
 - stock overlayfs at `/workspace`, using per-action upper/work directories
 
-The kernel module also registers performance comparison variants.
-`actiondfs_old` is the canonical no-directory-cache baseline. `actiondfs` is
-the optimized implementation: it caches parsed non-root Directory protos by
-digest and materializes per-mount child nodes only when lookup needs them.
-`actiondfs_hybrid32` keeps the same cache behavior but binary searches until
-the remaining range is at most 32, then finishes with a linear scan.
-`actiondfs_vec` is kept as a compatibility name for the same threshold-32
-hybrid. Production VM execution uses the canonical cached `actiondfs`
-filesystem unless `darwin-actiond serve-vm` is launched with
-`--actiondfs-fstype=...`.
+The kernel module also registers `actiondfs_old`, a canonical no-directory-cache
+baseline used only for performance comparisons. `actiondfs` is the optimized
+implementation: it caches parsed non-root Directory protos by digest and
+materializes per-mount child nodes only when lookup needs them. Production VM
+execution uses the cached `actiondfs` filesystem unless `darwin-actiond
+serve-vm` is launched with `--actiondfs-fstype=actiondfs_old` for comparison.
 
 Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
 inode metadata. CAS blobs remain immutable data files and are not chmodded.
 
-`actiondfs` also keeps a VM-lifetime parsed Directory cache keyed only by the
+`actiondfs` keeps a VM-lifetime parsed Directory cache keyed only by the
 Directory digest. The cache stores immutable child metadata for non-root
 directories so reused source directories and tree artifacts do not re-read and
 re-parse the same CAS Directory blob across action mounts. Per-action mounts
-attach sparse child-node arrays to cached directories and allocate VFS nodes
-only for names actually looked up. The per-action input root Directory is
+attach cached directories by pointer and keep a compact list of child nodes
+materialized by lookup; they no longer allocate per-directory child pointer
+arrays sized to the whole cached tree. The per-action input root Directory is
 intentionally not cached because those roots are expected to be unique; VFS
 nodes, inodes, and dentries remain mount-local.
+
+The kernel exposes VM-lifetime actiondfs counters at `/proc/actiondfs_stats`.
+Those counters track cache hits/misses, directory parses, lookup and readdir
+activity, CAS blob opens, folio reads, and stale-handle retries.
 
 The Linux host path always keeps the non-actiondfs materialization strategy,
 which lets Docker e2e run on ordinary host kernels:

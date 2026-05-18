@@ -388,7 +388,7 @@ test "parseServeVmArgs accepts VM flags" {
         "/tmp/Image",
         "--initramfs=/tmp/initramfs.cpio.zst",
         "--runtime-image=/tmp/runtimes.sqfs",
-        "--actiondfs-fstype=actiondfs_vec",
+        "--actiondfs-fstype=actiondfs_old",
         "--cas",
         "/tmp/actiond-cas",
         "--memory-mib=768",
@@ -404,7 +404,7 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqualStrings("/tmp/Image", options.kernel.?);
     try std.testing.expectEqualStrings("/tmp/initramfs.cpio.zst", options.initramfs.?);
     try std.testing.expectEqualStrings("/tmp/runtimes.sqfs", options.runtime_image.?);
-    try std.testing.expectEqualStrings("actiondfs_vec", options.actiondfs_fstype);
+    try std.testing.expectEqualStrings("actiondfs_old", options.actiondfs_fstype);
     try std.testing.expectEqualStrings("/tmp/actiond-cas", options.cas.?);
     try std.testing.expectEqual(@as(u64, 768), options.memory_mib);
     try std.testing.expectEqual(@as(u32, 3), options.cpus);

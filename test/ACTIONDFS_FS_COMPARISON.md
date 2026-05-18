@@ -1,8 +1,8 @@
 # actiondfs Filesystem Comparison
 
-- Generated: `2026-05-17 21:26 EDT`
+- Generated: `2026-05-17 22:19 EDT`
 - Command: `ACTIOND_KERNEL_DOCKER_CONTEXT=colima tools/e2e.sh vm-fs-compare`
-- Comparison output: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-vm-fs-compare.OtoPzq`
+- Comparison output: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-vm-fs-compare.BaqQmo`
 - Workload: `test/` stress workspace, 31 remote actions
 - Order: `actiondfs_old`, `actiondfs`
 
@@ -19,17 +19,14 @@ Directory cache.
 materializes per-mount VFS child nodes only for paths that are actually looked
 up.
 
-`actiondfs_hybrid32` and `actiondfs_vec` are still registered as experiment
-names for the threshold-32 hybrid lookup implementation.
-
 ## Summary
 
 All values are milliseconds except action counts.
 
 | Variant              | Total p50 | Total Mean | Input p50 | Execute p50 | Process/IO p50 | Output p50 |
 | -------------------- | --------: | ---------: | --------: | ----------: | -------------: | ---------: |
-| `actiondfs_old`      |   205.737 |    253.350 |     5.421 |     167.137 |        137.799 |     24.480 |
-| `actiondfs`          |   219.455 |    234.130 |    17.638 |     194.087 |        173.095 |     14.111 |
+| `actiondfs_old`      |   222.453 |    303.296 |     5.478 |     176.500 |        146.204 |     12.569 |
+| `actiondfs`          |   208.601 |    266.484 |     4.949 |     180.355 |        145.986 |     19.685 |
 
 ## Stage Timing
 
@@ -37,14 +34,14 @@ All values are milliseconds.
 
 | Stage                   | Variant              |    Min |     p25 |     p50 |     p75 |     p95 |    Mean |     Max |
 | ----------------------- | -------------------- | -----: | ------: | ------: | ------: | ------: | ------: | ------: |
-| total                   | `actiondfs_old`      | 70.457 | 172.583 | 205.737 | 298.500 | 510.482 | 253.350 | 563.909 |
-| total                   | `actiondfs`          | 62.311 | 173.701 | 219.455 | 277.860 | 379.504 | 234.130 | 535.783 |
-| input fetch/materialize | `actiondfs_old`      |  1.798 |   4.651 |   5.421 |  16.953 |  18.823 |   9.316 |  20.992 |
-| input fetch/materialize | `actiondfs`          |  2.188 |   6.468 |  17.638 |  19.035 |  20.378 |  13.944 |  21.166 |
-| execute                 | `actiondfs_old`      | 60.181 | 149.883 | 167.137 | 248.011 | 401.788 | 203.722 | 545.615 |
-| execute                 | `actiondfs`          | 49.486 | 155.070 | 194.087 | 224.164 | 318.753 | 197.085 | 504.594 |
-| output upload/collect   | `actiondfs_old`      |  6.079 |  12.346 |  24.480 |  38.788 | 149.513 |  40.312 | 273.137 |
-| output upload/collect   | `actiondfs`          |  2.794 |   5.693 |  14.111 |  27.414 |  78.489 |  23.101 | 154.377 |
+| total                   | `actiondfs_old`      | 70.900 | 179.445 | 222.453 | 447.894 | 595.294 | 303.296 | 649.256 |
+| total                   | `actiondfs`          | 80.320 | 178.535 | 208.601 | 350.206 | 512.489 | 266.484 | 724.537 |
+| input fetch/materialize | `actiondfs_old`      |  3.581 |   3.913 |   5.478 |  22.226 |  23.294 |  12.356 |  23.602 |
+| input fetch/materialize | `actiondfs`          |  2.598 |   4.160 |   4.949 |   6.144 |   9.744 |   5.480 |  10.879 |
+| execute                 | `actiondfs_old`      | 55.872 | 157.432 | 176.500 | 398.892 | 472.351 | 253.756 | 631.259 |
+| execute                 | `actiondfs`          | 69.365 | 152.027 | 180.355 | 272.234 | 448.344 | 218.634 | 500.941 |
+| output upload/collect   | `actiondfs_old`      |  6.540 |   9.083 |  12.569 |  27.593 | 175.647 |  37.184 | 192.427 |
+| output upload/collect   | `actiondfs`          |  3.851 |   8.152 |  19.685 |  27.961 | 133.412 |  42.370 | 442.434 |
 
 ## Runner Timing
 
@@ -53,22 +50,23 @@ the action through the mounted filesystem.
 
 | Runner Stage   | Variant              |    Min |     p25 |     p50 |     p75 |     p95 |    Mean |     Max |
 | -------------- | -------------------- | -----: | ------: | ------: | ------: | ------: | ------: | ------: |
-| parent prepare | `actiondfs_old`      |  0.048 |   0.067 |   0.074 |   0.099 |  10.125 |   1.420 |  10.929 |
-| parent prepare | `actiondfs`          |  0.056 |   0.062 |   0.080 |   5.999 |  19.744 |   4.169 |  20.378 |
-| fork           | `actiondfs_old`      |  0.081 |   0.115 |   0.224 |   0.513 |   0.829 |   0.337 |   1.042 |
-| fork           | `actiondfs`          |  0.049 |   0.123 |   0.285 |   0.544 |   1.664 |   0.508 |   1.887 |
-| child setup    | `actiondfs_old`      |  0.006 |   0.219 |   0.315 |   0.484 |   0.896 |   0.413 |   2.113 |
-| child setup    | `actiondfs`          |  0.003 |   0.192 |   0.355 |   0.569 |   1.297 |   0.457 |   1.973 |
-| process/io     | `actiondfs_old`      | 55.152 | 132.203 | 137.799 | 184.896 | 324.247 | 168.537 | 495.816 |
-| process/io     | `actiondfs`          | 44.001 | 130.166 | 173.095 | 191.140 | 291.075 | 172.169 | 457.405 |
-| wait           | `actiondfs_old`      |  4.728 |  16.010 |  26.778 |  51.936 |  61.675 |  32.995 |  88.231 |
-| wait           | `actiondfs`          |  4.536 |  14.859 |  16.664 |  27.984 |  33.558 |  19.761 |  46.404 |
-| stdio digest   | `actiondfs_old`      |  0.001 |   0.002 |   0.003 |   0.006 |   0.008 |   0.004 |   0.020 |
-| stdio digest   | `actiondfs`          |  0.001 |   0.002 |   0.002 |   0.005 |   0.006 |   0.004 |   0.017 |
+| parent prepare | `actiondfs_old`      |  0.052 |   0.066 |   0.078 |   0.258 |  14.711 |   2.144 |  15.576 |
+| parent prepare | `actiondfs`          |  0.054 |   0.069 |   0.085 |   0.103 |   0.975 |   0.788 |  19.245 |
+| fork           | `actiondfs_old`      |  0.079 |   0.158 |   0.463 |   0.728 |   1.276 |   0.532 |   1.952 |
+| fork           | `actiondfs`          |  0.081 |   0.137 |   0.280 |   0.452 |   0.731 |   0.338 |   1.704 |
+| child setup    | `actiondfs_old`      |  0.002 |   0.146 |   0.402 |   0.580 |   0.796 |   0.375 |   1.018 |
+| child setup    | `actiondfs`          |  0.003 |   0.247 |   0.317 |   0.478 |   0.657 |   0.350 |   0.955 |
+| process/io     | `actiondfs_old`      | 51.129 | 141.950 | 146.204 | 357.249 | 455.927 | 226.801 | 548.742 |
+| process/io     | `actiondfs`          | 62.797 | 128.300 | 145.986 | 232.042 | 415.322 | 189.997 | 456.671 |
+| wait           | `actiondfs_old`      |  4.156 |  12.824 |  15.864 |  38.140 |  51.566 |  23.889 |  80.930 |
+| wait           | `actiondfs`          |  5.922 |  18.568 |  27.895 |  36.251 |  44.759 |  27.143 |  50.150 |
+| stdio digest   | `actiondfs_old`      |  0.001 |   0.002 |   0.003 |   0.004 |   0.006 |   0.003 |   0.009 |
+| stdio digest   | `actiondfs`          |  0.001 |   0.002 |   0.002 |   0.004 |   0.012 |   0.004 |   0.021 |
 
 ## Interpretation
 
-This stress run shows the cached `actiondfs` implementation reducing mean total
-time and output collection time, but median input and process/io are worse than
-`actiondfs_old`. The small stress workspace is noisy and has only 31 actions,
-so the larger LLVM smoke is the decisive comparison.
+This stress run shows the cached `actiondfs` implementation reducing median and
+mean total time, and the compact materialized-child list cuts input
+fetch/materialization versus the no-cache baseline. Output collection is still
+noisy because producer actions can dominate the small 31-action workload, so
+the larger LLVM smoke remains the decisive comparison.

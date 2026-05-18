@@ -81,6 +81,11 @@ the VM logs, and writes parsed summaries under the printed comparison
 directory. `actiondfs_old` is the canonical no-directory-cache baseline;
 `actiondfs` is the optimized cached implementation.
 
+When investigating actiondfs behavior inside a running guest, read
+`/proc/actiondfs_stats`. It reports VM-lifetime counters for directory cache
+hits/misses, parses, lookups, readdir, CAS blob opens, folio reads, and stale
+retry events.
+
 Then update the timing summary next to the stress workspace:
 
 ```bash

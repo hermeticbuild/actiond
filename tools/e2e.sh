@@ -13,7 +13,7 @@ Modes:
   linux   Start linux-actiond on this Linux host and run test/ via Bazel remote execution.
   vm      Start darwin-actiond serve-vm and run test/ via Bazel remote execution.
   vm-fs-compare
-          Run VM stress with actiondfs and the hybrid lookup variants.
+          Run VM stress with actiondfs_old and actiondfs.
   all     Run build plus the host-appropriate e2e mode when configured.
 
 Environment:
