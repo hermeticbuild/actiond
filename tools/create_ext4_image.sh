@@ -34,7 +34,23 @@ else
     echo "mkfs.ext4 is unavailable and docker is not installed; cannot format ${image}" >&2
     exit 1
   fi
-  docker run --rm \
+  docker_cmd=(docker)
+  if [[ -n "${ACTIOND_EXT4_IMAGE_DOCKER_CONTEXT:-}" ]]; then
+    docker_cmd=(docker --context "${ACTIOND_EXT4_IMAGE_DOCKER_CONTEXT}")
+  elif ! docker info >/dev/null 2>&1; then
+    docker_cmd=()
+    for context in colima desktop-linux default; do
+      if docker --context "${context}" info >/dev/null 2>&1; then
+        docker_cmd=(docker --context "${context}")
+        break
+      fi
+    done
+    if [[ "${#docker_cmd[@]}" -eq 0 ]]; then
+      echo "no responsive Docker context found for ext4 image formatting" >&2
+      exit 1
+    fi
+  fi
+  "${docker_cmd[@]}" run --rm \
     -e IMAGE_BASENAME=".${base}.tmp.$$" \
     -v "${dir}:/work" \
     "${ACTIOND_EXT4_IMAGE_UBUNTU:-ubuntu:24.04}" \

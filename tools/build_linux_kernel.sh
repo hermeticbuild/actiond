@@ -169,6 +169,9 @@ case "$(uname -s)" in
       -e "ACTIOND_KERNEL_OUT=/work/${out}"
       -e "ACTIOND_KERNEL_LOCAL_SRC=/tmp/actiond-kernel-src"
     )
+    if [[ -n "${ACTIOND_KERNEL_JOBS:-}" ]]; then
+      docker_run_args+=(-e "ACTIOND_KERNEL_JOBS=${ACTIOND_KERNEL_JOBS}")
+    fi
     if [[ -n "${actiondfs_src}" ]]; then
       docker_run_args+=(-e "ACTIOND_ACTIONDFS_SRC=/work/${actiondfs_src}")
     fi
