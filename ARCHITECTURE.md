@@ -189,6 +189,13 @@ with `--actiondfs-fstype=...`.
 Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
 inode metadata. CAS blobs remain immutable data files and are not chmodded.
 
+`actiondfs` also keeps a VM-lifetime parsed Directory cache keyed only by the
+Directory digest. The cache stores immutable child metadata for non-root
+directories so reused source directories and tree artifacts do not re-read and
+re-parse the same CAS Directory blob across action mounts. The per-action input
+root Directory is intentionally not cached because those roots are expected to
+be unique; VFS nodes, inodes, and dentries remain mount-local.
+
 The Linux host path always keeps the non-actiondfs materialization strategy,
 which lets Docker e2e run on ordinary host kernels:
 
