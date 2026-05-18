@@ -35,9 +35,14 @@ e2e/run_llvm_vm_smoke.sh
 By default it uses an 8 CPU, 4096 MiB VM. The last output directory is written
 to `/tmp/actiond-last-llvm-vm-smoke-path`. Set `ACTIOND_LLVM_SMOKE_MAC_HOST=0`
 to skip the mac-host baseline, or `ACTIOND_LLVM_SMOKE_VM=0` to run only the
-mac-host baseline. Set `ACTIOND_LLVM_SMOKE_WARMUP_TARGET=<label>` to run a
-pre-measure VM build and parse only the actiond log slice after that warmup.
-The current checked-in timing summary is in `LLVM_VM_SMOKE_TIMINGS.md`.
+mac-host baseline. By default the VM run first builds
+`//e2e:llvm_exec_warmup`, which transitions `@llvm-project//llvm:llvm-min-tblgen`
+to the Linux-musl exec configuration. Aquery shows that target exactly matches
+the Linux exec-config action set used by the VM `llvm-tblgen` build, so the
+subsequent measured build is mostly target actions and is closer to the
+mac-host action count. Set `ACTIOND_LLVM_SMOKE_WARMUP_TARGET=` to disable the
+warmup, or point it at another label to test a different pre-measure build. The
+current checked-in timing summary is in `LLVM_VM_SMOKE_TIMINGS.md`.
 
 Both VM and mac-host runs set the target platform to
 `@llvm//platforms:linux_arm64_musl`. The VM run also sets the host platform to
@@ -51,7 +56,8 @@ Do not use `@llvm//runtimes:resource_directory` as the default warmup. Aquery
 shows it accounts for only part of the VM/mac configured-action gap: the VM
 `llvm-tblgen` graph has 5,341 configured actions, the mac-host graph has 3,637,
 and `@llvm//runtimes:resource_directory` has 597. The remaining gap comes
-mostly from Linux-musl exec-configuration actions needed by the VM build. As a
-split warmup, `resource_directory` also exposes Bazel TreeArtifact
-materialization differences that can make the later link miss
-`libclang_rt.builtins.a`.
+mostly from Linux-musl exec-configuration actions needed by the VM build. The
+`//e2e:llvm_exec_warmup` aquery has 2,713 configured actions and the same
+2,403 action keys as the Linux exec-config subset of `llvm-tblgen`. As a split
+warmup, `resource_directory` also exposes Bazel TreeArtifact materialization
+differences that can make the later link miss `libclang_rt.builtins.a`.

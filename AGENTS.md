@@ -138,14 +138,21 @@ latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`. Keep
 `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing actiondfs lookup or
 materialization behavior.
 
+The VM runner defaults `ACTIOND_LLVM_SMOKE_WARMUP_TARGET` to
+`//e2e:llvm_exec_warmup`. That target uses a custom `cfg = "exec"` wrapper
+around `@llvm-project//llvm:llvm-min-tblgen`; aquery showed it has the same
+2,403 action keys as the Linux-musl exec-config subset of the VM
+`llvm-tblgen` build. Keep this warmup if you need VM and mac-host measurements
+to have closer action counts.
+
 The mac-host baseline in that runner uses the same Linux musl target platform,
 but intentionally keeps the host platform as default macOS. Do not set the
 local mac-host baseline to `--host_platform=@llvm//platforms:linux_arm64_musl`;
 Bazel would build Linux host tools and then try to run them on Darwin.
 
 If you suspect a setup target explains a VM/mac action-count gap, validate it
-with `bazel aquery` before adding a warmup. The checked comparison showed the
-VM `llvm-tblgen` graph has 5,341 configured actions, the mac-host graph has
+with `bazel aquery` before changing the warmup. The checked comparison showed
+the VM `llvm-tblgen` graph has 5,341 configured actions, the mac-host graph has
 3,637, and `@llvm//runtimes:resource_directory` has only 597, so it is not the
 whole gap. That target also exposed a split-invocation TreeArtifact issue when
 used as a warmup.

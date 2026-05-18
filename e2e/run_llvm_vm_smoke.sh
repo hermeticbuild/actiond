@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace="${ACTIOND_LLVM_SMOKE_WORKSPACE:-${repo_root}}"
 smoke_target="${ACTIOND_LLVM_SMOKE_TARGET:-@llvm-project//llvm:llvm-tblgen}"
-warmup_target="${ACTIOND_LLVM_SMOKE_WARMUP_TARGET-}"
+warmup_target="${ACTIOND_LLVM_SMOKE_WARMUP_TARGET-//e2e:llvm_exec_warmup}"
 target_platform="${ACTIOND_LLVM_SMOKE_TARGET_PLATFORM:-@llvm//platforms:linux_arm64_musl}"
 host="${ACTIOND_LLVM_VM_SMOKE_HOST:-127.0.0.1}"
 port="${ACTIOND_LLVM_VM_SMOKE_PORT:-8998}"
@@ -143,6 +143,7 @@ run_smoke() {
 }
 
 run_mac_host_smoke() {
+  local warmup_log="${output_root}/llvm_tblgen_mac_host_warmup.log"
   local build_log="${output_root}/llvm_tblgen_mac_host.log"
   local timings="${output_root}/mac_host_timings.md"
   local elapsed
@@ -152,9 +153,35 @@ run_mac_host_smoke() {
     return 1
   fi
 
-  if ! (
+  (
     cd "${workspace}"
     bazel clean --expunge
+  ) >"${build_log}.clean" 2>&1
+
+  if [[ -n "${warmup_target}" ]]; then
+    if ! (
+      cd "${workspace}"
+      bazel build "${warmup_target}" \
+        "${build_mode_flags[@]}" \
+        --platforms="${target_platform}" \
+        --remote_executor= \
+        --remote_cache= \
+        --experimental_remote_downloader= \
+        --experimental_remote_downloader_local_fallback=true \
+        --noremote_cache_compression \
+        --noremote_accept_cached \
+        --remote_upload_local_results=false \
+        --disk_cache= \
+        --jobs="${jobs}"
+    ) >"${warmup_log}" 2>&1; then
+      echo "LLVM mac-host warmup failed; build log: ${warmup_log}" >&2
+      tail -200 "${warmup_log}" >&2 || true
+      return 1
+    fi
+  fi
+
+  if ! (
+    cd "${workspace}"
     bazel build "${smoke_target}" \
       "${build_mode_flags[@]}" \
       --platforms="${target_platform}" \
@@ -179,8 +206,9 @@ run_mac_host_smoke() {
 
 - Generated: \`$(date '+%Y-%m-%d %H:%M:%S %Z')\`
 - Command: \`e2e/run_llvm_vm_smoke.sh\`
+- Warmup log: \`${warmup_log}\`
 - Source log: \`${build_log}\`
-- Workload: \`${smoke_target}\`, jobs=${jobs}
+- Workload: \`${smoke_target}\`, warmup=${warmup_target:-none}, jobs=${jobs}
 - Target platform: \`${target_platform}\`
 - Host platform: default macOS host platform
 - Platform note: target actions compile for Linux musl; local exec/host tools remain macOS binaries so Bazel can run them locally.

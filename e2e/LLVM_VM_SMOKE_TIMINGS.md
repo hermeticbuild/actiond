@@ -22,27 +22,35 @@ some output paths therefore still contain `darwin_arm64-opt` even though the
 compile target triple is Linux musl.
 
 `ACTIOND_LLVM_SMOKE_WARMUP_TARGET=<label>` can run a pre-measure build and parse
-only the VM log slice after that warmup. The default is no warmup. Aquery showed
-that `@llvm//runtimes:resource_directory` is not the full VM/mac action-count
-delta: the VM `llvm-tblgen` graph has 5,341 configured actions, the mac-host
-graph has 3,637, and `@llvm//runtimes:resource_directory` has 597.
+only the VM log slice after that warmup. The default is
+`//e2e:llvm_exec_warmup`, a `cfg = "exec"` wrapper around
+`@llvm-project//llvm:llvm-min-tblgen`. Aquery showed that
+`@llvm//runtimes:resource_directory` is not the full VM/mac action-count delta:
+the VM `llvm-tblgen` graph has 5,341 configured actions, the mac-host graph has
+3,637, and `@llvm//runtimes:resource_directory` has 597. The exec warmup has
+2,713 configured actions and the same 2,403 action keys as the Linux exec-config
+subset of the VM `llvm-tblgen` graph.
 
 ## Latest Checked-In Result
 
-- Generated: `2026-05-18 14:09:33 EDT`
+- Generated: `2026-05-18 15:11:12 EDT`
 - Command: `e2e/run_llvm_vm_smoke.sh`
-- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.aUAUeO`
+- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.98mzRF`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
-- VM warmup target: none
+- VM warmup target: `//e2e:llvm_exec_warmup`
 - Target platform: `@llvm//platforms:linux_arm64_musl`
 - VM host platform: `@llvm//platforms:linux_arm64_musl`
 - Build mode: `-c opt --strip=always --stripopt=--strip-all`
-- VM Bazel elapsed: `321.090s`
-- VM executions: `4123`
-- VM timing records parsed: `4122`
-- VM Bazel processes: `4516 processes: 393 internal, 4123 remote`
-- Mac-host Bazel elapsed: `193.305s`
-- Mac-host processes: `3012 processes: 360 internal, 2652 darwin-sandbox`
+- VM warmup elapsed: `208.903s`
+- VM warmup processes: `2207 processes: 190 internal, 2017 remote`
+- VM Bazel elapsed: `183.865s`
+- VM executions: `2106`
+- VM timing records parsed: `2106`
+- VM Bazel processes: `2310 processes: 204 internal, 2106 remote`
+- Mac-host warmup elapsed: `61.985s`
+- Mac-host warmup processes: `703 processes: 157 internal, 546 darwin-sandbox`
+- Mac-host Bazel elapsed: `114.642s`
+- Mac-host processes: `2310 processes: 2 action cache hit, 204 internal, 2106 darwin-sandbox`
 
 ## VM Stage Timing
 
@@ -50,10 +58,10 @@ All values are milliseconds.
 
 | Stage                   |    Min |     p25 |     p50 |     p75 |      p95 |    Mean |       Max |
 | ----------------------- | -----: | ------: | ------: | ------: | -------: | ------: | --------: |
-| total                   | 32.014 | 200.249 | 240.661 | 377.857 | 2141.498 | 541.183 | 10425.888 |
-| input fetch/materialize |  0.951 |   2.468 |   3.261 |   4.700 |   10.250 |   4.752 |   314.354 |
-| execute                 | 19.342 | 193.957 | 234.034 | 367.058 | 2116.214 | 531.266 | 10393.075 |
-| output upload/collect   |  0.577 |   1.658 |   2.376 |   4.051 |   13.010 |   5.165 |  1733.846 |
+| total                   | 33.403 | 214.940 | 263.475 | 463.395 | 2666.949 | 661.268 | 15514.374 |
+| input fetch/materialize |  1.193 |   2.804 |   3.584 |   4.837 |    9.702 |   4.624 |   204.571 |
+| execute                 | 14.731 | 208.003 | 257.134 | 451.572 | 2655.573 | 651.309 | 15486.625 |
+| output upload/collect   |  0.717 |   1.824 |   2.698 |   4.309 |   13.898 |   5.336 |  1844.774 |
 
 ## Runner Timing
 
@@ -62,12 +70,12 @@ filesystem reads issued by the action through the mounted actiondfs tree.
 
 | Runner Stage   |    Min |     p25 |     p50 |     p75 |      p95 |    Mean |       Max |
 | -------------- | -----: | ------: | ------: | ------: | -------: | ------: | --------: |
-| parent prepare |  0.073 |   0.115 |   0.143 |   0.180 |    0.398 |   0.240 |    39.640 |
-| fork           |  0.079 |   0.172 |   0.206 |   0.246 |    0.478 |   0.241 |     4.341 |
-| child setup    |  0.003 |   0.202 |   0.262 |   0.426 |    1.471 |   0.605 |    92.437 |
-| process/io     | 18.507 | 189.255 | 228.557 | 359.750 | 2015.105 | 512.210 | 10018.439 |
-| wait           |  0.007 |   2.766 |   3.909 |   6.723 |   87.393 |  17.902 |  1007.270 |
-| stdio digest   |  0.001 |   0.002 |   0.002 |   0.003 |    0.005 |   0.005 |     7.038 |
+| parent prepare |  0.077 |   0.122 |   0.152 |   0.209 |    0.452 |   0.205 |     6.238 |
+| fork           |  0.124 |   0.225 |   0.254 |   0.298 |    0.609 |   0.302 |     4.305 |
+| child setup    |  0.003 |   0.206 |   0.270 |   0.448 |    1.536 |   0.474 |    10.404 |
+| process/io     | 13.507 | 203.028 | 250.813 | 444.407 | 2532.944 | 628.614 | 15247.840 |
+| wait           |  0.263 |   3.154 |   4.566 |   7.655 |  115.403 |  21.628 |   656.632 |
+| stdio digest   |  0.001 |   0.002 |   0.003 |   0.003 |    0.006 |   0.004 |     0.573 |
 
 ## Notes
 
@@ -76,6 +84,8 @@ filesystem page and metadata misses happen while the child process is running,
 so that time appears in `execute`, primarily in `process/io`, rather than in
 `input fetch/materialize`.
 
-The mac-host baseline uses the default macOS host platform. The log shows Bazel
-running `darwin-sandbox` actions; the script only fixes the target platform to
-the same Linux arm64 musl platform for an apples-to-apples target build.
+The measured VM and mac-host phases now have matching Bazel action counts after
+their respective exec-config warmups: `2310` total processes and `2106` action
+executions. The VM warmup is larger because it builds Linux-musl exec tools and
+runtimes inside the VM; the mac-host warmup builds the analogous macOS exec
+tools locally. The measured phase is the apples-to-apples target build.

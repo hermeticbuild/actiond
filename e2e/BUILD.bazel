@@ -1,0 +1,8 @@
+load(":exec_warmup.bzl", "exec_warmup")
+
+exec_warmup(
+    name = "llvm_exec_warmup",
+    deps = [
+        "@llvm-project//llvm:llvm-min-tblgen",
+    ],
+)
