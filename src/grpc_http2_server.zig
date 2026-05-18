@@ -660,6 +660,31 @@ pub fn handleConnection(
     );
 }
 
+pub fn handleConnectionFd(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dispatcher: Dispatcher,
+    fd: std.posix.fd_t,
+) !void {
+    var file = std.Io.File{
+        .handle = fd,
+        .flags = .{ .nonblocking = false },
+    };
+    defer file.close(io);
+
+    var read_buffer: [64 * 1024]u8 = undefined;
+    var write_buffer: [64 * 1024]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    var file_writer = file.writer(io, &write_buffer);
+    try handleConnectionStreams(
+        io,
+        allocator,
+        dispatcher,
+        &file_reader.interface,
+        &file_writer.interface,
+    );
+}
+
 pub fn handleConnectionStreams(
     io: std.Io,
     allocator: std.mem.Allocator,

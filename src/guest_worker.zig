@@ -6,6 +6,7 @@ const body_sink = @import("body_sink.zig");
 const bytestream_service = @import("bytestream_service.zig");
 const cas = @import("cas.zig");
 const control_protocol = @import("control_protocol.zig");
+const grpc_http2_server = @import("grpc_http2_server.zig");
 const grpc_record = @import("grpc_record.zig");
 const reapi = @import("reapi.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
@@ -56,6 +57,9 @@ pub fn run(io: std.Io) !void {
     stderr.print("linux-actiond guest worker listening on vsock:{d}\n", .{vsock.control_port}) catch {};
     stderr.flush() catch {};
 
+    const grpc_thread = try std.Thread.spawn(.{}, grpcListenerThread, .{ io, allocator, server });
+    grpc_thread.detach();
+
     while (true) {
         const connection = try listener.accept();
         const thread = std.Thread.spawn(.{}, connectionThread, .{ io, allocator, server, connection }) catch |err| {
@@ -66,6 +70,63 @@ pub fn run(io: std.Io) !void {
         };
         thread.detach();
     }
+}
+
+fn grpcListenerThread(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: reapi_dispatch.Server,
+) void {
+    const listener = vsock.listen(vsock.grpc_port) catch |err| {
+        logGuestError(io, "linux-actiond guest gRPC listen failed", err);
+        return;
+    };
+    defer listener.close();
+
+    logGuestInfo(io, "linux-actiond guest gRPC listening on vsock:{d}\n", .{vsock.grpc_port});
+    var owned_server = server;
+    const dispatcher = grpc_http2_server.Dispatcher.fromReapiServer(&owned_server);
+    while (true) {
+        const connection = listener.accept() catch |err| {
+            logGuestError(io, "linux-actiond guest gRPC accept failed", err);
+            continue;
+        };
+        const thread = std.Thread.spawn(.{}, grpcConnectionThread, .{ io, allocator, dispatcher, connection }) catch |err| {
+            connection.close();
+            logGuestError(io, "linux-actiond guest gRPC spawn failed", err);
+            continue;
+        };
+        thread.detach();
+    }
+}
+
+fn grpcConnectionThread(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dispatcher: grpc_http2_server.Dispatcher,
+    connection: vsock.Connection,
+) void {
+    grpc_http2_server.handleConnectionFd(io, allocator, dispatcher, connection.fd) catch |err| {
+        if (err != error.EndOfStream) {
+            logGuestError(io, "linux-actiond guest gRPC connection failed", err);
+        }
+    };
+}
+
+fn logGuestError(io: std.Io, message: []const u8, err: anyerror) void {
+    var buffer: [256]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &buffer);
+    const stderr = &stderr_writer.interface;
+    stderr.print("{s}: {s}\n", .{ message, @errorName(err) }) catch {};
+    stderr.flush() catch {};
+}
+
+fn logGuestInfo(io: std.Io, comptime fmt: []const u8, args: anytype) void {
+    var buffer: [256]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &buffer);
+    const stderr = &stderr_writer.interface;
+    stderr.print(fmt, args) catch {};
+    stderr.flush() catch {};
 }
 
 fn connectionThread(

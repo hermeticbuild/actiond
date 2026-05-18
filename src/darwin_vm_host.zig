@@ -5,8 +5,7 @@ const control_protocol = @import("control_protocol.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
 const embedded_payload = @import("embedded_payload.zig");
-const grpc_http2_server = @import("grpc_http2_server.zig");
-const guest_proxy = @import("guest_proxy.zig");
+const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
 
 pub const Error = error{
     InvalidCasImage,
@@ -205,13 +204,7 @@ pub fn serve(
         const stats_thread = try std.Thread.spawn(.{}, actiondfsStatsThread, .{ io, allocator, &fd_client, stats_path });
         stats_thread.detach();
     }
-    var proxy = guest_proxy.Proxy{
-        .transport = fd_client.transport(),
-        .local_server = null,
-    };
-    return grpc_http2_server.serveDispatcher(io, allocator, .{
-        .listen = options.listen,
-    }, proxy.dispatcher());
+    return grpc_vsock_bridge.serve(io, options.listen, &vm);
 }
 
 fn actiondfsStatsThread(

@@ -19,6 +19,7 @@ pub const guest_init = @import("guest_init.zig");
 pub const guest_worker = @import("guest_worker.zig");
 pub const grpc_http2_server = @import("grpc_http2_server.zig");
 pub const grpc_record = @import("grpc_record.zig");
+pub const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
 pub const guest_proxy = @import("guest_proxy.zig");
 pub const host_server = @import("host_server.zig");
 pub const http2_frame = @import("http2_frame.zig");
@@ -55,6 +56,7 @@ test {
     _ = guest_worker;
     _ = grpc_http2_server;
     _ = grpc_record;
+    _ = grpc_vsock_bridge;
     _ = guest_proxy;
     _ = host_server;
     _ = http2_frame;

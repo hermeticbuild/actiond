@@ -4,6 +4,7 @@ const std = @import("std");
 const linux = std.os.linux;
 
 pub const control_port: u32 = 5000;
+pub const grpc_port: u32 = 5001;
 pub const any_cid: u32 = 0xffffffff;
 pub const backlog: u32 = 128;
 
