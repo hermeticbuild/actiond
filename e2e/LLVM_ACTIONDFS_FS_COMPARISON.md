@@ -7,7 +7,7 @@ it with:
 e2e/llvm_fs_compare.sh
 ```
 
-The current script compares `actiondfs` and `actiondfs_hybrid32`. Each run
+The current script compares `actiondfs_old` and `actiondfs`. Each run
 starts a fresh `darwin-actiond serve-vm` worker, runs `bazel clean --expunge`,
 builds `@llvm-project//llvm:llvm-tblgen`, and writes parsed timing summaries
 under the printed comparison directory. The latest comparison output root is

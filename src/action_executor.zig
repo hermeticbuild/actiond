@@ -132,6 +132,7 @@ pub fn prepareExecuteOptions(
 
 pub fn validateActiondfsFSType(fstype: []const u8) !void {
     if (std.mem.eql(u8, fstype, "actiondfs")) return;
+    if (std.mem.eql(u8, fstype, "actiondfs_old")) return;
     if (std.mem.eql(u8, fstype, "actiondfs_vec")) return;
     if (std.mem.eql(u8, fstype, "actiondfs_hybrid32")) return;
     return error.UnsupportedActiondfsFSType;
@@ -1762,6 +1763,7 @@ test "libc runtime platform property accepts pinned runtimes" {
 
 test "validateActiondfsFSType accepts benchmark variants only" {
     try validateActiondfsFSType("actiondfs");
+    try validateActiondfsFSType("actiondfs_old");
     try validateActiondfsFSType("actiondfs_vec");
     try validateActiondfsFSType("actiondfs_hybrid32");
     try std.testing.expectError(error.UnsupportedActiondfsFSType, validateActiondfsFSType("tmpfs"));

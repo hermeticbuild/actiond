@@ -30,7 +30,8 @@ under a comparison directory:
 e2e/llvm_fs_compare.sh
 ```
 
-By default it compares `actiondfs` and `actiondfs_hybrid32` with an 8 CPU,
-4096 MiB VM. The last output directory is written to
+By default it compares `actiondfs_old` and `actiondfs` with an 8 CPU, 4096 MiB
+VM. `actiondfs_old` is the no-cache baseline and `actiondfs` is the cached
+implementation. The last output directory is written to
 `/tmp/actiond-last-llvm-fs-compare-path`. The current checked-in comparison is
 in `LLVM_ACTIONDFS_FS_COMPARISON.md`.

@@ -74,6 +74,7 @@ struct actiondfs_node {
 	struct mutex blob_lock;
 	bool loaded;
 	struct actiondfs_node *parent;
+	struct actiondfs_cached_dir *cached_dir;
 	struct actiondfs_node **file_children;
 	size_t file_count;
 	size_t file_capacity;
@@ -90,6 +91,7 @@ struct actiondfs_sb_info {
 	struct actiondfs_node *root;
 	u64 next_ino;
 	enum actiondfs_lookup_mode lookup_mode;
+	bool use_dir_cache;
 	struct mutex load_lock;
 };
 
@@ -154,6 +156,7 @@ static void actiondfs_clear_children(struct actiondfs_node *node)
 	node->dir_children = NULL;
 	node->dir_count = 0;
 	node->dir_capacity = 0;
+	node->cached_dir = NULL;
 }
 
 static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info *sbi,
@@ -305,6 +308,132 @@ static struct actiondfs_node *actiondfs_find_child(struct actiondfs_sb_info *sbi
 {
 	return actiondfs_find_child_hybrid(dir, name, len,
 					   actiondfs_linear_threshold(sbi->lookup_mode));
+}
+
+static bool actiondfs_find_cached_child_linear_range(struct actiondfs_cached_child *children,
+						     size_t lo,
+						     size_t hi,
+						     const char *name,
+						     size_t len,
+						     size_t *out)
+{
+	size_t i;
+
+	for (i = lo; i < hi; i++) {
+		struct actiondfs_cached_child *child = &children[i];
+
+		if (child->name_len == len && !memcmp(child->name, name, len)) {
+			*out = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool actiondfs_find_cached_child_hybrid_in(struct actiondfs_cached_child *children,
+						  size_t count,
+						  const char *name,
+						  size_t len,
+						  size_t linear_threshold,
+						  size_t *out)
+{
+	size_t lo = 0;
+	size_t hi = count;
+
+	while (hi - lo > linear_threshold) {
+		size_t mid = lo + (hi - lo) / 2;
+		struct actiondfs_cached_child *child = &children[mid];
+		int cmp = actiondfs_compare_name(child->name, child->name_len,
+						 name, len);
+
+		if (cmp < 0) {
+			lo = mid + 1;
+		} else if (cmp > 0) {
+			hi = mid;
+		} else {
+			*out = mid;
+			return true;
+		}
+	}
+
+	return actiondfs_find_cached_child_linear_range(children, lo, hi,
+							name, len, out);
+}
+
+static struct actiondfs_node *
+actiondfs_materialize_cached_child(struct actiondfs_sb_info *sbi,
+				   struct actiondfs_node *parent,
+				   struct actiondfs_cached_child *record,
+				   struct actiondfs_node **slot)
+{
+	struct actiondfs_node *existing;
+	struct actiondfs_node *node;
+
+	existing = smp_load_acquire(slot);
+	if (existing)
+		return existing;
+
+	node = actiondfs_alloc_node_borrowed_name(sbi, record->name,
+						  record->name_len,
+						  record->mode);
+	if (!node)
+		return ERR_PTR(-ENOMEM);
+
+	node->parent = parent;
+	node->size = record->size;
+	memcpy(node->hash, record->hash, 64);
+	node->hash[64] = '\0';
+	if (S_ISDIR(record->mode))
+		node->loaded = false;
+
+	smp_store_release(slot, node);
+	return node;
+}
+
+static struct actiondfs_node *
+actiondfs_lookup_cached_child_locked(struct actiondfs_sb_info *sbi,
+				     struct actiondfs_node *dir,
+				     const char *name,
+				     size_t len)
+{
+	struct actiondfs_cached_dir *cached = dir->cached_dir;
+	size_t index;
+
+	if (actiondfs_find_cached_child_hybrid_in(cached->file_children,
+						  cached->file_count,
+						  name, len,
+						  actiondfs_linear_threshold(sbi->lookup_mode),
+						  &index))
+		return actiondfs_materialize_cached_child(sbi, dir,
+							  &cached->file_children[index],
+							  &dir->file_children[index]);
+
+	if (actiondfs_find_cached_child_hybrid_in(cached->dir_children,
+						  cached->dir_count,
+						  name, len,
+						  actiondfs_linear_threshold(sbi->lookup_mode),
+						  &index))
+		return actiondfs_materialize_cached_child(sbi, dir,
+							  &cached->dir_children[index],
+							  &dir->dir_children[index]);
+
+	return NULL;
+}
+
+static struct actiondfs_node *actiondfs_lookup_child(struct actiondfs_sb_info *sbi,
+						     struct actiondfs_node *dir,
+						     const char *name,
+						     size_t len)
+{
+	struct actiondfs_node *child;
+
+	if (!dir->cached_dir)
+		return actiondfs_find_child(sbi, dir, name, len);
+
+	mutex_lock(&sbi->load_lock);
+	child = actiondfs_lookup_cached_child_locked(sbi, dir, name, len);
+	mutex_unlock(&sbi->load_lock);
+	return child;
 }
 
 static int actiondfs_validate_no_cross_type_duplicates(struct actiondfs_node *dir)
@@ -1186,18 +1315,16 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 	return 0;
 }
 
-static int actiondfs_clone_cached_dir(struct actiondfs_sb_info *sbi,
-				      struct actiondfs_node *dir,
-				      struct actiondfs_cached_dir *cached)
+static int actiondfs_attach_cached_dir(struct actiondfs_node *dir,
+				       struct actiondfs_cached_dir *cached)
 {
-	size_t i;
-
 	if (cached->file_count) {
 		dir->file_children = kcalloc(cached->file_count,
 					     sizeof(*dir->file_children),
 					     GFP_KERNEL);
 		if (!dir->file_children)
 			return -ENOMEM;
+		dir->file_count = cached->file_count;
 		dir->file_capacity = cached->file_count;
 	}
 
@@ -1207,41 +1334,11 @@ static int actiondfs_clone_cached_dir(struct actiondfs_sb_info *sbi,
 					    GFP_KERNEL);
 		if (!dir->dir_children)
 			goto fail;
+		dir->dir_count = cached->dir_count;
 		dir->dir_capacity = cached->dir_count;
 	}
 
-	for (i = 0; i < cached->file_count; i++) {
-		struct actiondfs_cached_child *record = &cached->file_children[i];
-		struct actiondfs_node *file;
-
-		file = actiondfs_alloc_node_borrowed_name(sbi, record->name,
-							  record->name_len,
-							  record->mode);
-		if (!file)
-			goto fail;
-		file->parent = dir;
-		file->size = record->size;
-		memcpy(file->hash, record->hash, 64);
-		file->hash[64] = '\0';
-		dir->file_children[dir->file_count++] = file;
-	}
-
-	for (i = 0; i < cached->dir_count; i++) {
-		struct actiondfs_cached_child *record = &cached->dir_children[i];
-		struct actiondfs_node *child_dir;
-
-		child_dir = actiondfs_alloc_node_borrowed_name(sbi, record->name,
-							       record->name_len,
-							       record->mode);
-		if (!child_dir)
-			goto fail;
-		child_dir->parent = dir;
-		memcpy(child_dir->hash, record->hash, 64);
-		child_dir->hash[64] = '\0';
-		child_dir->loaded = false;
-		dir->dir_children[dir->dir_count++] = child_dir;
-	}
-
+	dir->cached_dir = cached;
 	dir->loaded = true;
 	return 0;
 
@@ -1261,13 +1358,13 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 	if (dir->loaded)
 		return 0;
 
-	if (dir->parent) {
+	if (sbi->use_dir_cache && dir->parent) {
 		struct actiondfs_cached_dir *cached;
 
 		err = actiondfs_get_cached_dir(sbi, dir->hash, &cached);
 		if (err)
 			return err;
-		return actiondfs_clone_cached_dir(sbi, dir, cached);
+		return actiondfs_attach_cached_dir(dir, cached);
 	}
 
 	err = actiondfs_read_cas_blob(sbi, dir->hash, &buffer, &len);
@@ -1441,8 +1538,10 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 	if (err)
 		return ERR_PTR(err);
 
-	child = actiondfs_find_child(actiondfs_sbi(dir->i_sb), parent,
-				     dentry->d_name.name, dentry->d_name.len);
+	child = actiondfs_lookup_child(actiondfs_sbi(dir->i_sb), parent,
+				       dentry->d_name.name, dentry->d_name.len);
+	if (IS_ERR(child))
+		return ERR_CAST(child);
 	if (child) {
 		inode = actiondfs_iget(dir->i_sb, child);
 		if (IS_ERR(inode))
@@ -1467,6 +1566,41 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 
 	if (!dir_emit_dots(file, ctx))
 		return 0;
+
+	if (dir->cached_dir) {
+		struct actiondfs_cached_dir *cached = dir->cached_dir;
+
+		for (i = 0; i < cached->file_count; i++, pos++) {
+			struct actiondfs_cached_child *child = &cached->file_children[i];
+			struct actiondfs_node *materialized;
+			u64 ino;
+
+			materialized = smp_load_acquire(&dir->file_children[i]);
+			ino = materialized ? materialized->ino : 0;
+
+			if (pos < ctx->pos)
+				continue;
+			if (!dir_emit(ctx, child->name, child->name_len, ino, DT_REG))
+				return 0;
+			ctx->pos = pos + 1;
+		}
+
+		for (i = 0; i < cached->dir_count; i++, pos++) {
+			struct actiondfs_cached_child *child = &cached->dir_children[i];
+			struct actiondfs_node *materialized;
+			u64 ino;
+
+			materialized = smp_load_acquire(&dir->dir_children[i]);
+			ino = materialized ? materialized->ino : 0;
+
+			if (pos < ctx->pos)
+				continue;
+			if (!dir_emit(ctx, child->name, child->name_len, ino, DT_DIR))
+				return 0;
+			ctx->pos = pos + 1;
+		}
+		return 0;
+	}
 
 	for (i = 0; i < dir->file_count; i++, pos++) {
 		struct actiondfs_node *child = dir->file_children[i];
@@ -1596,7 +1730,8 @@ static const struct super_operations actiondfs_super_ops = {
 
 static int actiondfs_fill_super_mode(struct super_block *sb, void *data,
 				     int silent,
-				     enum actiondfs_lookup_mode lookup_mode)
+				     enum actiondfs_lookup_mode lookup_mode,
+				     bool use_dir_cache)
 {
 	struct actiondfs_sb_info *sbi;
 	struct inode *root_inode;
@@ -1608,6 +1743,7 @@ static int actiondfs_fill_super_mode(struct super_block *sb, void *data,
 
 	sb->s_fs_info = sbi;
 	sbi->lookup_mode = lookup_mode;
+	sbi->use_dir_cache = use_dir_cache;
 	mutex_init(&sbi->load_lock);
 	sb->s_magic = ACTIONDFS_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
@@ -1655,19 +1791,25 @@ fail:
 static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	return actiondfs_fill_super_mode(sb, data, silent,
-					 ACTIONDFS_LOOKUP_CANONICAL);
+					 ACTIONDFS_LOOKUP_CANONICAL, true);
+}
+
+static int actiondfs_old_fill_super(struct super_block *sb, void *data, int silent)
+{
+	return actiondfs_fill_super_mode(sb, data, silent,
+					 ACTIONDFS_LOOKUP_CANONICAL, false);
 }
 
 static int actiondfs_vec_fill_super(struct super_block *sb, void *data, int silent)
 {
 	return actiondfs_fill_super_mode(sb, data, silent,
-					 ACTIONDFS_LOOKUP_HYBRID32);
+					 ACTIONDFS_LOOKUP_HYBRID32, true);
 }
 
 static int actiondfs_hybrid32_fill_super(struct super_block *sb, void *data, int silent)
 {
 	return actiondfs_fill_super_mode(sb, data, silent,
-					 ACTIONDFS_LOOKUP_HYBRID32);
+					 ACTIONDFS_LOOKUP_HYBRID32, true);
 }
 
 static struct dentry *actiondfs_mount(struct file_system_type *fs_type,
@@ -1676,6 +1818,15 @@ static struct dentry *actiondfs_mount(struct file_system_type *fs_type,
 				      void *data)
 {
 	return mount_nodev(fs_type, flags | SB_RDONLY, data, actiondfs_fill_super);
+}
+
+static struct dentry *actiondfs_old_mount(struct file_system_type *fs_type,
+					  int flags,
+					  const char *dev_name,
+					  void *data)
+{
+	return mount_nodev(fs_type, flags | SB_RDONLY, data,
+			   actiondfs_old_fill_super);
 }
 
 static struct dentry *actiondfs_vec_mount(struct file_system_type *fs_type,
@@ -1703,6 +1854,13 @@ static struct file_system_type actiondfs_fs_type = {
 	.kill_sb = kill_anon_super,
 };
 
+static struct file_system_type actiondfs_old_fs_type = {
+	.owner = THIS_MODULE,
+	.name = "actiondfs_old",
+	.mount = actiondfs_old_mount,
+	.kill_sb = kill_anon_super,
+};
+
 static struct file_system_type actiondfs_vec_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "actiondfs_vec",
@@ -1719,6 +1877,7 @@ static struct file_system_type actiondfs_hybrid32_fs_type = {
 
 static struct file_system_type *actiondfs_fs_types[] = {
 	&actiondfs_fs_type,
+	&actiondfs_old_fs_type,
 	&actiondfs_vec_fs_type,
 	&actiondfs_hybrid32_fs_type,
 };

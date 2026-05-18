@@ -10,7 +10,7 @@ cpus="${ACTIOND_VM_CPUS:-8}"
 jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
 output_root="${ACTIOND_LLVM_COMPARE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-llvm-fs-compare.XXXXXX")}"
 
-read -r -a fstypes <<<"${ACTIOND_LLVM_COMPARE_FSTYPES:-actiondfs actiondfs_hybrid32}"
+read -r -a fstypes <<<"${ACTIOND_LLVM_COMPARE_FSTYPES:-actiondfs_old actiondfs}"
 
 server_pid=""
 server_log=""

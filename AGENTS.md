@@ -69,16 +69,17 @@ actiond log survives:
 ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
 ```
 
-To compare the two in-kernel actiondfs lookup implementations back-to-back,
+To compare the no-cache and cached actiondfs implementations back-to-back,
 run:
 
 ```bash
 tools/e2e.sh vm-fs-compare
 ```
 
-That mode runs the stress workspace with `actiondfs` and
-`actiondfs_hybrid32`, keeps the VM logs, and writes parsed summaries under the
-printed comparison directory.
+That mode runs the stress workspace with `actiondfs_old` and `actiondfs`, keeps
+the VM logs, and writes parsed summaries under the printed comparison
+directory. `actiondfs_old` is the canonical no-directory-cache baseline;
+`actiondfs` is the optimized cached implementation.
 
 Then update the timing summary next to the stress workspace:
 
