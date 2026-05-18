@@ -2,15 +2,13 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-host="${ACTIOND_LLVM_COMPARE_HOST:-127.0.0.1}"
-port="${ACTIOND_LLVM_COMPARE_PORT:-8998}"
+host="${ACTIOND_LLVM_VM_SMOKE_HOST:-127.0.0.1}"
+port="${ACTIOND_LLVM_VM_SMOKE_PORT:-8998}"
 endpoint="${host}:${port}"
 memory_mib="${ACTIOND_VM_MEMORY_MIB:-4096}"
 cpus="${ACTIOND_VM_CPUS:-8}"
 jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
-output_root="${ACTIOND_LLVM_COMPARE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-llvm-fs-compare.XXXXXX")}"
-
-read -r -a fstypes <<<"${ACTIOND_LLVM_COMPARE_FSTYPES:-actiondfs_old actiondfs}"
+output_root="${ACTIOND_LLVM_VM_SMOKE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-llvm-vm-smoke.XXXXXX")}"
 
 server_pid=""
 server_log=""
@@ -67,33 +65,30 @@ build_vm_artifacts() {
   )
 }
 
-run_variant() {
-  local fstype="$1"
-  local variant_root="${output_root}/${fstype}"
-  local build_log="${variant_root}/llvm_tblgen_smoke.log"
-  local timings="${variant_root}/timings.md"
+run_smoke() {
+  local build_log="${output_root}/llvm_tblgen_smoke.log"
+  local timings="${output_root}/timings.md"
   local server
   local kernel
   local initramfs
   local runtimes
   local elapsed
 
-  mkdir -p "${variant_root}"
+  mkdir -p "${output_root}"
   server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
   kernel="$(bazel_output //vm:linux_kernel_zst)"
   initramfs="$(bazel_output //vm:initramfs)"
   runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
-  server_log="${variant_root}/darwin-actiond-vm.log"
+  server_log="${output_root}/darwin-actiond-vm.log"
 
   "${server}" serve-vm \
     --listen="${endpoint}" \
-    --root="${variant_root}/server" \
+    --root="${output_root}/server" \
     --memory-mib="${memory_mib}" \
     --cpus="${cpus}" \
     --kernel="${kernel}" \
     --initramfs="${initramfs}" \
     --runtime-image="${runtimes}" \
-    --actiondfs-fstype="${fstype}" \
     >"${server_log}" 2>&1 &
   server_pid="$!"
 
@@ -104,37 +99,31 @@ run_variant() {
     ACTIOND_LLVM_SMOKE_JOBS="${jobs}" \
     ACTIOND_LLVM_SMOKE_SKIP_CLEAN=0 \
     "${repo_root}/e2e/llvm_tblgen_smoke.sh" >"${build_log}" 2>&1; then
-    echo "LLVM smoke failed for ${fstype}; build log: ${build_log}" >&2
+    echo "LLVM smoke failed; build log: ${build_log}" >&2
     tail -200 "${build_log}" >&2 || true
     return 1
   fi
 
   elapsed="$(sed -n 's/.*Elapsed time: \([0-9.]*s\).*/\1/p' "${build_log}" | tail -n 1)"
   "${repo_root}/test/parse_timings.py" "${server_log}" \
-    --mode "llvm-${fstype}" \
-    --command "ACTIOND_ACTIONDFS_FSTYPE=${fstype} e2e/llvm_tblgen_smoke.sh" \
+    --mode "llvm-vm" \
+    --command "e2e/run_llvm_vm_smoke.sh" \
     --bazel-elapsed "${elapsed:-unknown}" \
     --workload "@llvm-project//llvm:llvm-tblgen, jobs=${jobs}" \
     --output "${timings}"
 
   cleanup_server 0
-  echo "completed ${fstype}: ${timings}" >&2
+  echo "timing summary: ${timings}" >&2
 }
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "LLVM VM comparison must run on macOS with Virtualization.framework" >&2
+  echo "LLVM VM smoke must run on macOS with Virtualization.framework" >&2
   exit 1
 fi
 
 mkdir -p "${output_root}"
-echo "comparison output: ${output_root}" >&2
+echo "smoke output: ${output_root}" >&2
 build_vm_artifacts
+run_smoke
 
-for fstype in "${fstypes[@]}"; do
-  run_variant "${fstype}"
-done
-
-printf '%s\n' "${output_root}" >/tmp/actiond-last-llvm-fs-compare-path
-for fstype in "${fstypes[@]}"; do
-  echo "${fstype} summary: ${output_root}/${fstype}/timings.md" >&2
-done
+printf '%s\n' "${output_root}" >/tmp/actiond-last-llvm-vm-smoke-path

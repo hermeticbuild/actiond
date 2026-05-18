@@ -6,14 +6,12 @@ test_workspace="${repo_root}/test"
 
 usage() {
   cat >&2 <<'EOF'
-usage: tools/e2e.sh <build|linux|vm|vm-fs-compare|all>
+usage: tools/e2e.sh <build|linux|vm|all>
 
 Modes:
   build   Run repository build/test checks and build the stress action tools.
   linux   Start linux-actiond on this Linux host and run test/ via Bazel remote execution.
   vm      Start darwin-actiond serve-vm and run test/ via Bazel remote execution.
-  vm-fs-compare
-          Run VM stress with actiondfs_old and actiondfs.
   all     Run build plus the host-appropriate e2e mode when configured.
 
 Environment:
@@ -21,7 +19,6 @@ Environment:
   ACTIOND_E2E_HOST=127.0.0.1
   ACTIOND_VM_MEMORY_MIB=1024
   ACTIOND_VM_CPUS=4
-  ACTIOND_ACTIONDFS_FSTYPE=actiondfs
   ACTIOND_E2E_BARE_COUNT=160
   ACTIOND_E2E_SOURCE_DIRS=8
   ACTIOND_E2E_SOURCE_FILES_PER_DIR=32
@@ -218,7 +215,6 @@ run_vm_e2e() {
     --root="${root}/server"
     --memory-mib="${ACTIOND_VM_MEMORY_MIB:-1024}"
     --cpus="${ACTIOND_VM_CPUS:-4}"
-    --actiondfs-fstype="${ACTIOND_ACTIONDFS_FSTYPE:-actiondfs}"
   )
 
   if [[ "${ACTIOND_E2E_STANDALONE:-0}" == "1" ]]; then
@@ -251,47 +247,6 @@ run_vm_e2e() {
   trap - EXIT
 }
 
-run_vm_fs_compare() {
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "vm fs compare must run on macOS with Virtualization.framework" >&2
-    return 1
-  fi
-
-  local compare_root
-  compare_root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-vm-fs-compare.XXXXXX")"
-  echo "comparison output: ${compare_root}" >&2
-
-  local previous_keep="${ACTIOND_E2E_KEEP_TMP:-}"
-  local previous_fstype="${ACTIOND_ACTIONDFS_FSTYPE:-}"
-  export ACTIOND_E2E_KEEP_TMP=1
-
-  local fstype
-  for fstype in actiondfs_old actiondfs; do
-    export ACTIOND_ACTIONDFS_FSTYPE="${fstype}"
-    run_vm_e2e
-    local result_root="${last_e2e_root}"
-    "${repo_root}/test/parse_timings.py" "${result_root}/darwin-actiond-vm.log" \
-      --mode "vm-${fstype}" \
-      --command "ACTIOND_ACTIONDFS_FSTYPE=${fstype} ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm" \
-      --output "${compare_root}/${fstype}.md"
-  done
-
-  if [[ -n "${previous_keep}" ]]; then
-    export ACTIOND_E2E_KEEP_TMP="${previous_keep}"
-  else
-    unset ACTIOND_E2E_KEEP_TMP
-  fi
-  if [[ -n "${previous_fstype}" ]]; then
-    export ACTIOND_ACTIONDFS_FSTYPE="${previous_fstype}"
-  else
-    unset ACTIOND_ACTIONDFS_FSTYPE
-  fi
-
-  for fstype in actiondfs_old actiondfs; do
-    echo "${fstype} summary: ${compare_root}/${fstype}.md" >&2
-  done
-}
-
 case "${1:-}" in
   build)
     run_build_checks
@@ -301,9 +256,6 @@ case "${1:-}" in
     ;;
   vm)
     run_vm_e2e
-    ;;
-  vm-fs-compare)
-    run_vm_fs_compare
     ;;
   all)
     run_build_checks

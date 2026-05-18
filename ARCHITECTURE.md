@@ -178,12 +178,9 @@ mount namespace mounts:
   lazily from the read-only host CAS mounted at `/host-cas`
 - stock overlayfs at `/workspace`, using per-action upper/work directories
 
-The kernel module also registers `actiondfs_old`, a canonical no-directory-cache
-baseline used only for performance comparisons. `actiondfs` is the optimized
-implementation: it caches parsed non-root Directory protos by digest and
-materializes per-mount child nodes only when lookup needs them. Production VM
-execution uses the cached `actiondfs` filesystem unless `darwin-actiond
-serve-vm` is launched with `--actiondfs-fstype=actiondfs_old` for comparison.
+`actiondfs` caches parsed non-root Directory protos by digest and materializes
+per-mount child nodes only when lookup needs them. It is the only supported VM
+input filesystem.
 
 Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
 inode metadata. CAS blobs remain immutable data files and are not chmodded.

@@ -69,18 +69,6 @@ actiond log survives:
 ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
 ```
 
-To compare the no-cache and cached actiondfs implementations back-to-back,
-run:
-
-```bash
-tools/e2e.sh vm-fs-compare
-```
-
-That mode runs the stress workspace with `actiondfs_old` and `actiondfs`, keeps
-the VM logs, and writes parsed summaries under the printed comparison
-directory. `actiondfs_old` is the canonical no-directory-cache baseline;
-`actiondfs` is the optimized cached implementation.
-
 When investigating actiondfs behavior inside a running guest, read
 `/proc/actiondfs_stats`. It reports VM-lifetime counters for directory cache
 hits/misses, parses, lookups, readdir, CAS blob opens, folio reads, and stale
@@ -139,16 +127,14 @@ The same command is wrapped by:
 e2e/llvm_tblgen_smoke.sh
 ```
 
-To compare the in-kernel actiondfs lookup implementations on this workload,
-use:
+To run the LLVM VM smoke from a fresh worker and collect timing summaries, use:
 
 ```bash
-e2e/llvm_fs_compare.sh
+e2e/run_llvm_vm_smoke.sh
 ```
 
-That script starts a fresh VM worker for each filesystem type, runs the same
-`llvm-tblgen` smoke, writes parsed timing summaries under the printed output
-directory, and records the latest output root in
-`/tmp/actiond-last-llvm-fs-compare-path`. Keep
-`e2e/LLVM_ACTIONDFS_FS_COMPARISON.md` current when changing actiondfs lookup or
+That script starts a fresh VM worker, runs the same `llvm-tblgen` smoke, writes
+parsed timing summaries under the printed output directory, and records the
+latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`. Keep
+`e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing actiondfs lookup or
 materialization behavior.

@@ -97,7 +97,6 @@ struct actiondfs_sb_info {
 	bool cas_path_valid;
 	struct actiondfs_node *root;
 	u64 next_ino;
-	bool use_dir_cache;
 	struct mutex load_lock;
 };
 
@@ -1483,7 +1482,7 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 	if (dir->loaded)
 		return 0;
 
-	if (sbi->use_dir_cache && dir->parent) {
+	if (dir->parent) {
 		struct actiondfs_cached_dir *cached;
 
 		err = actiondfs_get_cached_dir(sbi, dir->hash, &cached);
@@ -1859,9 +1858,7 @@ static const struct super_operations actiondfs_super_ops = {
 	.put_super = actiondfs_put_super,
 };
 
-static int actiondfs_fill_super_mode(struct super_block *sb, void *data,
-				     int silent,
-				     bool use_dir_cache)
+static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct actiondfs_sb_info *sbi;
 	struct inode *root_inode;
@@ -1872,7 +1869,6 @@ static int actiondfs_fill_super_mode(struct super_block *sb, void *data,
 		return -ENOMEM;
 
 	sb->s_fs_info = sbi;
-	sbi->use_dir_cache = use_dir_cache;
 	mutex_init(&sbi->load_lock);
 	sb->s_magic = ACTIONDFS_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
@@ -1918,31 +1914,12 @@ fail:
 	return err;
 }
 
-static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
-{
-	return actiondfs_fill_super_mode(sb, data, silent, true);
-}
-
-static int actiondfs_old_fill_super(struct super_block *sb, void *data, int silent)
-{
-	return actiondfs_fill_super_mode(sb, data, silent, false);
-}
-
 static struct dentry *actiondfs_mount(struct file_system_type *fs_type,
 				      int flags,
 				      const char *dev_name,
 				      void *data)
 {
 	return mount_nodev(fs_type, flags | SB_RDONLY, data, actiondfs_fill_super);
-}
-
-static struct dentry *actiondfs_old_mount(struct file_system_type *fs_type,
-					  int flags,
-					  const char *dev_name,
-					  void *data)
-{
-	return mount_nodev(fs_type, flags | SB_RDONLY, data,
-			   actiondfs_old_fill_super);
 }
 
 static struct file_system_type actiondfs_fs_type = {
@@ -1952,16 +1929,8 @@ static struct file_system_type actiondfs_fs_type = {
 	.kill_sb = kill_anon_super,
 };
 
-static struct file_system_type actiondfs_old_fs_type = {
-	.owner = THIS_MODULE,
-	.name = "actiondfs_old",
-	.mount = actiondfs_old_mount,
-	.kill_sb = kill_anon_super,
-};
-
 static struct file_system_type *actiondfs_fs_types[] = {
 	&actiondfs_fs_type,
-	&actiondfs_old_fs_type,
 };
 
 static int actiondfs_stats_show(struct seq_file *m, void *v)

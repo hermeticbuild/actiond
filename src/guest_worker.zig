@@ -36,8 +36,6 @@ pub fn run(io: std.Io) !void {
     defer action_work_dir.close(io);
     var cleanup_dir = try std.Io.Dir.openDirAbsolute(io, "/work/cas-upper/upper", .{});
     defer cleanup_dir.close(io);
-    const actiondfs_fstype = try actiondfsFSTypeFromCmdline(io, allocator);
-    defer allocator.free(actiondfs_fstype);
 
     try cas.Store.init(cas_dir).ensureLayout(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
@@ -48,7 +46,6 @@ pub fn run(io: std.Io) !void {
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
         .use_actiondfs = true,
-        .actiondfs_fstype = actiondfs_fstype,
         .cas_blob_root_path = guest_cas_blob_root_path,
         .input_cas_blob_root_path = host_cas_blob_root_path,
         .staged_cas_blob_root_path = staged_cas_blob_root_path,
@@ -84,27 +81,6 @@ pub fn run(io: std.Io) !void {
         };
         thread.detach();
     }
-}
-
-fn actiondfsFSTypeFromCmdline(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
-    const cmdline = std.Io.Dir.cwd().readFileAlloc(
-        io,
-        "/proc/cmdline",
-        allocator,
-        .limited(4096),
-    ) catch return allocator.dupe(u8, action_executor.default_actiondfs_fstype);
-    defer allocator.free(cmdline);
-
-    var parts = std.mem.splitScalar(u8, cmdline, ' ');
-    while (parts.next()) |part| {
-        const prefix = "actiond.actiondfs_fstype=";
-        if (!std.mem.startsWith(u8, part, prefix)) continue;
-        const value = std.mem.trim(u8, part[prefix.len..], " \t\r\n");
-        try action_executor.validateActiondfsFSType(value);
-        return allocator.dupe(u8, value);
-    }
-
-    return allocator.dupe(u8, action_executor.default_actiondfs_fstype);
 }
 
 fn connectionThread(

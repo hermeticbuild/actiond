@@ -20,18 +20,15 @@ Start `darwin-actiond serve-vm` on `127.0.0.1:8998` before running it. The
 script runs `bazel clean --expunge` by default so a fresh worker CAS gets a full
 upload.
 
-## LLVM actiondfs Comparison
+## LLVM VM Smoke Runner
 
-`llvm_fs_compare.sh` starts a fresh VM worker for each requested actiondfs
-filesystem type, runs the LLVM tblgen smoke, and writes parsed timing summaries
-under a comparison directory:
+`run_llvm_vm_smoke.sh` starts a fresh VM worker, runs the LLVM tblgen smoke,
+and writes parsed timing summaries under an output directory:
 
 ```bash
-e2e/llvm_fs_compare.sh
+e2e/run_llvm_vm_smoke.sh
 ```
 
-By default it compares `actiondfs_old` and `actiondfs` with an 8 CPU, 4096 MiB
-VM. `actiondfs_old` is the no-cache baseline and `actiondfs` is the cached
-implementation. The last output directory is written to
-`/tmp/actiond-last-llvm-fs-compare-path`. The current checked-in comparison is
-in `LLVM_ACTIONDFS_FS_COMPARISON.md`.
+By default it uses an 8 CPU, 4096 MiB VM. The last output directory is written
+to `/tmp/actiond-last-llvm-vm-smoke-path`. The current checked-in timing summary
+is in `LLVM_VM_SMOKE_TIMINGS.md`.

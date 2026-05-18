@@ -58,7 +58,7 @@ pub const BindMount = struct {
 };
 
 pub const ActiondfsOverlayMount = struct {
-    fstype: [:0]u8,
+    fstype: [:0]const u8,
     lower_target: [:0]u8,
     overlay_target: [:0]u8,
     upperdir: [:0]u8,

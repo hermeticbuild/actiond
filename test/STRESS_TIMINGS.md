@@ -5,7 +5,7 @@
 - Execute records parsed: `31`
 - Unique action digests: `31`
 - Source log: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-vm-e2e.UunfoE/darwin-actiond-vm.log`
-- Command: `ACTIOND_ACTIONDFS_FSTYPE=actiondfs ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm`
+- Command: `ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm`
 
 ## Stage Timing
 
