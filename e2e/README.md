@@ -35,5 +35,23 @@ e2e/run_llvm_vm_smoke.sh
 By default it uses an 8 CPU, 4096 MiB VM. The last output directory is written
 to `/tmp/actiond-last-llvm-vm-smoke-path`. Set `ACTIOND_LLVM_SMOKE_MAC_HOST=0`
 to skip the mac-host baseline, or `ACTIOND_LLVM_SMOKE_VM=0` to run only the
-mac-host baseline. The current checked-in timing summary is in
-`LLVM_VM_SMOKE_TIMINGS.md`.
+mac-host baseline. Set `ACTIOND_LLVM_SMOKE_WARMUP_TARGET=<label>` to run a
+pre-measure VM build and parse only the actiond log slice after that warmup.
+The current checked-in timing summary is in `LLVM_VM_SMOKE_TIMINGS.md`.
+
+Both VM and mac-host runs set the target platform to
+`@llvm//platforms:linux_arm64_musl`. The VM run also sets the host platform to
+Linux musl because host tools execute inside the VM. The mac-host run leaves the
+host platform as macOS, otherwise Bazel would build Linux host tools and then
+try to execute them locally on Darwin. Some Bazel output paths still include
+`darwin_arm64-opt`; check the compile command target triple, not just the output
+directory name.
+
+Do not use `@llvm//runtimes:resource_directory` as the default warmup. Aquery
+shows it accounts for only part of the VM/mac configured-action gap: the VM
+`llvm-tblgen` graph has 5,341 configured actions, the mac-host graph has 3,637,
+and `@llvm//runtimes:resource_directory` has 597. The remaining gap comes
+mostly from Linux-musl exec-configuration actions needed by the VM build. As a
+split warmup, `resource_directory` also exposes Bazel TreeArtifact
+materialization differences that can make the later link miss
+`libclang_rt.builtins.a`.

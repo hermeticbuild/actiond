@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace="${ACTIOND_LLVM_SMOKE_WORKSPACE:-${repo_root}}"
 smoke_target="${ACTIOND_LLVM_SMOKE_TARGET:-@llvm-project//llvm:llvm-tblgen}"
+warmup_target="${ACTIOND_LLVM_SMOKE_WARMUP_TARGET-}"
 target_platform="${ACTIOND_LLVM_SMOKE_TARGET_PLATFORM:-@llvm//platforms:linux_arm64_musl}"
 host="${ACTIOND_LLVM_VM_SMOKE_HOST:-127.0.0.1}"
 port="${ACTIOND_LLVM_VM_SMOKE_PORT:-8998}"
@@ -77,6 +78,7 @@ build_vm_artifacts() {
 
 run_smoke() {
   local build_log="${output_root}/llvm_tblgen_smoke.log"
+  local measured_server_log="${output_root}/darwin-actiond-vm.measured.log"
   local timings="${output_root}/timings.md"
   local server
   local kernel
@@ -110,8 +112,11 @@ run_smoke() {
     ACTIOND_LLVM_SMOKE_JOBS="${jobs}" \
     ACTIOND_LLVM_SMOKE_WORKSPACE="${workspace}" \
     ACTIOND_LLVM_SMOKE_TARGET="${smoke_target}" \
+    ACTIOND_LLVM_SMOKE_WARMUP_TARGET="${warmup_target}" \
     ACTIOND_LLVM_SMOKE_TARGET_PLATFORM="${target_platform}" \
     ACTIOND_LLVM_SMOKE_HOST_PLATFORM="${target_platform}" \
+    ACTIOND_LLVM_SMOKE_SERVER_LOG="${server_log}" \
+    ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG="${measured_server_log}" \
     ACTIOND_LLVM_SMOKE_SKIP_CLEAN=0 \
     "${repo_root}/e2e/llvm_tblgen_smoke.sh" >"${build_log}" 2>&1; then
     echo "LLVM smoke failed; build log: ${build_log}" >&2
@@ -120,11 +125,16 @@ run_smoke() {
   fi
 
   elapsed="$(sed -n 's/.*Elapsed time: \([0-9.]*s\).*/\1/p' "${build_log}" | tail -n 1)"
-  "${repo_root}/test/parse_timings.py" "${server_log}" \
+  if [[ ! -s "${measured_server_log}" ]]; then
+    echo "measured VM log slice is empty; source log: ${server_log}" >&2
+    return 1
+  fi
+
+  "${repo_root}/test/parse_timings.py" "${measured_server_log}" \
     --mode "llvm-vm" \
     --command "e2e/run_llvm_vm_smoke.sh" \
     --bazel-elapsed "${elapsed:-unknown}" \
-    --workload "${smoke_target}, jobs=${jobs}" \
+    --workload "${smoke_target}, warmup=${warmup_target:-none}, jobs=${jobs}" \
     --output "${timings}"
 
   cleanup_server 0
@@ -173,6 +183,7 @@ run_mac_host_smoke() {
 - Workload: \`${smoke_target}\`, jobs=${jobs}
 - Target platform: \`${target_platform}\`
 - Host platform: default macOS host platform
+- Platform note: target actions compile for Linux musl; local exec/host tools remain macOS binaries so Bazel can run them locally.
 - Build mode: \`-c opt --strip=always --stripopt=--strip-all\`
 - Bazel elapsed: \`${elapsed:-unknown}\`
 EOF

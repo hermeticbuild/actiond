@@ -90,23 +90,22 @@ path changes.
 ## LLVM Smoke
 
 For a more realistic VM remote-execution smoke than the small local stress
-workspace, run `@llvm-project//llvm:llvm-tblgen` from
-`/Users/dzbarsky/bootstrapped2` against `darwin-actiond serve-vm`. Do not use
-`//runtimes:resource_directory` as the default smoke; it is too small and less
-representative.
+workspace, run `@llvm-project//llvm:llvm-tblgen` from this repo's `@llvm`
+module dependency against `darwin-actiond serve-vm`. Do not use
+`@llvm//runtimes:resource_directory` as the default smoke; it is too small and
+less representative.
 
-Use actiond as both executor and cache, keep BuildBuddy BES from the
-`bootstrapped2` `.bazelrc`, and disable remote cache compression because actiond
-does not support it yet. Use the musl Linux target and host platforms so the
-smoke avoids glibc runtime actions and exec tools built by the smoke are Linux
-arm64 musl binaries:
+Use actiond as both executor and cache, and disable remote cache compression
+because actiond does not support it yet. Use the musl Linux target and host
+platforms so the smoke avoids glibc runtime actions and exec tools built by the
+smoke are Linux arm64 musl binaries:
 
 ```bash
-cd /Users/dzbarsky/bootstrapped2
+cd /Users/dzbarsky/actiond
 bazel clean --expunge
-bazel build --config=prebuilt @llvm-project//llvm:llvm-tblgen \
-  --platforms=//platforms:linux_arm64_musl \
-  --host_platform=//platforms:linux_arm64_musl \
+bazel build @llvm-project//llvm:llvm-tblgen \
+  --platforms=@llvm//platforms:linux_arm64_musl \
+  --host_platform=@llvm//platforms:linux_arm64_musl \
   --remote_executor=grpc://127.0.0.1:8998 \
   --remote_cache=grpc://127.0.0.1:8998 \
   --experimental_remote_downloader= \
@@ -138,3 +137,15 @@ parsed timing summaries under the printed output directory, and records the
 latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`. Keep
 `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing actiondfs lookup or
 materialization behavior.
+
+The mac-host baseline in that runner uses the same Linux musl target platform,
+but intentionally keeps the host platform as default macOS. Do not set the
+local mac-host baseline to `--host_platform=@llvm//platforms:linux_arm64_musl`;
+Bazel would build Linux host tools and then try to run them on Darwin.
+
+If you suspect a setup target explains a VM/mac action-count gap, validate it
+with `bazel aquery` before adding a warmup. The checked comparison showed the
+VM `llvm-tblgen` graph has 5,341 configured actions, the mac-host graph has
+3,637, and `@llvm//runtimes:resource_directory` has only 597, so it is not the
+whole gap. That target also exposed a split-invocation TreeArtifact issue when
+used as a warmup.
