@@ -182,6 +182,8 @@ pub const WriteGrpcStream = struct {
     resource_name: ?[]u8 = null,
     expected_digest: ?cas.Digest = null,
     writer: ?cas.BlobWriter = null,
+    start: ?std.Io.Timestamp = null,
+    record_count: usize = 0,
     committed_size: u64 = 0,
     finished: bool = false,
 
@@ -242,6 +244,13 @@ pub const WriteGrpcStream = struct {
         if (!self.finished) return error.IncompleteWrite;
 
         _ = try self.writer.?.finish(io, self.expected_digest.?);
+        const elapsed_ns = elapsedNs(self.start.?, std.Io.Clock.awake.now(io));
+        if (shouldLogCasUpload(self.record_count, self.committed_size, elapsed_ns)) {
+            std.log.info(
+                "cas bytestream_write timing records={d} bytes={d} elapsed_ns={d}",
+                .{ self.record_count, self.committed_size, elapsed_ns },
+            );
+        }
         return .{ .committed_size = @intCast(self.committed_size) };
     }
 
@@ -252,6 +261,8 @@ pub const WriteGrpcStream = struct {
         payload: []const u8,
     ) !void {
         if (self.finished) return error.InvalidOffset;
+        if (self.start == null) self.start = std.Io.Clock.awake.now(io);
+        self.record_count += 1;
 
         var reader = protobuf.Reader.init(payload);
         const request = try bytestream.WriteRequest.decode(&reader);
@@ -274,6 +285,14 @@ pub const WriteGrpcStream = struct {
         if (request.finish_write) self.finished = true;
     }
 };
+
+fn shouldLogCasUpload(record_count: usize, bytes: u64, elapsed_ns: i96) bool {
+    return record_count >= 128 or bytes >= 1024 * 1024 or elapsed_ns >= 10 * std.time.ns_per_ms;
+}
+
+fn elapsedNs(start: std.Io.Timestamp, end: std.Io.Timestamp) i96 {
+    return start.durationTo(end).nanoseconds;
+}
 
 fn appendVarintAssumeCapacity(out: *std.ArrayListUnmanaged(u8), value: u64) void {
     var current = value;

@@ -208,6 +208,7 @@ pub const Proxy = struct {
         stream.* = .{
             .method = method,
             .inner = inner,
+            .start = std.Io.Clock.awake.now(io),
         };
         return .{
             .ctx = stream,
@@ -225,11 +226,13 @@ pub const Proxy = struct {
         method: []const u8,
         body: []const u8,
     ) ![]u8 {
+        const start = if (isCasUploadMethod(method)) std.Io.Clock.awake.now(io) else null;
         var response = try self.transport.call(io, allocator, .{
             .kind = kind,
             .method = method,
             .body = body,
         });
+        logVmProxyRpc(method, kind, body.len, response.status, response.body.len, start, io);
         return switch (response.status) {
             .ok => response.body,
             .stream_chunk => {
@@ -719,6 +722,9 @@ const GuestBlobImporter = struct {
 const ProxyClientStream = struct {
     method: []const u8,
     inner: ClientStream,
+    start: std.Io.Timestamp,
+    chunks: usize = 0,
+    request_bytes: usize = 0,
 
     fn append(
         ctx: *anyopaque,
@@ -727,6 +733,8 @@ const ProxyClientStream = struct {
         bytes: []const u8,
     ) !void {
         const self: *ProxyClientStream = @ptrCast(@alignCast(ctx));
+        self.chunks += 1;
+        self.request_bytes += bytes.len;
         try self.inner.append(io, allocator, bytes);
     }
 
@@ -737,6 +745,15 @@ const ProxyClientStream = struct {
     ) ![]u8 {
         const self: *ProxyClientStream = @ptrCast(@alignCast(ctx));
         var response = try self.inner.finish(io, allocator);
+        logVmProxyRpc(
+            self.method,
+            .client_streaming,
+            self.request_bytes,
+            response.status,
+            response.body.len,
+            if (isCasUploadMethod(self.method)) self.start else null,
+            io,
+        );
         return switch (response.status) {
             .ok => response.body,
             .stream_chunk => {
@@ -758,6 +775,37 @@ const ProxyClientStream = struct {
         allocator.destroy(self);
     }
 };
+
+fn isCasUploadMethod(method: []const u8) bool {
+    return std.mem.eql(u8, method, reapi_dispatch.cas_batch_update_blobs) or
+        std.mem.eql(u8, method, reapi_dispatch.bytestream_write);
+}
+
+fn logVmProxyRpc(
+    method: []const u8,
+    kind: control_protocol.CallKind,
+    request_bytes: usize,
+    status: control_protocol.Status,
+    response_bytes: usize,
+    start: ?std.Io.Timestamp,
+    io: std.Io,
+) void {
+    const started = start orelse return;
+    const elapsed_ns = elapsedNs(started, std.Io.Clock.awake.now(io));
+    if (!shouldLogCasUpload(request_bytes, elapsed_ns)) return;
+    std.log.info(
+        "vm proxy cas rpc method={s} kind={s} status={s} request_bytes={d} response_bytes={d} elapsed_ns={d}",
+        .{ method, @tagName(kind), @tagName(status), request_bytes, response_bytes, elapsed_ns },
+    );
+}
+
+fn shouldLogCasUpload(request_bytes: usize, elapsed_ns: i96) bool {
+    return request_bytes >= 1024 * 1024 or elapsed_ns >= 10 * std.time.ns_per_ms;
+}
+
+fn elapsedNs(start: std.Io.Timestamp, end: std.Io.Timestamp) i96 {
+    return start.durationTo(end).nanoseconds;
+}
 
 const FakeTransport = struct {
     expected_kind: control_protocol.CallKind,

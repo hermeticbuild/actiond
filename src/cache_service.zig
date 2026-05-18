@@ -76,34 +76,58 @@ pub fn batchUpdateBlobs(
     store: cas.Store,
     request: reapi.BatchUpdateBlobsRequest,
 ) !reapi.BatchUpdateBlobsResponse {
+    const start = std.Io.Clock.awake.now(io);
     var responses: std.ArrayListUnmanaged(reapi.BatchUpdateBlobsResponse.Item) = .empty;
     errdefer responses.deinit(allocator);
 
+    var total_bytes: u64 = 0;
+    var ok_count: usize = 0;
+    var invalid_count: usize = 0;
     for (request.requests) |item| {
+        total_bytes += item.data.len;
         const expected = cas.Digest.fromReapi(item.digest) catch {
             try responses.append(allocator, .{
                 .digest = item.digest,
                 .status = .{ .code = .invalid_argument, .message = "invalid digest" },
             });
+            invalid_count += 1;
             continue;
         };
-        const actual = cas.Digest.fromBytes(item.data);
-        if (!actual.eql(expected)) {
-            try responses.append(allocator, .{
-                .digest = item.digest,
-                .status = .{ .code = .invalid_argument, .message = "digest mismatch" },
-            });
-            continue;
-        }
-
-        try store.putKnownBytes(io, expected, item.data);
+        store.putKnownBytes(io, expected, item.data) catch |err| switch (err) {
+            error.DigestMismatch, error.InvalidDigestSize => {
+                try responses.append(allocator, .{
+                    .digest = item.digest,
+                    .status = .{ .code = .invalid_argument, .message = "digest mismatch" },
+                });
+                invalid_count += 1;
+                continue;
+            },
+            else => |e| return e,
+        };
+        ok_count += 1;
         try responses.append(allocator, .{
             .digest = item.digest,
             .status = .{},
         });
     }
 
+    const elapsed_ns = elapsedNs(start, std.Io.Clock.awake.now(io));
+    if (shouldLogCasUpload(request.requests.len, total_bytes, elapsed_ns)) {
+        std.log.info(
+            "cas batch_update timing blobs={d} ok={d} invalid={d} bytes={d} elapsed_ns={d}",
+            .{ request.requests.len, ok_count, invalid_count, total_bytes, elapsed_ns },
+        );
+    }
+
     return .{ .responses = try responses.toOwnedSlice(allocator) };
+}
+
+fn shouldLogCasUpload(blob_count: usize, bytes: u64, elapsed_ns: i96) bool {
+    return blob_count >= 128 or bytes >= 1024 * 1024 or elapsed_ns >= 10 * std.time.ns_per_ms;
+}
+
+fn elapsedNs(start: std.Io.Timestamp, end: std.Io.Timestamp) i96 {
+    return start.durationTo(end).nanoseconds;
 }
 
 pub const BatchReadResult = struct {
