@@ -261,6 +261,7 @@ pub const Error = error{
 pub const max_frame_payload_len = 16 * 1024 * 1024;
 const response_frame_payload_len = http2_frame.default_max_frame_size;
 const default_max_concurrent_streams = 128;
+const inbound_initial_window_size = 1024 * 1024 * 1024;
 
 pub const Config = struct {
     listen: []const u8 = "127.0.0.1:8980",
@@ -304,7 +305,28 @@ const StreamState = struct {
 
 const SharedHttp2Writer = struct {
     mutex: std.Io.Mutex = .init,
+    flow: FlowControl = .{},
     writer: *std.Io.Writer,
+
+    fn deinit(self: *SharedHttp2Writer, allocator: std.mem.Allocator) void {
+        self.flow.deinit(allocator);
+    }
+
+    fn registerStream(self: *SharedHttp2Writer, allocator: std.mem.Allocator, stream_id: u31) !void {
+        try self.flow.registerStream(allocator, stream_id);
+    }
+
+    fn unregisterStream(self: *SharedHttp2Writer, stream_id: u31) void {
+        self.flow.unregisterStream(stream_id);
+    }
+
+    fn applyPeerSettings(self: *SharedHttp2Writer, payload: []const u8) !void {
+        try self.flow.applySettings(payload);
+    }
+
+    fn applyWindowUpdate(self: *SharedHttp2Writer, stream_id: u31, increment: u31) void {
+        self.flow.applyWindowUpdate(stream_id, increment);
+    }
 
     fn sendServerSettings(self: *SharedHttp2Writer, io: std.Io) !void {
         try self.mutex.lock(io);
@@ -346,9 +368,14 @@ const SharedHttp2Writer = struct {
     }
 
     fn sendGrpcSuccess(self: *SharedHttp2Writer, io: std.Io, stream_id: u31, response_body: []const u8) !void {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
-        try writeGrpcSuccess(self.writer, stream_id, response_body);
+        try self.sendHeaders(io, stream_id, false, &.{
+            .{ .name = ":status", .value = "200" },
+            .{ .name = "content-type", .value = "application/grpc" },
+        });
+        try self.sendData(io, stream_id, response_body);
+        try self.sendHeaders(io, stream_id, true, &.{
+            .{ .name = "grpc-status", .value = "0" },
+        });
     }
 
     fn sendGrpcError(
@@ -377,10 +404,145 @@ const SharedHttp2Writer = struct {
     }
 
     fn sendData(self: *SharedHttp2Writer, io: std.Io, stream_id: u31, body: []const u8) !void {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
-        try writeData(self.writer, stream_id, body);
-        try self.writer.flush();
+        var remaining = body;
+        while (remaining.len != 0) {
+            const chunk_len = try self.flow.reserveData(stream_id, remaining.len);
+            const chunk = remaining[0..chunk_len];
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+            try writeFrame(self.writer, .{
+                .length = chunk.len,
+                .type = .data,
+                .flags = 0,
+                .stream_id = stream_id,
+            }, chunk);
+            try self.writer.flush();
+            remaining = remaining[chunk_len..];
+        }
+    }
+};
+
+const FlowControl = struct {
+    const Stream = struct {
+        id: u31,
+        window: i64,
+    };
+
+    lock_state: SpinLock = .{},
+    connection_window: i64 = http2_frame.default_initial_window_size,
+    initial_stream_window: i64 = http2_frame.default_initial_window_size,
+    max_frame_size: usize = http2_frame.default_max_frame_size,
+    streams: std.ArrayListUnmanaged(Stream) = .empty,
+
+    fn deinit(self: *FlowControl, allocator: std.mem.Allocator) void {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+        self.streams.deinit(allocator);
+    }
+
+    fn registerStream(self: *FlowControl, allocator: std.mem.Allocator, stream_id: u31) !void {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+
+        if (self.findStreamIndexLocked(stream_id) != null) return;
+        try self.streams.append(allocator, .{
+            .id = stream_id,
+            .window = self.initial_stream_window,
+        });
+    }
+
+    fn unregisterStream(self: *FlowControl, stream_id: u31) void {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+
+        if (self.findStreamIndexLocked(stream_id)) |index| {
+            _ = self.streams.orderedRemove(index);
+        }
+    }
+
+    fn applySettings(self: *FlowControl, payload: []const u8) !void {
+        var iterator = try http2_frame.SettingsIterator.init(payload);
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+
+        while (iterator.next()) |setting| {
+            switch (setting.id) {
+                .initial_window_size => {
+                    const old = self.initial_stream_window;
+                    const new: i64 = @intCast(setting.value);
+                    const delta = new - old;
+                    self.initial_stream_window = new;
+                    for (self.streams.items) |*stream| stream.window += delta;
+                },
+                .max_frame_size => {
+                    if (setting.value >= http2_frame.default_max_frame_size and
+                        setting.value <= http2_frame.max_frame_size_limit)
+                    {
+                        self.max_frame_size = @intCast(setting.value);
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn applyWindowUpdate(self: *FlowControl, stream_id: u31, increment: u31) void {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+
+        if (stream_id == 0) {
+            self.connection_window += @as(i64, @intCast(increment));
+            return;
+        }
+        if (self.findStreamIndexLocked(stream_id)) |index| {
+            self.streams.items[index].window += @as(i64, @intCast(increment));
+        }
+    }
+
+    fn reserveData(self: *FlowControl, stream_id: u31, requested: usize) !usize {
+        while (true) {
+            self.lock_state.lock();
+            if (self.findStreamIndexLocked(stream_id)) |index| {
+                const stream_window = self.streams.items[index].window;
+                const available = @min(self.connection_window, stream_window);
+                if (available > 0) {
+                    const chunk_len_i64 = @min(
+                        @as(i64, @intCast(@min(requested, self.max_frame_size))),
+                        available,
+                    );
+                    self.connection_window -= chunk_len_i64;
+                    self.streams.items[index].window -= chunk_len_i64;
+                    self.lock_state.unlock();
+                    return @intCast(chunk_len_i64);
+                }
+                self.lock_state.unlock();
+                sleepMilliseconds(1);
+                continue;
+            }
+            self.lock_state.unlock();
+            return error.StreamClosed;
+        }
+    }
+
+    fn findStreamIndexLocked(self: *FlowControl, stream_id: u31) ?usize {
+        for (self.streams.items, 0..) |stream, index| {
+            if (stream.id == stream_id) return index;
+        }
+        return null;
+    }
+};
+
+const SpinLock = struct {
+    locked: std.atomic.Value(bool) = .init(false),
+
+    fn lock(self: *SpinLock) void {
+        while (self.locked.swap(true, .acquire)) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *SpinLock) void {
+        self.locked.store(false, .release);
     }
 };
 
@@ -512,6 +674,7 @@ pub fn handleConnectionStreams(
     }
 
     var shared_writer = SharedHttp2Writer{ .writer = writer };
+    defer shared_writer.deinit(allocator);
     var responses = ResponseTracker{};
     defer responses.wait();
 
@@ -541,7 +704,7 @@ pub fn handleConnectionStreams(
         switch (incoming.header.type) {
             .settings => {
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_ack)) continue;
-                _ = try http2_frame.SettingsIterator.init(incoming.payload);
+                try shared_writer.applyPeerSettings(incoming.payload);
                 try shared_writer.ackSettings(io);
             },
             .ping => {
@@ -550,9 +713,11 @@ pub fn handleConnectionStreams(
                 }
             },
             .window_update => {
-                _ = try http2_frame.decodeWindowUpdate(incoming.payload);
+                const increment = try http2_frame.decodeWindowUpdate(incoming.payload);
+                shared_writer.applyWindowUpdate(incoming.header.stream_id, increment);
             },
             .headers => {
+                try shared_writer.registerStream(allocator, incoming.header.stream_id);
                 const state = try getOrCreateStream(allocator, &streams, incoming.header.stream_id);
                 const fragment = try headersFragment(incoming.header.flags, incoming.payload);
                 try state.header_block.appendSlice(allocator, fragment);
@@ -570,6 +735,7 @@ pub fn handleConnectionStreams(
             },
             .continuation => {
                 if (continuation_stream != incoming.header.stream_id) return error.UnexpectedContinuation;
+                try shared_writer.registerStream(allocator, incoming.header.stream_id);
                 const state = try getOrCreateStream(allocator, &streams, incoming.header.stream_id);
                 try state.header_block.appendSlice(allocator, incoming.payload);
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_headers)) {
@@ -578,6 +744,7 @@ pub fn handleConnectionStreams(
                 }
             },
             .data => {
+                try shared_writer.registerStream(allocator, incoming.header.stream_id);
                 const state = try getOrCreateStream(allocator, &streams, incoming.header.stream_id);
                 const data = try dataPayload(incoming.header.flags, incoming.payload);
                 if (isClientStreaming(state)) {
@@ -591,7 +758,10 @@ pub fn handleConnectionStreams(
                     try respondAndRemove(io, allocator, dispatcher, &shared_writer, &responses, &streams, incoming.header.stream_id);
                 }
             },
-            .rst_stream => removeStream(io, allocator, &streams, incoming.header.stream_id),
+            .rst_stream => {
+                shared_writer.unregisterStream(incoming.header.stream_id);
+                removeStream(io, allocator, &streams, incoming.header.stream_id);
+            },
             .goaway => return,
             .priority, .push_promise => {},
         }
@@ -604,7 +774,7 @@ fn writeServerSettings(writer: *std.Io.Writer) !void {
     try http2_frame.appendSettingsPayload(std.heap.smp_allocator, &payload, &.{
         .{ .id = .enable_push, .value = 0 },
         .{ .id = .max_concurrent_streams, .value = default_max_concurrent_streams },
-        .{ .id = .initial_window_size, .value = 1024 * 1024 },
+        .{ .id = .initial_window_size, .value = inbound_initial_window_size },
         .{ .id = .max_frame_size, .value = 1024 * 1024 },
     });
     try writeFrame(writer, .{
@@ -613,6 +783,11 @@ fn writeServerSettings(writer: *std.Io.Writer) !void {
         .flags = 0,
         .stream_id = 0,
     }, payload.items);
+    try sendWindowUpdate(
+        writer,
+        0,
+        inbound_initial_window_size - @as(usize, @intCast(http2_frame.default_initial_window_size)),
+    );
     try writer.flush();
 }
 
@@ -733,6 +908,7 @@ fn respondAndRemove(
         if (state.id != id) continue;
         var owned_state = streams.orderedRemove(i);
         errdefer owned_state.deinit(io, allocator);
+        errdefer writer.unregisterStream(id);
 
         const task = try allocator.create(ResponseTask);
         errdefer allocator.destroy(task);
@@ -770,6 +946,7 @@ const ResponseTask = struct {
         defer responses.finish();
         defer allocator.destroy(self);
         defer self.state.deinit(io, allocator);
+        defer self.writer.unregisterStream(self.state.id);
 
         respondStream(io, allocator, self.dispatcher, self.writer, &self.state) catch |err| {
             std.log.err("gRPC stream {d} response failed: {s}", .{ self.state.id, @errorName(err) });
