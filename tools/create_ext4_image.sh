@@ -14,6 +14,30 @@ create_sparse_image() {
   fi
 }
 
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  "$@" &
+  local pid="$!"
+  (
+    sleep "${seconds}"
+    kill "${pid}" 2>/dev/null || true
+  ) &
+  local watchdog="$!"
+
+  local status=0
+  if wait "${pid}"; then
+    status=0
+  else
+    status="$?"
+  fi
+
+  kill "${watchdog}" 2>/dev/null || true
+  wait "${watchdog}" 2>/dev/null || true
+  return "${status}"
+}
+
 if [[ "$#" -ne 2 ]]; then
   echo "usage: tools/create_ext4_image.sh IMAGE SIZE_MIB" >&2
   exit 2
@@ -43,10 +67,10 @@ else
   docker_cmd=(docker)
   if [[ -n "${ACTIOND_EXT4_IMAGE_DOCKER_CONTEXT:-}" ]]; then
     docker_cmd=(docker --context "${ACTIOND_EXT4_IMAGE_DOCKER_CONTEXT}")
-  elif ! docker info >/dev/null 2>&1; then
+  elif ! run_with_timeout "${ACTIOND_DOCKER_PING_TIMEOUT_SECONDS:-5}" docker info >/dev/null 2>&1; then
     docker_cmd=()
     for context in colima desktop-linux default; do
-      if docker --context "${context}" info >/dev/null 2>&1; then
+      if run_with_timeout "${ACTIOND_DOCKER_PING_TIMEOUT_SECONDS:-5}" docker --context "${context}" info >/dev/null 2>&1; then
         docker_cmd=(docker --context "${context}")
         break
       fi

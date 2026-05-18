@@ -136,7 +136,7 @@ run_stress_workspace() {
   (
     cd "${test_workspace}"
     bazel clean --expunge >/dev/null
-    bazel build //:stress_all \
+    bazel build "${ACTIOND_E2E_TARGET:-//:stress_all}" \
       --bes_backend= \
       --bes_upload_mode=nowait_for_upload_complete \
       --remote_executor="grpc://${endpoint}" \
