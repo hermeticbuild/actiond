@@ -39,6 +39,18 @@ RUNNER_RE = re.compile(
     r"(?:actiondfs_mounts=(?P<runner_actiondfs_mounts>\d+) )?"
     r"setup_signaled=(?P<setup_signaled>true|false)"
 )
+BRIDGE_RE = re.compile(
+    r"vm bridge timing "
+    r"elapsed_ns=(?P<elapsed_ns>\d+) "
+    r"client_to_guest_bytes=(?P<client_to_guest_bytes>\d+) "
+    r"guest_to_client_bytes=(?P<guest_to_client_bytes>\d+) "
+    r"client_to_guest_reads=(?P<client_to_guest_reads>\d+) "
+    r"client_to_guest_writes=(?P<client_to_guest_writes>\d+) "
+    r"guest_to_client_reads=(?P<guest_to_client_reads>\d+) "
+    r"guest_to_client_writes=(?P<guest_to_client_writes>\d+) "
+    r"read_errors=(?P<read_errors>\d+) "
+    r"write_errors=(?P<write_errors>\d+)"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -70,6 +82,19 @@ class Timing:
     output_directories: int
     stress_case: str = "unknown"
     runner: RunnerTiming | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class BridgeTiming:
+    elapsed_ns: int
+    client_to_guest_bytes: int
+    guest_to_client_bytes: int
+    client_to_guest_reads: int
+    client_to_guest_writes: int
+    guest_to_client_reads: int
+    guest_to_client_writes: int
+    read_errors: int
+    write_errors: int
 
 
 def parse_timings(log_path: pathlib.Path) -> list[Timing]:
@@ -120,12 +145,44 @@ def parse_timings(log_path: pathlib.Path) -> list[Timing]:
     ]
 
 
+def parse_bridge_timings(log_path: pathlib.Path) -> list[BridgeTiming]:
+    timings: list[BridgeTiming] = []
+    for raw_line in log_path.read_text(errors="replace").splitlines():
+        line = ANSI_RE.sub("", raw_line)
+        match = BRIDGE_RE.search(line)
+        if not match:
+            continue
+        groups = match.groupdict()
+        timings.append(
+            BridgeTiming(
+                elapsed_ns=int(groups["elapsed_ns"]),
+                client_to_guest_bytes=int(groups["client_to_guest_bytes"]),
+                guest_to_client_bytes=int(groups["guest_to_client_bytes"]),
+                client_to_guest_reads=int(groups["client_to_guest_reads"]),
+                client_to_guest_writes=int(groups["client_to_guest_writes"]),
+                guest_to_client_reads=int(groups["guest_to_client_reads"]),
+                guest_to_client_writes=int(groups["guest_to_client_writes"]),
+                read_errors=int(groups["read_errors"]),
+                write_errors=int(groups["write_errors"]),
+            )
+        )
+    return timings
+
+
 def ns_to_ms(value: int) -> float:
     return value / 1_000_000.0
 
 
 def fmt_ms(value: float) -> str:
     return f"{value:.3f}"
+
+
+def fmt_kib(value: float) -> str:
+    return f"{value / 1024.0:.1f}"
+
+
+def fmt_mib(value: int) -> str:
+    return f"{value / (1024.0 * 1024.0):.2f}"
 
 
 def markdown_table(headers: list[str], rows: list[list[str]], right_align: set[int]) -> list[str]:
@@ -184,6 +241,20 @@ def stat_cells(label: str, values_ns: list[int], total_ns: int) -> list[str]:
     ]
 
 
+def ms_stat_cells(label: str, values_ns: list[int]) -> list[str]:
+    values_ms = [ns_to_ms(value) for value in values_ns]
+    return [
+        label,
+        fmt_ms(min(values_ms)),
+        fmt_ms(percentile(values_ms, 25)),
+        fmt_ms(percentile(values_ms, 50)),
+        fmt_ms(percentile(values_ms, 75)),
+        fmt_ms(percentile(values_ms, 95)),
+        fmt_ms(statistics.mean(values_ms)),
+        fmt_ms(max(values_ms)),
+    ]
+
+
 def int_stat_cells(label: str, values: list[int]) -> list[str]:
     values_float = [float(value) for value in values]
     return [
@@ -195,6 +266,20 @@ def int_stat_cells(label: str, values: list[int]) -> list[str]:
         f"{percentile(values_float, 95):.0f}",
         f"{statistics.mean(values):.1f}",
         str(max(values)),
+    ]
+
+
+def kib_stat_cells(label: str, values: list[int]) -> list[str]:
+    values_float = [float(value) for value in values]
+    return [
+        label,
+        fmt_kib(min(values_float)),
+        fmt_kib(percentile(values_float, 25)),
+        fmt_kib(percentile(values_float, 50)),
+        fmt_kib(percentile(values_float, 75)),
+        fmt_kib(percentile(values_float, 95)),
+        fmt_kib(statistics.mean(values_float)),
+        fmt_kib(max(values_float)),
     ]
 
 
@@ -330,7 +415,43 @@ def runner_rows(timings: list[Timing]) -> list[str]:
     ]
 
 
-def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
+def bridge_rows(bridge_timings: list[BridgeTiming]) -> list[str]:
+    if not bridge_timings:
+        return []
+
+    total_client_to_guest = sum(item.client_to_guest_bytes for item in bridge_timings)
+    total_guest_to_client = sum(item.guest_to_client_bytes for item in bridge_timings)
+    total_read_errors = sum(item.read_errors for item in bridge_timings)
+    total_write_errors = sum(item.write_errors for item in bridge_timings)
+
+    return [
+        "",
+        "## VM Bridge Timing",
+        "",
+        "These are raw TCP-to-vsock pump connection measurements logged by `darwin-actiond serve-vm`.",
+        "",
+        f"- Bridge connections logged: `{len(bridge_timings)}`",
+        f"- Total client to guest bytes: `{fmt_mib(total_client_to_guest)} MiB`",
+        f"- Total guest to client bytes: `{fmt_mib(total_guest_to_client)} MiB`",
+        f"- Pump errors: read=`{total_read_errors}`, write=`{total_write_errors}`",
+        "",
+        *markdown_table(
+            ["Bridge Metric", "Min", "p25", "p50", "p75", "p95", "Mean", "Max"],
+            [
+                ms_stat_cells("connection elapsed", [item.elapsed_ns for item in bridge_timings]),
+                kib_stat_cells("client to guest KiB", [item.client_to_guest_bytes for item in bridge_timings]),
+                kib_stat_cells("guest to client KiB", [item.guest_to_client_bytes for item in bridge_timings]),
+                int_stat_cells("client to guest reads", [item.client_to_guest_reads for item in bridge_timings]),
+                int_stat_cells("client to guest writes", [item.client_to_guest_writes for item in bridge_timings]),
+                int_stat_cells("guest to client reads", [item.guest_to_client_reads for item in bridge_timings]),
+                int_stat_cells("guest to client writes", [item.guest_to_client_writes for item in bridge_timings]),
+            ],
+            {1, 2, 3, 4, 5, 6, 7},
+        ),
+    ]
+
+
+def render_markdown(args: argparse.Namespace, timings: list[Timing], bridge_timings: list[BridgeTiming]) -> str:
     total_ns = sum(item.total_ns for item in timings)
     generated_at = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
@@ -390,6 +511,7 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing]) -> str:
     lines.extend(case_rows(timings))
     lines.extend(overhead_rows(timings))
     lines.extend(runner_rows(timings))
+    lines.extend(bridge_rows(bridge_timings))
     lines.extend(
         [
             "",
@@ -461,7 +583,8 @@ def main() -> int:
         print(f"no execute timing lines found in {args.log}", file=sys.stderr)
         return 1
 
-    markdown = render_markdown(args, timings)
+    bridge_timings = parse_bridge_timings(args.log)
+    markdown = render_markdown(args, timings, bridge_timings)
     if args.output:
         args.output.write_text(markdown)
     else:

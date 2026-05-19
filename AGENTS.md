@@ -148,6 +148,8 @@ e2e/run_llvm_vm_smoke.sh
 That script starts a fresh VM worker, runs the same `llvm-tblgen` smoke, writes
 parsed timing summaries under the printed output directory, and records the
 latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`.
+The parser also includes raw TCP-to-vsock bridge byte/read/write counts when
+`darwin-actiond serve-vm` logs `vm bridge timing` lines.
 
 For actiondfs performance work, this LLVM smoke is the canonical before/after
 measurement. Keep `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing

@@ -8,6 +8,16 @@ pub const Error = error{
 };
 
 const pump_buffer_len = 64 * 1024;
+const bridge_log_min_bytes = 64 * 1024;
+const bridge_log_min_ns = 10 * std.time.ns_per_ms;
+
+const PumpStats = struct {
+    bytes: u64 = 0,
+    read_calls: u64 = 0,
+    write_calls: u64 = 0,
+    read_errors: u64 = 0,
+    write_errors: u64 = 0,
+};
 
 pub fn serve(
     io: std.Io,
@@ -28,7 +38,7 @@ pub fn serve(
             continue;
         };
         const client_fd = accepted.socket.handle;
-        const thread = std.Thread.spawn(.{}, connectionThread, .{ machine, client_fd }) catch |err| {
+        const thread = std.Thread.spawn(.{}, connectionThread, .{ io, machine, client_fd }) catch |err| {
             accepted.close(io);
             std.log.err("raw gRPC bridge connection spawn failed: {s}", .{@errorName(err)});
             sleepMilliseconds(10);
@@ -38,8 +48,9 @@ pub fn serve(
     }
 }
 
-fn connectionThread(machine: *darwin_vm.Machine, client_fd: std.posix.fd_t) void {
+fn connectionThread(io: std.Io, machine: *darwin_vm.Machine, client_fd: std.posix.fd_t) void {
     defer closeFd(client_fd);
+    const started = std.Io.Clock.awake.now(io);
 
     const guest_fd = machine.connectControlPort(vsock.grpc_port) catch |err| {
         std.log.err("raw gRPC bridge vsock connect failed: {s}", .{@errorName(err)});
@@ -47,8 +58,10 @@ fn connectionThread(machine: *darwin_vm.Machine, client_fd: std.posix.fd_t) void
     };
     defer closeFd(guest_fd);
 
-    const client_to_guest = std.Thread.spawn(.{}, pumpAndShutdown, .{ client_fd, guest_fd }) catch return;
-    const guest_to_client = std.Thread.spawn(.{}, pumpAndShutdown, .{ guest_fd, client_fd }) catch {
+    var client_to_guest_stats: PumpStats = .{};
+    var guest_to_client_stats: PumpStats = .{};
+    const client_to_guest = std.Thread.spawn(.{}, pumpAndShutdown, .{ client_fd, guest_fd, &client_to_guest_stats }) catch return;
+    const guest_to_client = std.Thread.spawn(.{}, pumpAndShutdown, .{ guest_fd, client_fd, &guest_to_client_stats }) catch {
         shutdownSend(guest_fd);
         client_to_guest.join();
         return;
@@ -56,14 +69,23 @@ fn connectionThread(machine: *darwin_vm.Machine, client_fd: std.posix.fd_t) void
 
     client_to_guest.join();
     guest_to_client.join();
+    logConnectionTiming(started, io, client_to_guest_stats, guest_to_client_stats);
 }
 
-fn pumpAndShutdown(src_fd: std.posix.fd_t, dst_fd: std.posix.fd_t) void {
+fn pumpAndShutdown(src_fd: std.posix.fd_t, dst_fd: std.posix.fd_t, stats: *PumpStats) void {
     var buffer: [pump_buffer_len]u8 = undefined;
     while (true) {
-        const n = readFd(src_fd, &buffer) catch break;
+        const n = readFd(src_fd, &buffer) catch {
+            stats.read_errors += 1;
+            break;
+        };
+        stats.read_calls += 1;
         if (n == 0) break;
-        writeAll(dst_fd, buffer[0..n]) catch break;
+        stats.bytes += n;
+        writeAll(dst_fd, buffer[0..n], stats) catch {
+            stats.write_errors += 1;
+            break;
+        };
     }
     shutdownSend(dst_fd);
 }
@@ -79,9 +101,10 @@ fn readFd(fd: std.posix.fd_t, buffer: []u8) !usize {
     }
 }
 
-fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+fn writeAll(fd: std.posix.fd_t, bytes: []const u8, stats: *PumpStats) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
+        stats.write_calls += 1;
         const rc = std.posix.system.write(fd, bytes[offset..].ptr, bytes.len - offset);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
@@ -93,6 +116,27 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
             else => return error.WriteFailed,
         }
     }
+}
+
+fn logConnectionTiming(started: std.Io.Timestamp, io: std.Io, client_to_guest: PumpStats, guest_to_client: PumpStats) void {
+    const elapsed_ns = started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
+    const total_bytes = client_to_guest.bytes + guest_to_client.bytes;
+    if (total_bytes < bridge_log_min_bytes and elapsed_ns < bridge_log_min_ns) return;
+
+    std.log.info(
+        "vm bridge timing elapsed_ns={d} client_to_guest_bytes={d} guest_to_client_bytes={d} client_to_guest_reads={d} client_to_guest_writes={d} guest_to_client_reads={d} guest_to_client_writes={d} read_errors={d} write_errors={d}",
+        .{
+            elapsed_ns,
+            client_to_guest.bytes,
+            guest_to_client.bytes,
+            client_to_guest.read_calls,
+            client_to_guest.write_calls,
+            guest_to_client.read_calls,
+            guest_to_client.write_calls,
+            client_to_guest.read_errors + guest_to_client.read_errors,
+            client_to_guest.write_errors + guest_to_client.write_errors,
+        },
+    );
 }
 
 fn shutdownSend(fd: std.posix.fd_t) void {

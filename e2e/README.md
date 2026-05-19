@@ -53,6 +53,8 @@ Use this LLVM runner as the primary performance comparison for actiondfs changes
 to lookup, readdir, read, splice, caching, or execroot materialization.
 The standalone stress workspace is still useful for focused synthetic coverage,
 but LLVM timing is the repo's canonical actiondfs before/after signal.
+When `darwin-actiond serve-vm` logs `vm bridge timing` lines, the parser also
+includes raw TCP-to-vsock byte and read/write counts in the VM summary.
 
 Both VM and mac-host runs set the target platform to
 `@llvm//platforms:linux_arm64_musl`. The VM run also sets the host platform to
