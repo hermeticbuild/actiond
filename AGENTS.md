@@ -37,6 +37,18 @@ ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
 
 Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.
 
+On macOS, the Docker-backed kernel build always reuses Docker named volumes for
+the localized kernel source and `O=` directory:
+
+```bash
+ACTIOND_KERNEL_DOCKER_CONTEXT=colima bazel build //vm:linux_kernel_zst
+```
+
+The first run still builds the full kernel. Later runs should reuse Kbuild state
+for actiondfs-only edits without changing Bazel action environment. If the cache
+looks suspicious, remove the printed `actiond-kernel-src-*` and
+`actiond-kernel-out-*` Docker volumes and rerun the same command.
+
 The VM guest owns the REAPI CAS and ActionCache on a writable ext4 disk image
 attached as a virtio block device and mounted at `/cas`. The host-side
 `darwin-actiond serve-vm` does not keep a second host CAS in VM mode; it
@@ -70,8 +82,8 @@ ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
 
 When investigating actiondfs behavior inside a running guest, read
 `/proc/actiondfs_stats`. It reports VM-lifetime counters for directory cache
-hits/misses, parses, lookups, readdir, CAS blob opens, folio reads, and stale
-retry events.
+hits/misses, parses, lookups, readdir, CAS blob opens, direct reads, splice
+reads, folio reads, and stale retry events.
 
 Then update the timing summary next to the stress workspace:
 
@@ -82,9 +94,11 @@ test/parse_timings.py /path/to/actiond.log \
   --output test/STRESS_TIMINGS.md
 ```
 
-Keep `test/STRESS_TIMINGS.md` current whenever the stress workload, executor
-timing instrumentation, execroot materialization, VM proxying, or output import
-path changes.
+Keep `test/STRESS_TIMINGS.md` current when the synthetic stress workload itself
+changes or when you need targeted coverage for source directories, generated
+tree artifacts, nested individual inputs, or output directory handling. Do not
+use the stress summary as the primary actiondfs performance comparison; use the
+LLVM smoke below for that.
 
 ## LLVM Smoke
 
@@ -133,9 +147,12 @@ e2e/run_llvm_vm_smoke.sh
 
 That script starts a fresh VM worker, runs the same `llvm-tblgen` smoke, writes
 parsed timing summaries under the printed output directory, and records the
-latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`. Keep
-`e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing actiondfs lookup or
-materialization behavior.
+latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`.
+
+For actiondfs performance work, this LLVM smoke is the canonical before/after
+measurement. Keep `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing
+actiondfs lookup, readdir, read, splice, caching, or materialization
+behavior. The stress timings are secondary synthetic coverage.
 
 The VM runner defaults `ACTIOND_LLVM_SMOKE_WARMUP_TARGET` to
 `//e2e:llvm_exec_warmup`. That target uses a custom `cfg = "exec"` wrapper

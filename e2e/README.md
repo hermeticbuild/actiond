@@ -49,6 +49,11 @@ mac-host action count. Set `ACTIOND_LLVM_SMOKE_WARMUP_TARGET=` to disable the
 warmup, or point it at another label to test a different pre-measure build. The
 current checked-in timing summary is in `LLVM_VM_SMOKE_TIMINGS.md`.
 
+Use this LLVM runner as the primary performance comparison for actiondfs changes
+to lookup, readdir, read, splice, caching, or execroot materialization.
+The standalone stress workspace is still useful for focused synthetic coverage,
+but LLVM timing is the repo's canonical actiondfs before/after signal.
+
 Both VM and mac-host runs set the target platform to
 `@llvm//platforms:linux_arm64_musl`. The VM run also sets the host platform to
 Linux musl because host tools execute inside the VM. The mac-host run leaves the

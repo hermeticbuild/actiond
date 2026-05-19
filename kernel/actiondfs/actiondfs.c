@@ -12,6 +12,7 @@
 #include <linux/cred.h>
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/hashtable.h>
 #include <linux/highmem.h>
@@ -28,9 +29,11 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/splice.h>
 #include <linux/statfs.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/uio.h>
 #include <linux/vmalloc.h>
 
 #define ACTIONDFS_MAGIC 0x41444653
@@ -129,6 +132,12 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_BLOB_OPEN_STALE_RETRIES,
 	ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS,
 	ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES,
+	ACTIONDFS_STAT_DIRECT_READS,
+	ACTIONDFS_STAT_DIRECT_READ_BYTES,
+	ACTIONDFS_STAT_DIRECT_READ_STALE_RETRIES,
+	ACTIONDFS_STAT_SPLICE_READS,
+	ACTIONDFS_STAT_SPLICE_READ_BYTES,
+	ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES,
 	ACTIONDFS_STAT_READ_FOLIOS,
 	ACTIONDFS_STAT_READ_FOLIO_BYTES,
 	ACTIONDFS_STAT_READ_FOLIO_STALE_RETRIES,
@@ -166,6 +175,12 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_BLOB_OPEN_STALE_RETRIES] = "blob_open_stale_retries",
 	[ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS] = "node_blob_cache_hits",
 	[ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES] = "node_blob_cache_misses",
+	[ACTIONDFS_STAT_DIRECT_READS] = "direct_reads",
+	[ACTIONDFS_STAT_DIRECT_READ_BYTES] = "direct_read_bytes",
+	[ACTIONDFS_STAT_DIRECT_READ_STALE_RETRIES] = "direct_read_stale_retries",
+	[ACTIONDFS_STAT_SPLICE_READS] = "splice_reads",
+	[ACTIONDFS_STAT_SPLICE_READ_BYTES] = "splice_read_bytes",
+	[ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES] = "splice_read_stale_retries",
 	[ACTIONDFS_STAT_READ_FOLIOS] = "read_folios",
 	[ACTIONDFS_STAT_READ_FOLIO_BYTES] = "read_folio_bytes",
 	[ACTIONDFS_STAT_READ_FOLIO_STALE_RETRIES] = "read_folio_stale_retries",
@@ -889,6 +904,22 @@ static bool actiondfs_retry_read_folio_stale(int err, unsigned int *attempts)
 	return true;
 }
 
+static bool actiondfs_retry_direct_read_stale(int err, unsigned int *attempts)
+{
+	if (!actiondfs_retry_stale(err, attempts))
+		return false;
+	actiondfs_stat_inc(ACTIONDFS_STAT_DIRECT_READ_STALE_RETRIES);
+	return true;
+}
+
+static bool actiondfs_retry_splice_read_stale(int err, unsigned int *attempts)
+{
+	if (!actiondfs_retry_stale(err, attempts))
+		return false;
+	actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES);
+	return true;
+}
+
 static struct file *actiondfs_open_cas_blob(struct actiondfs_sb_info *sbi,
 					    const char *hash)
 {
@@ -908,14 +939,49 @@ static struct file *actiondfs_open_cas_blob(struct actiondfs_sb_info *sbi,
 	}
 }
 
-static void actiondfs_drop_node_blob_locked(struct actiondfs_node *node)
+static struct file *actiondfs_get_node_blob_file(struct actiondfs_sb_info *sbi,
+						 struct actiondfs_node *node)
+{
+	struct file *file;
+	int err;
+
+	err = actiondfs_valid_hash(node->hash);
+	if (err)
+		return ERR_PTR(err);
+
+	mutex_lock(&node->blob_lock);
+	file = node->blob_file;
+	if (file) {
+		get_file(file);
+		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
+		mutex_unlock(&node->blob_lock);
+		return file;
+	}
+
+	actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES);
+	file = actiondfs_open_cas_blob(sbi, node->hash);
+	if (IS_ERR(file)) {
+		mutex_unlock(&node->blob_lock);
+		return file;
+	}
+
+	node->blob_file = file;
+	get_file(file);
+	mutex_unlock(&node->blob_lock);
+	return file;
+}
+
+static void actiondfs_drop_node_blob_if_current(struct actiondfs_node *node,
+						struct file *current_file)
 {
 	struct file *file = NULL;
 
-	if (node->blob_file) {
+	mutex_lock(&node->blob_lock);
+	if (node->blob_file == current_file) {
 		file = node->blob_file;
 		node->blob_file = NULL;
 	}
+	mutex_unlock(&node->blob_lock);
 
 	if (file)
 		filp_close(file, NULL);
@@ -929,31 +995,97 @@ static ssize_t actiondfs_read_node_blob(struct actiondfs_sb_info *sbi,
 	struct file *file;
 	loff_t pos = offset;
 	ssize_t nread;
-	int err;
 
-	err = actiondfs_valid_hash(node->hash);
-	if (err)
-		return err;
-
-	mutex_lock(&node->blob_lock);
-	file = node->blob_file;
-	if (file) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
-	} else {
-		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES);
-		file = actiondfs_open_cas_blob(sbi, node->hash);
-		if (IS_ERR(file)) {
-			err = PTR_ERR(file);
-			mutex_unlock(&node->blob_lock);
-			return err;
-		}
-		node->blob_file = file;
-	}
+	file = actiondfs_get_node_blob_file(sbi, node);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
 
 	nread = kernel_read(file, addr, wanted, &pos);
 	if (nread == -ESTALE)
-		actiondfs_drop_node_blob_locked(node);
-	mutex_unlock(&node->blob_lock);
+		actiondfs_drop_node_blob_if_current(node, file);
+	fput(file);
+	return nread;
+}
+
+static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct inode *inode = file_inode(iocb->ki_filp);
+	struct actiondfs_node *node = inode->i_private;
+	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
+	struct file *file;
+	loff_t pos = iocb->ki_pos;
+	size_t requested = iov_iter_count(to);
+	size_t wanted;
+	ssize_t nread;
+	unsigned int stale_attempts = 0;
+
+	if (!requested)
+		return 0;
+	if (pos < 0)
+		return -EINVAL;
+	if (pos >= node->size)
+		return 0;
+
+	wanted = min_t(u64, (u64)requested, node->size - pos);
+	iov_iter_truncate(to, wanted);
+
+	do {
+		file = actiondfs_get_node_blob_file(sbi, node);
+		if (IS_ERR(file))
+			return PTR_ERR(file);
+
+		actiondfs_stat_inc(ACTIONDFS_STAT_DIRECT_READS);
+		nread = vfs_iter_read(file, to, &pos, 0);
+		if (nread == -ESTALE)
+			actiondfs_drop_node_blob_if_current(node, file);
+		fput(file);
+	} while (actiondfs_retry_direct_read_stale(nread, &stale_attempts));
+
+	if (nread > 0) {
+		iocb->ki_pos = pos;
+		actiondfs_stat_add(ACTIONDFS_STAT_DIRECT_READ_BYTES, (u64)nread);
+	}
+	return nread;
+}
+
+static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
+				     struct pipe_inode_info *pipe, size_t len,
+				     unsigned int flags)
+{
+	struct inode *inode = file_inode(actiondfs_file);
+	struct actiondfs_node *node = inode->i_private;
+	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
+	struct file *file;
+	loff_t pos = *ppos;
+	size_t wanted;
+	ssize_t nread;
+	unsigned int stale_attempts = 0;
+
+	if (!len)
+		return 0;
+	if (pos < 0)
+		return -EINVAL;
+	if (pos >= node->size)
+		return 0;
+
+	wanted = min_t(u64, (u64)len, node->size - pos);
+
+	do {
+		file = actiondfs_get_node_blob_file(sbi, node);
+		if (IS_ERR(file))
+			return PTR_ERR(file);
+
+		actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READS);
+		nread = vfs_splice_read(file, &pos, pipe, wanted, flags);
+		if (nread == -ESTALE)
+			actiondfs_drop_node_blob_if_current(node, file);
+		fput(file);
+	} while (actiondfs_retry_splice_read_stale(nread, &stale_attempts));
+
+	if (nread > 0) {
+		*ppos = pos;
+		actiondfs_stat_add(ACTIONDFS_STAT_SPLICE_READ_BYTES, (u64)nread);
+	}
 	return nread;
 }
 
@@ -1857,9 +1989,9 @@ static const struct inode_operations actiondfs_file_iops = {
 
 static const struct file_operations actiondfs_file_fops = {
 	.llseek = generic_file_llseek,
-	.read_iter = generic_file_read_iter,
+	.read_iter = actiondfs_read_iter,
 	.mmap = generic_file_readonly_mmap,
-	.splice_read = filemap_splice_read,
+	.splice_read = actiondfs_splice_read,
 };
 
 static const struct inode_operations actiondfs_dir_iops = {
