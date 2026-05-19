@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+preserve_path() {
+  case "$1" in
+    /cache/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 run_kbuild() {
   local kernel_src="$1"
   local config="$2"
@@ -22,7 +29,9 @@ run_kbuild() {
     *) config_abs="$(pwd)/${config}" ;;
   esac
 
-  rm -rf "${kbuild_out}"
+  if ! preserve_path "${kbuild_out}"; then
+    rm -rf "${kbuild_out}"
+  fi
   mkdir -p "${kbuild_out}"
   KCONFIG_ALLCONFIG="${config_abs}" "${make_bin}" -C "${kernel_src}" O="${kbuild_out}" ARCH=arm64 "${cross_compile_arg[@]}" allnoconfig
   "${make_bin}" -C "${kernel_src}" O="${kbuild_out}" ARCH=arm64 "${cross_compile_arg[@]}" "-j${jobs}" Image
@@ -55,10 +64,24 @@ localize_kernel_src() {
   local src="$1"
   local dst="$2"
 
-  rm -rf "${dst}"
+  if ! preserve_path "${dst}"; then
+    rm -rf "${dst}"
+  fi
   mkdir -p "${dst}"
   src="$(cd "${src}" && pwd -P)"
   rsync -a --delete --exclude .git "${src}/" "${dst}/"
+}
+
+workspace_cache_id() {
+  local workspace="$1"
+
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "${workspace}" | shasum -a 256 | awk '{print substr($1, 1, 16)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${workspace}" | sha256sum | awk '{print substr($1, 1, 16)}'
+  else
+    printf '%s' "${workspace}" | cksum | awk '{print $1}'
+  fi
 }
 
 run_with_timeout() {
@@ -159,15 +182,23 @@ case "$(uname -s)" in
     if [[ -d /Users ]]; then
       mount_args+=(-v /Users:/Users)
     fi
+    cache_id="$(workspace_cache_id "$(pwd -P)")"
+    src_volume="actiond-kernel-src-${cache_id}"
+    out_volume="actiond-kernel-out-${cache_id}"
+    mount_args+=(
+      -v "${src_volume}:/cache/actiond-kernel-src"
+      -v "${out_volume}:/cache/actiond-kbuild"
+    )
+    echo "using Docker Kbuild cache volumes: ${src_volume}, ${out_volume}" >&2
     docker_run_args=(
       --rm
       "${mount_args[@]}"
       -w /work
       -e "ACTIOND_KERNEL_SRC=/work/${kernel_src}"
       -e "ACTIOND_KERNEL_CONFIG=/work/${config}"
-      -e "ACTIOND_KBUILD_OUT=/tmp/actiond-kbuild"
+      -e "ACTIOND_KBUILD_OUT=/cache/actiond-kbuild"
       -e "ACTIOND_KERNEL_OUT=/work/${out}"
-      -e "ACTIOND_KERNEL_LOCAL_SRC=/tmp/actiond-kernel-src"
+      -e "ACTIOND_KERNEL_LOCAL_SRC=/cache/actiond-kernel-src"
     )
     if [[ -n "${ACTIOND_KERNEL_JOBS:-}" ]]; then
       docker_run_args+=(-e "ACTIOND_KERNEL_JOBS=${ACTIOND_KERNEL_JOBS}")

@@ -36,6 +36,18 @@ bazel build //cmd/linux_actiond:linux-actiond-standalone-x86_64
 bazel build //vm:linux_kernel_zst //vm:initramfs //runtimes:runtimes_squashfs
 ```
 
+On macOS, kernel builds run Kbuild in Docker and always reuse Docker named
+volumes for the localized kernel source and `O=` directory:
+
+```bash
+ACTIOND_KERNEL_DOCKER_CONTEXT=colima bazel build //vm:linux_kernel_zst
+```
+
+The first run is still a full kernel build. Later actiondfs-only edits should
+reuse Kbuild state without changing Bazel action environment. If the cache needs
+to be reset, remove the printed `actiond-kernel-src-*` and
+`actiond-kernel-out-*` Docker volumes.
+
 For optimized artifacts:
 
 ```bash

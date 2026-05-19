@@ -349,6 +349,18 @@ The script searches for a working Docker context and can be pointed at one:
 ACTIOND_KERNEL_DOCKER_CONTEXT=colima bazel build //vm:linux_kernel_zst
 ```
 
+On macOS the Docker-backed kernel build always uses a persistent Kbuild cache:
+
+```bash
+ACTIOND_KERNEL_DOCKER_CONTEXT=colima bazel build //vm:linux_kernel_zst
+```
+
+On macOS this uses Docker named volumes for the localized Linux source tree and
+`O=` build directory, so the first build is still a full kernel build but later
+actiondfs-only edits should reuse the previous Kbuild state without changing
+Bazel action environment. If the cache needs to be reset, remove the printed
+`actiond-kernel-src-*` and `actiond-kernel-out-*` Docker volumes.
+
 ## Testing Strategy
 
 Unit tests cover protocol encoding/decoding, CAS behavior, HTTP/2 dispatch,
