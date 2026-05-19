@@ -132,17 +132,17 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_BLOB_OPEN_STALE_RETRIES,
 	ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS,
 	ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES,
-	ACTIONDFS_STAT_DIRECT_READS,
-	ACTIONDFS_STAT_DIRECT_READ_BYTES,
-	ACTIONDFS_STAT_DIRECT_READ_STALE_RETRIES,
+	ACTIONDFS_STAT_BACKING_READS,
+	ACTIONDFS_STAT_BACKING_READ_BYTES,
+	ACTIONDFS_STAT_BACKING_READ_STALE_RETRIES,
 	ACTIONDFS_STAT_SPLICE_READS,
 	ACTIONDFS_STAT_SPLICE_READ_BYTES,
 	ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES,
 	ACTIONDFS_STAT_MMAPS,
 	ACTIONDFS_STAT_MMAP_BYTES,
 	ACTIONDFS_STAT_MMAP_FAILURES,
-	ACTIONDFS_STAT_CAS_BLOB_READS,
-	ACTIONDFS_STAT_CAS_BLOB_BYTES,
+	ACTIONDFS_STAT_DIRECTORY_BLOB_READS,
+	ACTIONDFS_STAT_DIRECTORY_BLOB_BYTES,
 	ACTIONDFS_STAT_COUNT,
 };
 
@@ -175,17 +175,17 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_BLOB_OPEN_STALE_RETRIES] = "blob_open_stale_retries",
 	[ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS] = "node_blob_cache_hits",
 	[ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES] = "node_blob_cache_misses",
-	[ACTIONDFS_STAT_DIRECT_READS] = "direct_reads",
-	[ACTIONDFS_STAT_DIRECT_READ_BYTES] = "direct_read_bytes",
-	[ACTIONDFS_STAT_DIRECT_READ_STALE_RETRIES] = "direct_read_stale_retries",
+	[ACTIONDFS_STAT_BACKING_READS] = "backing_reads",
+	[ACTIONDFS_STAT_BACKING_READ_BYTES] = "backing_read_bytes",
+	[ACTIONDFS_STAT_BACKING_READ_STALE_RETRIES] = "backing_read_stale_retries",
 	[ACTIONDFS_STAT_SPLICE_READS] = "splice_reads",
 	[ACTIONDFS_STAT_SPLICE_READ_BYTES] = "splice_read_bytes",
 	[ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES] = "splice_read_stale_retries",
 	[ACTIONDFS_STAT_MMAPS] = "mmaps",
 	[ACTIONDFS_STAT_MMAP_BYTES] = "mmap_bytes",
 	[ACTIONDFS_STAT_MMAP_FAILURES] = "mmap_failures",
-	[ACTIONDFS_STAT_CAS_BLOB_READS] = "cas_blob_reads",
-	[ACTIONDFS_STAT_CAS_BLOB_BYTES] = "cas_blob_bytes",
+	[ACTIONDFS_STAT_DIRECTORY_BLOB_READS] = "directory_blob_reads",
+	[ACTIONDFS_STAT_DIRECTORY_BLOB_BYTES] = "directory_blob_bytes",
 };
 
 static atomic64_t actiondfs_stats[ACTIONDFS_STAT_COUNT];
@@ -895,11 +895,11 @@ static bool actiondfs_retry_open_stale(int err, unsigned int *attempts)
 	return true;
 }
 
-static bool actiondfs_retry_direct_read_stale(int err, unsigned int *attempts)
+static bool actiondfs_retry_backing_read_stale(int err, unsigned int *attempts)
 {
 	if (!actiondfs_retry_stale(err, attempts))
 		return false;
-	actiondfs_stat_inc(ACTIONDFS_STAT_DIRECT_READ_STALE_RETRIES);
+	actiondfs_stat_inc(ACTIONDFS_STAT_BACKING_READ_STALE_RETRIES);
 	return true;
 }
 
@@ -911,8 +911,8 @@ static bool actiondfs_retry_splice_read_stale(int err, unsigned int *attempts)
 	return true;
 }
 
-static struct file *actiondfs_open_cas_blob(struct actiondfs_sb_info *sbi,
-					    const char *hash)
+static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
+						 const char *hash)
 {
 	unsigned int stale_attempts = 0;
 	struct file *file;
@@ -1051,16 +1051,16 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		if (IS_ERR(file))
 			return PTR_ERR(file);
 
-		actiondfs_stat_inc(ACTIONDFS_STAT_DIRECT_READS);
+		actiondfs_stat_inc(ACTIONDFS_STAT_BACKING_READS);
 		nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
 					       &ctx);
 		if (nread == -ESTALE)
 			actiondfs_drop_node_blob_if_current(node, file);
 		fput(file);
-	} while (actiondfs_retry_direct_read_stale(nread, &stale_attempts));
+	} while (actiondfs_retry_backing_read_stale(nread, &stale_attempts));
 
 	if (nread > 0)
-		actiondfs_stat_add(ACTIONDFS_STAT_DIRECT_READ_BYTES, (u64)nread);
+		actiondfs_stat_add(ACTIONDFS_STAT_BACKING_READ_BYTES, (u64)nread);
 	return nread;
 }
 
@@ -1465,7 +1465,7 @@ static int actiondfs_read_cas_blob_once(struct actiondfs_sb_info *sbi,
 	if (err)
 		return err;
 
-	file = actiondfs_open_cas_blob(sbi, hash);
+	file = actiondfs_open_directory_blob(sbi, hash);
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
@@ -1494,8 +1494,8 @@ static int actiondfs_read_cas_blob_once(struct actiondfs_sb_info *sbi,
 
 	*out = buffer;
 	*out_len = (size_t)size;
-	actiondfs_stat_inc(ACTIONDFS_STAT_CAS_BLOB_READS);
-	actiondfs_stat_add(ACTIONDFS_STAT_CAS_BLOB_BYTES, (u64)size);
+	actiondfs_stat_inc(ACTIONDFS_STAT_DIRECTORY_BLOB_READS);
+	actiondfs_stat_add(ACTIONDFS_STAT_DIRECTORY_BLOB_BYTES, (u64)size);
 	return 0;
 }
 

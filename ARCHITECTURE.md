@@ -202,7 +202,7 @@ of being copied through actiondfs folios.
 
 The kernel exposes VM-lifetime actiondfs counters at `/proc/actiondfs_stats`.
 Those counters track cache hits/misses, directory parses, lookup and readdir
-activity, CAS blob opens, direct reads, splice reads, mmap calls, and
+activity, CAS blob opens, backing reads, splice reads, mmap calls, and
 stale-handle retries.
 
 The Linux host path always keeps the non-actiondfs materialization strategy,

@@ -104,15 +104,15 @@ These counters are from `/proc/actiondfs_stats` at the end of the VM run.
 | blob open attempts       |       457479 |
 | node blob cache hits     |        28917 |
 | node blob cache misses   |       444016 |
-| direct reads             |       419542 |
-| direct read bytes        |   1329451317 |
+| backing reads            |       419542 |
+| backing read bytes       |   1329451317 |
 | splice reads             |          148 |
 | splice read bytes        |      6084014 |
 | mmap calls               |        53243 |
 | mmap bytes               | 1901688147968 |
 | mmap failures            |            0 |
-| CAS blob reads           |        13460 |
-| CAS blob bytes           |      3862752 |
+| directory blob reads     |        13460 |
+| directory blob bytes     |      3862752 |
 
 ## Notes
 

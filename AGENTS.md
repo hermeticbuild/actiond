@@ -82,7 +82,7 @@ ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
 
 When investigating actiondfs behavior inside a running guest, read
 `/proc/actiondfs_stats`. It reports VM-lifetime counters for directory cache
-hits/misses, parses, lookups, readdir, CAS blob opens, direct reads, splice
+hits/misses, parses, lookups, readdir, CAS blob opens, backing reads, splice
 reads, mmap calls, and stale retry events.
 
 Then update the timing summary next to the stress workspace:
