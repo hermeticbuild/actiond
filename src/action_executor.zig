@@ -340,14 +340,14 @@ pub fn executeActionWithOptions(
 
     var actiondfs_workspace: ?ActiondfsWorkspace = null;
     defer if (actiondfs_workspace) |*workspace| workspace.deinit(io, allocator);
-    var fallback_cas_blob_root_path: ?[]u8 = null;
-    defer if (fallback_cas_blob_root_path) |path| allocator.free(path);
+    var owned_cas_blob_root_path: ?[]u8 = null;
+    defer if (owned_cas_blob_root_path) |path| allocator.free(path);
     if (use_actiondfs_inputs) {
         const cas_blob_root_path = actiondfsInputBlobRootPath(options) orelse path: {
             var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
             const value = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
-            fallback_cas_blob_root_path = value;
+            owned_cas_blob_root_path = value;
             break :path value;
         };
         actiondfs_workspace = try ActiondfsWorkspace.init(

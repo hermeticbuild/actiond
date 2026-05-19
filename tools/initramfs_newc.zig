@@ -7,7 +7,6 @@ const c = @cImport({
 
 const dir_mode: u32 = 0o040755;
 const file_mode: u32 = 0o100755;
-const module_mode: u32 = 0o100644;
 const symlink_mode: u32 = 0o120777;
 const char_device_mode: u32 = 0o020666;
 const max_input_file_bytes = 512 * 1024 * 1024;
@@ -31,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     const actiond = try std.Io.Dir.cwd().readFileAlloc(io, actiond_path, arena, .limited(max_input_file_bytes));
 
     var entries: std.ArrayListUnmanaged(Entry) = .empty;
-    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "cas", "modules", "runtimes" }) |path| {
+    for ([_][]const u8{ "dev", "proc", "sys", "sys/fs/cgroup", "tmp", "work", "cas", "runtimes" }) |path| {
         try addDir(arena, &entries, path);
     }
     try addCharDevice(arena, &entries, "dev/console", 5, 1);
@@ -56,11 +55,7 @@ pub fn main(init: std.process.Init) !void {
             const target = spec[0..split];
             const dest = stripLeadingSlash(spec[split + 1 ..]);
             try addSymlink(arena, &entries, dest, target);
-        } else {
-            const data = try std.Io.Dir.cwd().readFileAlloc(io, arg, arena, .limited(max_input_file_bytes));
-            const dest = try std.fmt.allocPrint(arena, "modules/{s}", .{std.fs.path.basename(arg)});
-            try addFile(arena, &entries, dest, module_mode, data);
-        }
+        } else return usage(io);
     }
 
     var out: std.Io.Writer.Allocating = .init(arena);
@@ -89,7 +84,7 @@ fn usage(io: std.Io) !void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.writeAll("usage: initramfs_newc OUT ACTIOND [MODULE...] [--file=SRC=DEST] [--symlink=TARGET=DEST]\n");
+    try stderr.writeAll("usage: initramfs_newc OUT ACTIOND [--file=SRC=DEST] [--symlink=TARGET=DEST]\n");
     try stderr.flush();
     return error.InvalidArguments;
 }

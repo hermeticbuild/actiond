@@ -92,8 +92,10 @@ else
     -v "${staging_dir}:/work" \
     "${ACTIOND_EXT4_IMAGE_UBUNTU:-ubuntu:24.04}" \
     bash -ceu '
-      apt-get update >/dev/null
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends e2fsprogs >/dev/null
+      if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+        apt-get update >/dev/null
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends e2fsprogs >/dev/null
+      fi
       mkfs.ext4 -F -q "/work/${IMAGE_BASENAME}"
     '
 fi

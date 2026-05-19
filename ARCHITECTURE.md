@@ -227,8 +227,8 @@ no post-Execute host import step in VM mode.
 For each action:
 
 1. Read the `Action` and `Command` protobufs from CAS.
-2. Read the input-root digest. The fallback file-input path walks the tree; the
-   actiondfs path lets the kernel filesystem resolve it lazily.
+2. Read the input-root digest. The Linux-direct materialization path walks the
+   tree; the VM actiondfs path lets the kernel filesystem resolve it lazily.
 3. Create a per-action work root.
 4. In VM/actiondfs mode, prepare actiondfs plus overlayfs lower/upper/work mount
    paths. Otherwise materialize input paths using read-only bind mounts.

@@ -19,7 +19,6 @@ const max_compressed_initramfs_bytes = 128 * 1024 * 1024;
 const max_raw_initramfs_bytes = 512 * 1024 * 1024;
 const max_compressed_kernel_bytes = 128 * 1024 * 1024;
 const max_raw_kernel_bytes = 512 * 1024 * 1024;
-const max_runtime_image_bytes = 512 * 1024 * 1024;
 const zstd_magic = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd };
 
 pub const ServeVmOptions = struct {
@@ -163,13 +162,7 @@ pub fn serve(
     else
         null;
     defer if (embedded_runtime_image) |path| allocator.free(path);
-    const selected_runtime_image_path = options.runtime_image orelse embedded_runtime_image;
-    const prepared_runtime_image_path = if (selected_runtime_image_path) |path|
-        try prepareRuntimeImageFile(io, allocator, root_dir, path)
-    else
-        null;
-    defer if (prepared_runtime_image_path) |path| allocator.free(path);
-    const runtime_image_path = prepared_runtime_image_path;
+    const runtime_image_path = options.runtime_image orelse embedded_runtime_image;
 
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
@@ -315,32 +308,6 @@ fn prepareBootKernel(
         max_compressed_kernel_bytes,
         max_raw_kernel_bytes,
     );
-}
-
-fn prepareRuntimeImageFile(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    root_dir: std.Io.Dir,
-    runtime_image_path: []const u8,
-) ![]u8 {
-    const image = try std.Io.Dir.cwd().readFileAlloc(
-        io,
-        runtime_image_path,
-        allocator,
-        .limited(max_runtime_image_bytes),
-    );
-    defer allocator.free(image);
-
-    try root_dir.createDirPath(io, "runtime-image");
-    var file = try root_dir.createFile(io, "runtime-image/runtimes.sqfs", .{ .truncate = true });
-    defer file.close(io);
-
-    var file_buffer: [128 * 1024]u8 = undefined;
-    var file_writer = file.writer(io, &file_buffer);
-    try file_writer.interface.writeAll(image);
-    try file_writer.interface.flush();
-
-    return try absoluteSubPath(io, allocator, root_dir, "runtime-image/runtimes.sqfs");
 }
 
 fn prepareZstdBootFile(
