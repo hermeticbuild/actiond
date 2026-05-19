@@ -20,6 +20,7 @@ const temp_path_prefix = blob_prefix ++ ".tmp-";
 const tree_temp_path_prefix = tree_prefix ++ ".tmp-";
 const stale_retry_attempts = 128;
 const stale_retry_sleep_ns = 2 * std.time.ns_per_ms;
+const cas_blob_mode: std.posix.mode_t = 0o444;
 
 var next_temp_id = std.atomic.Value(u64).init(0);
 
@@ -360,6 +361,7 @@ pub const Store = struct {
 pub const BlobWriter = struct {
     store: Store,
     file: std.Io.File,
+    temp_kind: TempKind,
     temp_path_buffer: [temp_path_prefix.len + 20]u8,
     temp_path_len: usize,
     hasher: std.crypto.hash.sha2.Sha256,
@@ -367,8 +369,26 @@ pub const BlobWriter = struct {
     closed: bool = false,
     finished: bool = false,
 
+    const TempKind = enum {
+        named,
+        anonymous_linux,
+    };
+
     fn begin(io: std.Io, store: Store) !BlobWriter {
         try store.ensureLayoutIfNeeded(io);
+
+        if (comptime builtin.os.tag == .linux) {
+            if (try beginAnonymousLinux(store)) |file| {
+                return .{
+                    .store = store,
+                    .file = file,
+                    .temp_kind = .anonymous_linux,
+                    .temp_path_buffer = undefined,
+                    .temp_path_len = 0,
+                    .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+                };
+            }
+        }
 
         while (true) {
             const id = next_temp_id.fetchAdd(1, .monotonic);
@@ -377,6 +397,7 @@ pub const BlobWriter = struct {
             const file = store.root.createFile(io, temp_path, .{
                 .truncate = true,
                 .exclusive = true,
+                .permissions = .fromMode(cas_blob_mode),
             }) catch |err| switch (err) {
                 error.PathAlreadyExists => continue,
                 else => |e| return e,
@@ -385,6 +406,7 @@ pub const BlobWriter = struct {
             return .{
                 .store = store,
                 .file = file,
+                .temp_kind = .named,
                 .temp_path_buffer = temp_path_buffer,
                 .temp_path_len = temp_path.len,
                 .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
@@ -397,7 +419,7 @@ pub const BlobWriter = struct {
             self.file.close(io);
             self.closed = true;
         }
-        if (!self.finished) {
+        if (!self.finished and self.temp_kind == .named) {
             self.store.root.deleteFile(io, self.tempPath()) catch {};
         }
         self.* = undefined;
@@ -420,25 +442,125 @@ pub const BlobWriter = struct {
             if (!digest.eql(value)) return error.DigestMismatch;
         }
 
-        self.file.close(io);
-        self.closed = true;
-
         var final_path_buffer: [blob_prefix.len + 64]u8 = undefined;
         const final_path = blobPath(digest, &final_path_buffer);
-        self.store.root.renamePreserve(self.tempPath(), self.store.root, final_path, io) catch |err| switch (err) {
-            error.PathAlreadyExists => {
-                self.store.root.deleteFile(io, self.tempPath()) catch {};
+        switch (self.temp_kind) {
+            .named => {
+                self.file.close(io);
+                self.closed = true;
+                self.store.root.renamePreserve(self.tempPath(), self.store.root, final_path, io) catch |err| switch (err) {
+                    error.PathAlreadyExists => {
+                        self.store.root.deleteFile(io, self.tempPath()) catch {};
+                    },
+                    else => |e| return e,
+                };
             },
-            else => |e| return e,
-        };
+            .anonymous_linux => {
+                if (comptime builtin.os.tag != .linux) unreachable;
+                publishAnonymousLinux(self.file.handle, self.store.root.handle, final_path) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => |e| return e,
+                };
+                self.file.close(io);
+                self.closed = true;
+            },
+        }
         self.finished = true;
         return digest;
     }
 
     fn tempPath(self: *const BlobWriter) []const u8 {
+        std.debug.assert(self.temp_kind == .named);
         return self.temp_path_buffer[0..self.temp_path_len];
     }
 };
+
+fn beginAnonymousLinux(store: Store) !?std.Io.File {
+    if (comptime builtin.os.tag != .linux) unreachable;
+
+    const path_z = try std.posix.toPosixPath(blob_prefix[0 .. blob_prefix.len - 1]);
+    while (true) {
+        const rc = std.os.linux.openat(
+            store.root.handle,
+            &path_z,
+            .{
+                .ACCMODE = .WRONLY,
+                .TMPFILE = true,
+                .DIRECTORY = true,
+                .CLOEXEC = true,
+            },
+            @intCast(cas_blob_mode),
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
+            .INTR => continue,
+            .INVAL, .ISDIR, .NOENT, .OPNOTSUPP => return null,
+            .ACCES => return error.AccessDenied,
+            .DQUOT => return error.DiskQuota,
+            .LOOP => return error.SymLinkLoop,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NAMETOOLONG => return error.NameTooLong,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NODEV => return error.NoDevice,
+            .NOMEM => return error.SystemResources,
+            .NOSPC => return error.NoSpaceLeft,
+            .NOTDIR => return error.NotDir,
+            .PERM => return error.PermissionDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => return error.Unexpected,
+        }
+    }
+}
+
+fn publishAnonymousLinux(file_fd: std.posix.fd_t, dest_dir_fd: std.posix.fd_t, dest_path: []const u8) !void {
+    if (comptime builtin.os.tag != .linux) unreachable;
+
+    const dest_path_z = try std.posix.toPosixPath(dest_path);
+    linkAnonymousLinux(file_fd, dest_dir_fd, &dest_path_z, true) catch |err| switch (err) {
+        error.FileNotFound => return linkAnonymousLinux(file_fd, dest_dir_fd, &dest_path_z, false),
+        else => |e| return e,
+    };
+}
+
+fn linkAnonymousLinux(
+    file_fd: std.posix.fd_t,
+    dest_dir_fd: std.posix.fd_t,
+    dest_path_z: [*:0]const u8,
+    empty_path: bool,
+) !void {
+    if (comptime builtin.os.tag != .linux) unreachable;
+
+    var proc_path_buffer: ["/proc/self/fd/-2147483648\x00".len]u8 = undefined;
+    const old_fd: std.posix.fd_t = if (empty_path) file_fd else std.os.linux.AT.FDCWD;
+    const old_path: [*:0]const u8 = if (empty_path)
+        ""
+    else
+        std.fmt.bufPrintSentinel(&proc_path_buffer, "/proc/self/fd/{d}", .{file_fd}, 0) catch unreachable;
+    const flags: u32 = if (empty_path) std.os.linux.AT.EMPTY_PATH else std.os.linux.AT.SYMLINK_FOLLOW;
+
+    while (true) {
+        const rc = std.os.linux.linkat(old_fd, old_path, dest_dir_fd, dest_path_z, flags);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .ACCES => return error.AccessDenied,
+            .DQUOT => return error.DiskQuota,
+            .EXIST => return error.PathAlreadyExists,
+            .IO => return error.InputOutput,
+            .LOOP => return error.SymLinkLoop,
+            .MLINK => return error.LinkQuotaExceeded,
+            .NAMETOOLONG => return error.NameTooLong,
+            .NOENT => return error.FileNotFound,
+            .NOMEM => return error.SystemResources,
+            .NOSPC => return error.NoSpaceLeft,
+            .NOTDIR => return error.NotDir,
+            .PERM => return error.PermissionDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            .XDEV => return error.CrossDeviceLink,
+            else => return error.Unexpected,
+        }
+    }
+}
 
 pub fn parseHexHash(text: []const u8) ![32]u8 {
     if (text.len != 64) return error.InvalidDigestHash;
