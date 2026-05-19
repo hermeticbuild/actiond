@@ -7,10 +7,6 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
 
-    if (args.len > 1 and std.mem.eql(u8, args[1], "serve")) {
-        const options = try actiond.host_server.parseServeArgs(args[2..]);
-        return actiond.host_server.serve(io, std.heap.smp_allocator, options);
-    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "serve-vm")) {
         const options = try actiond.darwin_vm_host.parseServeVmArgs(args[2..]);
         return actiond.darwin_vm_host.serve(io, std.heap.smp_allocator, options);
@@ -23,7 +19,6 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print(
         \\darwin-actiond zig={s} bazel={s}
         \\usage:
-        \\  darwin-actiond serve [--listen=127.0.0.1:8980] [--root=/tmp/actiond] [--runtime-root=/mnt/runtimes]
         \\  darwin-actiond serve-vm [--kernel=/path/Image[.zst]] [--initramfs=/path/initramfs.cpio[.zst]] [--runtime-image=/path/runtimes.sqfs] [--cas-image=/path/cas.ext4] [--listen=127.0.0.1:8980] [--root=/tmp/actiond-vm]
         \\
     , .{

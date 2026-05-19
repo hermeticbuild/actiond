@@ -11,6 +11,7 @@ const runtime_mount = @import("runtime_mount.zig");
 pub const Error = error{
     UnknownServeArgument,
     MissingServeArgumentValue,
+    UnsupportedHost,
 };
 
 pub const ServeOptions = struct {
@@ -62,6 +63,8 @@ pub fn serve(
     allocator: std.mem.Allocator,
     options: ServeOptions,
 ) !void {
+    if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+
     var root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{});
     defer root_dir.close(io);
 

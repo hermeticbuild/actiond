@@ -24,7 +24,10 @@ upload.
 VM mode expects a writable ext4 CAS image attached as virtio-blk. The runner
 creates one automatically with `tools/create_ext4_image.sh`; set
 `ACTIOND_VM_CAS_IMAGE=/path/cas.ext4` to reuse a persistent image, and
-`ACTIOND_VM_CAS_IMAGE_SIZE_MIB=32768` to adjust the default sparse size.
+`ACTIOND_VM_CAS_IMAGE_SIZE_MIB=32768` to adjust the default sparse size. If
+the host lacks `mkfs.ext4`, the helper formats through Docker; set
+`ACTIOND_EXT4_IMAGE_DOCKER_IMAGE` to use an image that already contains
+`mkfs.ext4` and avoid package installation during the run.
 
 ## LLVM VM Smoke Runner
 

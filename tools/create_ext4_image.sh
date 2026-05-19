@@ -87,10 +87,11 @@ else
   tmp="${staging_dir}/.${base}.tmp.$$"
   trap 'rm -f "${tmp}"' EXIT
   create_sparse_image "${tmp}" "${size_mib}"
+  docker_image="${ACTIOND_EXT4_IMAGE_DOCKER_IMAGE:-${ACTIOND_EXT4_IMAGE_UBUNTU:-ubuntu:24.04}}"
   "${docker_cmd[@]}" run --rm \
     -e IMAGE_BASENAME=".${base}.tmp.$$" \
     -v "${staging_dir}:/work" \
-    "${ACTIOND_EXT4_IMAGE_UBUNTU:-ubuntu:24.04}" \
+    "${docker_image}" \
     bash -ceu '
       if ! command -v mkfs.ext4 >/dev/null 2>&1; then
         apt-get update >/dev/null
