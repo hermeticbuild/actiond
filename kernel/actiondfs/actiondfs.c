@@ -1017,18 +1017,6 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 			continue;
 		}
 
-		err = inode_permission(mnt_idmap(real_path.mnt),
-				       d_inode(real_path.dentry),
-				       MAY_OPEN | MAY_READ);
-		if (err) {
-			path_put(&real_path);
-			if (err == -ESTALE)
-				actiondfs_drop_cached_blob_path(hash);
-			if (!actiondfs_retry_open_stale(err, &stale_attempts))
-				return ERR_PTR(err);
-			continue;
-		}
-
 		file = backing_file_open(user_path, O_RDONLY, &real_path,
 					 current_cred());
 		path_put(&real_path);
