@@ -28,6 +28,7 @@
 #include <linux/parser.h>
 #include <linux/path.h>
 #include <linux/proc_fs.h>
+#include <linux/rcupdate.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/splice.h>
@@ -71,7 +72,7 @@ struct actiondfs_blob_path_cache_entry {
 	struct list_head list;
 	char hash[65];
 	struct path path;
-	u32 hits;
+	atomic_t hits;
 };
 
 struct actiondfs_materialized_child {
@@ -233,7 +234,9 @@ static DEFINE_MUTEX(actiondfs_dir_cache_lock);
  * File content nodes are per action mount, but the backing CAS files are
  * content-addressed and heavily reused across mounts. Cache resolved CAS paths
  * by digest, then still call backing_file_open() per actiondfs file so mmap and
- * /proc keep the correct user-visible actiondfs path.
+ * /proc keep the correct user-visible actiondfs path. Hits use RCU because
+ * compilers can open hundreds of thousands of already-resolved CAS blobs across
+ * one LLVM build; misses and eviction remain serialized under the cache mutex.
  */
 static DEFINE_HASHTABLE(actiondfs_blob_path_cache, ACTIONDFS_BLOB_PATH_CACHE_BITS);
 static LIST_HEAD(actiondfs_blob_path_cache_list);
@@ -694,17 +697,25 @@ static void actiondfs_free_blob_path_cache_entry(struct actiondfs_blob_path_cach
 static void actiondfs_destroy_blob_path_cache(void)
 {
 	struct actiondfs_blob_path_cache_entry *entry;
+	struct actiondfs_blob_path_cache_entry *tmp_entry;
 	struct hlist_node *tmp;
 	unsigned int bucket;
+	LIST_HEAD(dispose);
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
 	hash_for_each_safe(actiondfs_blob_path_cache, bucket, tmp, entry, hnode) {
-		hash_del(&entry->hnode);
+		hash_del_rcu(&entry->hnode);
 		list_del(&entry->list);
+		list_add_tail(&entry->list, &dispose);
 		actiondfs_blob_path_cache_count--;
-		actiondfs_free_blob_path_cache_entry(entry);
 	}
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
+
+	synchronize_rcu();
+	list_for_each_entry_safe(entry, tmp_entry, &dispose, list) {
+		list_del(&entry->list);
+		actiondfs_free_blob_path_cache_entry(entry);
+	}
 }
 
 static int actiondfs_validate_next_child(struct actiondfs_node **children,
@@ -1585,6 +1596,12 @@ static unsigned long actiondfs_digest_cache_key(const char *hash)
 	return key;
 }
 
+static void actiondfs_note_blob_path_cache_hit(
+	struct actiondfs_blob_path_cache_entry *entry)
+{
+	atomic_add_unless(&entry->hits, 1, INT_MAX);
+}
+
 static struct actiondfs_blob_path_cache_entry *
 actiondfs_find_blob_path_cache_locked(const char *hash)
 {
@@ -1598,12 +1615,24 @@ actiondfs_find_blob_path_cache_locked(const char *hash)
 	return NULL;
 }
 
+static struct actiondfs_blob_path_cache_entry *
+actiondfs_find_blob_path_cache_rcu(const char *hash)
+{
+	struct actiondfs_blob_path_cache_entry *entry;
+	unsigned long key = actiondfs_digest_cache_key(hash);
+
+	hash_for_each_possible_rcu(actiondfs_blob_path_cache, entry, hnode, key) {
+		if (!memcmp(entry->hash, hash, 64))
+			return entry;
+	}
+	return NULL;
+}
+
 static void actiondfs_get_blob_path_cache_entry_locked(
 	struct actiondfs_blob_path_cache_entry *entry,
 	struct path *out)
 {
-	if (entry->hits != U32_MAX)
-		entry->hits++;
+	actiondfs_note_blob_path_cache_hit(entry);
 	list_move_tail(&entry->list, &actiondfs_blob_path_cache_list);
 	path_get(&entry->path);
 	*out = entry->path;
@@ -1615,16 +1644,18 @@ static void actiondfs_evict_blob_path_cache_one_locked(void)
 	struct actiondfs_blob_path_cache_entry *victim = NULL;
 
 	list_for_each_entry(entry, &actiondfs_blob_path_cache_list, list) {
-		if (!victim || entry->hits < victim->hits)
+		if (!victim ||
+		    atomic_read(&entry->hits) < atomic_read(&victim->hits))
 			victim = entry;
 	}
 	if (!victim)
 		return;
 
-	hash_del(&victim->hnode);
+	hash_del_rcu(&victim->hnode);
 	list_del(&victim->list);
 	actiondfs_blob_path_cache_count--;
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_EVICTIONS);
+	synchronize_rcu();
 	actiondfs_free_blob_path_cache_entry(victim);
 }
 
@@ -1645,7 +1676,7 @@ static int actiondfs_insert_blob_path_cache(const char *hash,
 
 	memcpy(entry->hash, hash, 64);
 	entry->hash[64] = '\0';
-	entry->hits = 0;
+	atomic_set(&entry->hits, 0);
 	entry->path = *path;
 	path_get(&entry->path);
 	INIT_LIST_HEAD(&entry->list);
@@ -1664,7 +1695,7 @@ static int actiondfs_insert_blob_path_cache(const char *hash,
 		actiondfs_evict_blob_path_cache_one_locked();
 
 	key = actiondfs_digest_cache_key(hash);
-	hash_add(actiondfs_blob_path_cache, &entry->hnode, key);
+	hash_add_rcu(actiondfs_blob_path_cache, &entry->hnode, key);
 	list_add_tail(&entry->list, &actiondfs_blob_path_cache_list);
 	actiondfs_blob_path_cache_count++;
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_INSERTS);
@@ -1680,6 +1711,18 @@ static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 	struct actiondfs_blob_path_cache_entry *entry;
 	struct path real_path;
 	int err;
+
+	rcu_read_lock();
+	entry = actiondfs_find_blob_path_cache_rcu(hash);
+	if (entry) {
+		actiondfs_note_blob_path_cache_hit(entry);
+		path_get(&entry->path);
+		*out = entry->path;
+		rcu_read_unlock();
+		actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_HITS);
+		return 0;
+	}
+	rcu_read_unlock();
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
 	entry = actiondfs_find_blob_path_cache_locked(hash);
@@ -1709,12 +1752,15 @@ static void actiondfs_drop_cached_blob_path(const char *hash)
 	mutex_lock(&actiondfs_blob_path_cache_lock);
 	entry = actiondfs_find_blob_path_cache_locked(hash);
 	if (entry) {
-		hash_del(&entry->hnode);
+		hash_del_rcu(&entry->hnode);
 		list_del(&entry->list);
 		actiondfs_blob_path_cache_count--;
-		actiondfs_free_blob_path_cache_entry(entry);
 	}
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
+	if (entry) {
+		synchronize_rcu();
+		actiondfs_free_blob_path_cache_entry(entry);
+	}
 }
 
 static struct actiondfs_cached_dir *actiondfs_find_cached_dir_locked(const char *hash)
