@@ -83,7 +83,7 @@ ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
 When investigating actiondfs behavior inside a running guest, read
 `/proc/actiondfs_stats`. It reports VM-lifetime counters for directory cache
 hits/misses, parses, lookups, readdir, CAS blob opens, direct reads, splice
-reads, folio reads, and stale retry events.
+reads, mmap calls, and stale retry events.
 
 Then update the timing summary next to the stress workspace:
 
@@ -151,7 +151,7 @@ latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`.
 
 For actiondfs performance work, this LLVM smoke is the canonical before/after
 measurement. Keep `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing
-actiondfs lookup, readdir, read, splice, caching, or materialization
+actiondfs lookup, readdir, read, splice, mmap, caching, or materialization
 behavior. The stress timings are secondary synthetic coverage.
 
 The VM runner defaults `ACTIOND_LLVM_SMOKE_WARMUP_TARGET` to

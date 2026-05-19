@@ -194,9 +194,16 @@ arrays sized to the whole cached tree. The per-action input root Directory is
 intentionally not cached because those roots are expected to be unique; VFS
 nodes, inodes, and dentries remain mount-local.
 
+For file contents, actiondfs opens the real CAS blob as a Linux backing file
+with the actiondfs path as the user-visible path. `read_iter`, `splice_read`,
+and `mmap` are delegated through the kernel backing-file helpers, so compiler
+mmap traffic goes directly through the native CAS filesystem page cache instead
+of being copied through actiondfs folios.
+
 The kernel exposes VM-lifetime actiondfs counters at `/proc/actiondfs_stats`.
 Those counters track cache hits/misses, directory parses, lookup and readdir
-activity, CAS blob opens, folio reads, and stale-handle retries.
+activity, CAS blob opens, direct reads, splice reads, mmap calls, and
+stale-handle retries.
 
 The Linux host path always keeps the non-actiondfs materialization strategy,
 which lets Docker e2e run on ordinary host kernels:
