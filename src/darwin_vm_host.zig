@@ -164,12 +164,12 @@ pub fn serve(
         null;
     defer if (embedded_runtime_image) |path| allocator.free(path);
     const selected_runtime_image_path = options.runtime_image orelse embedded_runtime_image;
-    const shared_runtime_image_path = if (selected_runtime_image_path) |path|
-        try prepareRuntimeImageShare(io, allocator, root_dir, path)
+    const prepared_runtime_image_path = if (selected_runtime_image_path) |path|
+        try prepareRuntimeImageFile(io, allocator, root_dir, path)
     else
         null;
-    defer if (shared_runtime_image_path) |path| allocator.free(path);
-    const runtime_image_path = shared_runtime_image_path;
+    defer if (prepared_runtime_image_path) |path| allocator.free(path);
+    const runtime_image_path = prepared_runtime_image_path;
 
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
@@ -317,7 +317,7 @@ fn prepareBootKernel(
     );
 }
 
-fn prepareRuntimeImageShare(
+fn prepareRuntimeImageFile(
     io: std.Io,
     allocator: std.mem.Allocator,
     root_dir: std.Io.Dir,

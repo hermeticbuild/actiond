@@ -2,7 +2,6 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 pub const Error = error{
-    ModuleLoadFailed,
     MountFailed,
     UnsupportedHost,
 };
@@ -24,20 +23,6 @@ pub const mounts = [_]Mount{
     .{ .source = "tmpfs", .target = "/work", .fstype = "tmpfs" },
 };
 
-pub const module_paths = [_][:0]const u8{
-    "/modules/vsock.ko",
-    "/modules/vmw_vsock_virtio_transport_common.ko",
-    "/modules/vmw_vsock_virtio_transport.ko",
-    "/modules/virtiofs.ko",
-};
-
-const readonly_virtiofs_flags = std.os.linux.MS.RDONLY |
-    std.os.linux.MS.NOSUID |
-    std.os.linux.MS.NODEV |
-    std.os.linux.MS.NOATIME;
-
-pub const runtime_image_share_mount: Mount = .{ .source = "runtimes", .target = "/runtime-image", .fstype = "virtiofs", .flags = readonly_virtiofs_flags };
-pub const runtime_image_share_path: [:0]const u8 = "/runtime-image/runtimes.sqfs";
 pub const block_devices = [_][:0]const u8{
     "/dev/vda",
     "/dev/vdb",
@@ -49,10 +34,6 @@ pub const block_devices = [_][:0]const u8{
 };
 const runtime_device_wait_attempts = 50;
 const runtime_device_wait_ns = 100 * std.time.ns_per_ms;
-const loop_ctl_get_free: u32 = 0x4C82;
-const loop_set_fd: u32 = 0x4C00;
-const loop_major: u32 = 7;
-const max_fixed_loop_devices = 8;
 pub const runtimes_mount_target: [:0]const u8 = "/runtimes";
 pub const cas_mount_target: [:0]const u8 = "/cas";
 pub const cas_mount_fstype: [:0]const u8 = "ext4";
@@ -70,9 +51,6 @@ pub fn run(io: std.Io) !void {
 
     for (mounts) |mount_spec| {
         try mount(stderr, mount_spec);
-    }
-    for (module_paths) |module_path| {
-        try loadOptionalModule(stderr, module_path);
     }
     try mountCasStore(io, stderr);
     try mountRuntimeImage(io, stderr);
@@ -98,8 +76,6 @@ fn mountCasStore(io: std.Io, stderr: *std.Io.Writer) !void {
 fn mountRuntimeImage(io: std.Io, stderr: *std.Io.Writer) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
-    if (try mountRuntimeImageShare(stderr)) return;
-
     for (0..runtime_device_wait_attempts) |_| {
         if (try mountFirstRuntimeDevice(io, stderr)) return;
         sleepRuntimeDevicePollInterval();
@@ -108,142 +84,6 @@ fn mountRuntimeImage(io: std.Io, stderr: *std.Io.Writer) !void {
     stderr.writeAll("runtime block device not found\n") catch {};
     stderr.flush() catch {};
     return error.MountFailed;
-}
-
-fn mountRuntimeImageShare(stderr: *std.Io.Writer) !bool {
-    if (!try tryMountVirtiofsRuntimeImageShare(stderr)) return false;
-    return try mountLoopRuntimeImage(stderr, runtime_image_share_path);
-}
-
-fn tryMountVirtiofsRuntimeImageShare(stderr: *std.Io.Writer) !bool {
-    const linux = std.os.linux;
-    const rc = linux.mount(
-        runtime_image_share_mount.source.ptr,
-        runtime_image_share_mount.target.ptr,
-        runtime_image_share_mount.fstype.ptr,
-        runtime_image_share_mount.flags,
-        0,
-    );
-    switch (std.posix.errno(rc)) {
-        .SUCCESS => return true,
-        .NOENT, .NODEV, .INVAL => |errno| {
-            stderr.print("runtime image virtiofs share not available: {s}\n", .{@tagName(errno)}) catch {};
-            stderr.flush() catch {};
-            return false;
-        },
-        else => |errno| {
-            stderr.print("mount {s} on {s} type {s} failed: {s}\n", .{
-                runtime_image_share_mount.source,
-                runtime_image_share_mount.target,
-                runtime_image_share_mount.fstype,
-                @tagName(errno),
-            }) catch {};
-            stderr.flush() catch {};
-            return error.MountFailed;
-        },
-    }
-}
-
-fn mountLoopRuntimeImage(stderr: *std.Io.Writer, image_path: [:0]const u8) !bool {
-    const linux = std.os.linux;
-    const image_rc = linux.open(image_path.ptr, .{ .CLOEXEC = true }, 0);
-    switch (std.posix.errno(image_rc)) {
-        .SUCCESS => {},
-        else => |errno| {
-            stderr.print("open runtime image {s} failed: {s}\n", .{ image_path, @tagName(errno) }) catch {};
-            stderr.flush() catch {};
-            return false;
-        },
-    }
-    const image_fd: std.posix.fd_t = @intCast(image_rc);
-    defer closeFd(image_fd);
-
-    const control_rc = linux.open("/dev/loop-control", .{ .CLOEXEC = true }, 0);
-    switch (std.posix.errno(control_rc)) {
-        .SUCCESS => {},
-        .NOENT, .NODEV => |errno| {
-            stderr.print("loop control unavailable: {s}\n", .{@tagName(errno)}) catch {};
-            stderr.flush() catch {};
-            return try mountFixedLoopRuntimeImage(stderr, image_fd, image_path);
-        },
-        else => |errno| {
-            stderr.print("open /dev/loop-control failed: {s}\n", .{@tagName(errno)}) catch {};
-            stderr.flush() catch {};
-            return error.MountFailed;
-        },
-    }
-    const control_fd: std.posix.fd_t = @intCast(control_rc);
-    defer closeFd(control_fd);
-
-    const number_rc = linux.ioctl(control_fd, loop_ctl_get_free, 0);
-    if (std.posix.errno(number_rc) != .SUCCESS) {
-        stderr.print("LOOP_CTL_GET_FREE failed: {s}\n", .{@tagName(std.posix.errno(number_rc))}) catch {};
-        stderr.flush() catch {};
-        return try mountFixedLoopRuntimeImage(stderr, image_fd, image_path);
-    }
-    const loop_number: usize = @intCast(number_rc);
-
-    var loop_path_buffer: [64]u8 = undefined;
-    const loop_path = std.fmt.bufPrintZ(&loop_path_buffer, "/dev/loop{d}", .{loop_number}) catch return false;
-    return try mountLoopDevice(stderr, loop_path, image_fd, image_path);
-}
-
-fn mountFixedLoopRuntimeImage(stderr: *std.Io.Writer, image_fd: std.posix.fd_t, image_path: [:0]const u8) !bool {
-    for (0..max_fixed_loop_devices) |number| {
-        var loop_path_buffer: [64]u8 = undefined;
-        const loop_path = std.fmt.bufPrintZ(&loop_path_buffer, "/dev/loop{d}", .{number}) catch continue;
-        ensureLoopNode(loop_path, @intCast(number));
-        if (try mountLoopDevice(stderr, loop_path, image_fd, image_path)) return true;
-    }
-    return false;
-}
-
-fn mountLoopDevice(
-    stderr: *std.Io.Writer,
-    loop_path: [:0]const u8,
-    image_fd: std.posix.fd_t,
-    image_path: [:0]const u8,
-) !bool {
-    const linux = std.os.linux;
-    const loop_rc = linux.open(loop_path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
-    switch (std.posix.errno(loop_rc)) {
-        .SUCCESS => {},
-        else => |errno| {
-            stderr.print("open {s} failed: {s}\n", .{ loop_path, @tagName(errno) }) catch {};
-            stderr.flush() catch {};
-            return false;
-        },
-    }
-    const loop_fd: std.posix.fd_t = @intCast(loop_rc);
-
-    const set_fd_rc = linux.ioctl(loop_fd, loop_set_fd, @intCast(image_fd));
-    if (std.posix.errno(set_fd_rc) != .SUCCESS) {
-        stderr.print("LOOP_SET_FD failed for {s}: {s}\n", .{ loop_path, @tagName(std.posix.errno(set_fd_rc)) }) catch {};
-        stderr.flush() catch {};
-        closeFd(loop_fd);
-        return false;
-    }
-    closeFd(loop_fd);
-
-    try mount(stderr, .{
-        .source = loop_path,
-        .target = runtimes_mount_target,
-        .fstype = "squashfs",
-        .flags = linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV,
-    });
-    stderr.print("mounted runtime image from {s} via {s}\n", .{ image_path, loop_path }) catch {};
-    stderr.flush() catch {};
-    return true;
-}
-
-fn ensureLoopNode(path: [:0]const u8, minor: u32) void {
-    const linux = std.os.linux;
-    const mode: u32 = linux.S.IFBLK | 0o660;
-    const dev: u32 = (loop_major << 8) | minor;
-    switch (std.posix.errno(linux.mknod(path.ptr, mode, dev))) {
-        .SUCCESS, .EXIST => {},
-        else => {},
-    }
 }
 
 fn mountFirstRuntimeDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
@@ -369,14 +209,6 @@ fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
     }
 }
 
-fn closeFd(fd: std.posix.fd_t) void {
-    while (true) switch (std.posix.errno(std.os.linux.close(fd))) {
-        .SUCCESS => return,
-        .INTR => continue,
-        else => return,
-    };
-}
-
 fn sleepRuntimeDevicePollInterval() void {
     var request: std.os.linux.timespec = .{
         .sec = 0,
@@ -410,39 +242,6 @@ fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {
     }
 }
 
-fn ensureDir(io: std.Io, path: []const u8) !void {
-    try std.Io.Dir.cwd().createDirPath(io, path);
-}
-
-fn loadOptionalModule(stderr: *std.Io.Writer, path: [:0]const u8) !void {
-    if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
-
-    const linux = std.os.linux;
-    const open_rc = linux.open(path.ptr, .{ .CLOEXEC = true }, 0);
-    switch (std.posix.errno(open_rc)) {
-        .SUCCESS => {},
-        .NOENT => return,
-        else => |errno| {
-            stderr.print("open module {s} failed: {s}\n", .{ path, @tagName(errno) }) catch {};
-            stderr.flush() catch {};
-            return error.ModuleLoadFailed;
-        },
-    }
-
-    const fd: i32 = @intCast(open_rc);
-    defer _ = linux.close(fd);
-    const params: [:0]const u8 = "";
-    const load_rc = linux.syscall3(.finit_module, @intCast(fd), @intFromPtr(params.ptr), 0);
-    switch (std.posix.errno(load_rc)) {
-        .SUCCESS, .EXIST => {},
-        else => |errno| {
-            stderr.print("load module {s} failed: {s}\n", .{ path, @tagName(errno) }) catch {};
-            stderr.flush() catch {};
-            return error.ModuleLoadFailed;
-        },
-    }
-}
-
 test "guest init mount plan stays minimal" {
     try std.testing.expectEqual(@as(usize, 6), mounts.len);
     try std.testing.expectEqualStrings("ext4", cas_mount_fstype);
@@ -450,7 +249,6 @@ test "guest init mount plan stays minimal" {
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOSUID) != 0);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NODEV) != 0);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOATIME) != 0);
-    try std.testing.expectEqual(@as(usize, 4), module_paths.len);
     try std.testing.expectEqualStrings("/actiond", worker_argv[0]);
     try std.testing.expectEqualStrings("--guest-worker", worker_argv[1]);
 

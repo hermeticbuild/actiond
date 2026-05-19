@@ -8,13 +8,10 @@
 #import <Virtualization/VZFileHandleSerialPortAttachment.h>
 #import <Virtualization/VZGenericPlatformConfiguration.h>
 #import <Virtualization/VZLinuxBootLoader.h>
-#import <Virtualization/VZSharedDirectory.h>
-#import <Virtualization/VZSingleDirectoryShare.h>
 #import <Virtualization/VZSocketDevice.h>
 #import <Virtualization/VZVirtioBlockDeviceConfiguration.h>
 #import <Virtualization/VZVirtioConsoleDeviceSerialPortConfiguration.h>
 #import <Virtualization/VZVirtioEntropyDeviceConfiguration.h>
-#import <Virtualization/VZVirtioFileSystemDeviceConfiguration.h>
 #import <Virtualization/VZVirtioSocketConnection.h>
 #import <Virtualization/VZVirtioSocketDevice.h>
 #import <Virtualization/VZVirtioSocketDeviceConfiguration.h>
@@ -94,7 +91,6 @@ void *actiond_vm_start(
         VZVirtioBlockDeviceConfiguration *casBlock =
             [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:casAttachment];
         NSMutableArray *storageDevices = [NSMutableArray arrayWithObject:casBlock];
-        NSMutableArray *directoryDevices = [NSMutableArray array];
 
         VZVirtualMachineConfiguration *configuration = [[VZVirtualMachineConfiguration alloc] init];
         configuration.bootLoader = bootLoader;
@@ -106,15 +102,6 @@ void *actiond_vm_start(
         configuration.networkDevices = @[];
         if (runtime_image_path != NULL && runtime_image_path[0] != '\0') {
             NSString *runtimePath = [NSString stringWithUTF8String:runtime_image_path];
-            NSString *runtimeDirectoryPath = [runtimePath stringByDeletingLastPathComponent];
-            NSURL *runtimeDirectoryURL = [NSURL fileURLWithPath:runtimeDirectoryPath isDirectory:YES];
-            VZSharedDirectory *runtimeDirectory = [[VZSharedDirectory alloc] initWithURL:runtimeDirectoryURL readOnly:YES];
-            VZSingleDirectoryShare *runtimeShare = [[VZSingleDirectoryShare alloc] initWithDirectory:runtimeDirectory];
-            VZVirtioFileSystemDeviceConfiguration *runtimeFs =
-                [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"runtimes"];
-            runtimeFs.share = runtimeShare;
-            [directoryDevices addObject:runtimeFs];
-
             NSURL *runtimeURL = [NSURL fileURLWithPath:runtimePath];
             NSError *runtimeError = nil;
             VZDiskImageStorageDeviceAttachment *runtimeAttachment =
@@ -128,7 +115,6 @@ void *actiond_vm_start(
             [storageDevices addObject:runtimeBlock];
         }
         configuration.storageDevices = storageDevices;
-        configuration.directorySharingDevices = directoryDevices;
 
         VZVirtioConsoleDeviceSerialPortConfiguration *serial = [[VZVirtioConsoleDeviceSerialPortConfiguration alloc] init];
         serial.attachment = [[VZFileHandleSerialPortAttachment alloc]

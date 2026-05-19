@@ -52,8 +52,8 @@ The Darwin standalone binary embeds compressed payloads in Mach-O sections:
 At runtime, boot artifacts are extracted under the worker root. Zstd payloads
 are inflated to content-addressed files in `root/boot/` before
 Virtualization.framework is called. The runtime SquashFS remains compressed and
-is staged under the worker root, shared read-only with VirtioFS, and loop-mounted
-inside the guest.
+is staged under the worker root and attached to the guest as a read-only virtio
+block device.
 
 ## VM Shape
 
@@ -64,7 +64,7 @@ The VM is intentionally small:
 - no network devices
 - virtio-vsock control channel
 - writable virtio block device for the guest CAS
-- read-only virtiofs runtime image share
+- read-only virtio block device for the runtime SquashFS image
 - no SSH, package manager, systemd, graphics, audio, or user login
 
 The VM is a long-lived worker. Per-action isolation happens inside Linux with a
@@ -276,15 +276,15 @@ and avoids direct writes to CAS inputs.
 macOS only exposes:
 
 - writable virtio block device containing the guest ext4 CAS
-- read-only virtiofs directory containing `runtimes.sqfs`
+- read-only virtio block device containing `runtimes.sqfs`
 - virtio-vsock control channel
 - serial stderr for logs
 
 There is no guest network device, and each action still gets its own Linux
 network namespace inside the VM with only loopback enabled. Root inside the
-guest is not host root. The guest loop-mounts the shared SquashFS image at
+guest is not host root. The guest mounts the SquashFS block device at
 `/runtimes`, so runtime payloads stay compressed and separate from the
-initramfs.
+initramfs without requiring VirtioFS or loop devices in the guest kernel.
 
 ## Cgroups
 
