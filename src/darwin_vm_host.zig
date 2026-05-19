@@ -227,7 +227,7 @@ fn writeActiondfsStatsSnapshot(
     client: *control_transport_fd.Client,
     path: []const u8,
 ) !void {
-    var response = try client.transport().call(io, allocator, .{
+    var response = try client.call(io, allocator, .{
         .kind = .unary,
         .method = control_protocol.actiondfs_stats_method,
         .body = "",

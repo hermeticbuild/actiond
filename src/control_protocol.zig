@@ -14,12 +14,6 @@ pub const actiondfs_stats_method = "/actiond.internal.Guest/ActiondfsStats";
 
 pub const CallKind = enum(u8) {
     unary = 0,
-    server_streaming = 1,
-    client_streaming = 2,
-    client_streaming_start = 3,
-    client_streaming_chunk = 4,
-    client_streaming_finish = 5,
-    server_streaming_stream = 6,
 };
 
 pub const Request = struct {
@@ -36,7 +30,6 @@ pub const Response = struct {
 pub const Status = enum(u8) {
     ok = 0,
     application_error = 1,
-    stream_chunk = 2,
 };
 
 pub const Header = struct {
@@ -159,16 +152,16 @@ pub fn decodeHeader(bytes: []const u8) !Header {
 
 test "control protocol round-trips request envelope" {
     const encoded = try encodeRequestAlloc(std.testing.allocator, .{
-        .kind = .server_streaming,
-        .method = "/build.bazel.remote.execution.v2.Execution/Execute",
-        .body = "grpc-records",
+        .kind = .unary,
+        .method = actiondfs_stats_method,
+        .body = "",
     });
     defer std.testing.allocator.free(encoded);
 
     const decoded = try decodeRequest(encoded);
-    try std.testing.expectEqual(CallKind.server_streaming, decoded.kind);
-    try std.testing.expectEqualStrings("/build.bazel.remote.execution.v2.Execution/Execute", decoded.method);
-    try std.testing.expectEqualStrings("grpc-records", decoded.body);
+    try std.testing.expectEqual(CallKind.unary, decoded.kind);
+    try std.testing.expectEqualStrings(actiondfs_stats_method, decoded.method);
+    try std.testing.expectEqualStrings("", decoded.body);
 }
 
 test "control protocol round-trips response envelope" {

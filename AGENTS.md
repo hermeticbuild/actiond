@@ -50,11 +50,11 @@ looks suspicious, remove the printed `actiond-kernel-src-*` and
 `actiond-kernel-out-*` Docker volumes and rerun the same command.
 
 The VM guest owns the REAPI CAS and ActionCache on a writable ext4 disk image
-attached as a virtio block device and mounted at `/cas`. The host-side
-`darwin-actiond serve-vm` does not keep a second host CAS in VM mode; it
-forwards CAS, ByteStream, ActionCache, Capabilities, and Execute requests over
-vsock to `linux-actiond` in the guest. VM e2e therefore validates API-visible
-execution behavior for one running VM and a native guest filesystem.
+attached as a virtio block device and mounted at `/cas`. In VM mode there is a
+single guest-owned CAS; `darwin-actiond serve-vm` forwards CAS, ByteStream,
+ActionCache, Capabilities, and Execute traffic over vsock to `linux-actiond` in
+the guest. VM e2e therefore validates API-visible execution behavior for one
+running VM and a native guest filesystem.
 
 ## Stress Workspace
 

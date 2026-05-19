@@ -20,7 +20,7 @@ into the CAS.
 - macOS host binary.
 - `serve-vm` starts and supervises a Virtualization.framework Linux VM.
 - Proxies public REAPI traffic into the guest over virtio-vsock.
-- Does not keep a second host CAS in VM mode.
+- VM mode has one guest-owned CAS on the VM block device.
 
 `linux-actiond`
 
@@ -151,10 +151,9 @@ In VM mode:
   state there
 - per-action workspaces remain tmpfs under `/work`
 
-This removes the previous host-CAS-plus-virtiofs hot path. Client uploads and
-downloads cross the VM boundary as REAPI/ByteStream traffic, but action input
-reads and action output writes hit a native Linux filesystem once the data is in
-the guest CAS.
+Client uploads and downloads cross the VM boundary as REAPI/ByteStream traffic,
+but action input reads and action output writes hit the guest's native Linux
+filesystem once the data is in the VM-owned CAS.
 
 ### Uploads
 
