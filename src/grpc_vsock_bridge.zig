@@ -30,25 +30,28 @@ pub fn serve(
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
 
+    var connections: std.Io.Group = .init;
+    defer connections.cancel(io);
+
     std.log.info("actiond VM raw gRPC bridge listening on {s} -> vsock:{d}", .{ listen, vsock.grpc_port });
     while (true) {
         var accepted = listener.accept(io) catch |err| {
+            if (err == error.Canceled) return err;
             std.log.err("raw gRPC bridge accept failed: {s}", .{@errorName(err)});
-            sleepMilliseconds(10);
+            sleepMilliseconds(io, 10);
             continue;
         };
         const client_fd = accepted.socket.handle;
-        const thread = std.Thread.spawn(.{}, connectionThread, .{ io, machine, client_fd }) catch |err| {
+        connections.concurrent(io, connectionTask, .{ io, machine, client_fd }) catch |err| {
             accepted.close(io);
-            std.log.err("raw gRPC bridge connection spawn failed: {s}", .{@errorName(err)});
-            sleepMilliseconds(10);
+            std.log.err("raw gRPC bridge connection task failed: {s}", .{@errorName(err)});
+            sleepMilliseconds(io, 10);
             continue;
         };
-        thread.detach();
     }
 }
 
-fn connectionThread(io: std.Io, machine: *darwin_vm.Machine, client_fd: std.posix.fd_t) void {
+fn connectionTask(io: std.Io, machine: *darwin_vm.Machine, client_fd: std.posix.fd_t) void {
     defer closeFd(client_fd);
     const started = std.Io.Clock.awake.now(io);
 
@@ -60,61 +63,68 @@ fn connectionThread(io: std.Io, machine: *darwin_vm.Machine, client_fd: std.posi
 
     var client_to_guest_stats: PumpStats = .{};
     var guest_to_client_stats: PumpStats = .{};
-    const client_to_guest = std.Thread.spawn(.{}, pumpAndShutdown, .{ client_fd, guest_fd, &client_to_guest_stats }) catch return;
-    const guest_to_client = std.Thread.spawn(.{}, pumpAndShutdown, .{ guest_fd, client_fd, &guest_to_client_stats }) catch {
+    var pumps: std.Io.Group = .init;
+    defer pumps.cancel(io);
+
+    pumps.concurrent(io, pumpAndShutdown, .{ io, client_fd, guest_fd, &client_to_guest_stats }) catch |err| {
+        std.log.err("raw gRPC bridge client-to-guest task failed: {s}", .{@errorName(err)});
+        return;
+    };
+    pumps.concurrent(io, pumpAndShutdown, .{ io, guest_fd, client_fd, &guest_to_client_stats }) catch |err| {
         shutdownSend(guest_fd);
-        client_to_guest.join();
+        std.log.err("raw gRPC bridge guest-to-client task failed: {s}", .{@errorName(err)});
         return;
     };
 
-    client_to_guest.join();
-    guest_to_client.join();
+    pumps.await(io) catch |err| {
+        if (err != error.Canceled) {
+            std.log.err("raw gRPC bridge pump wait failed: {s}", .{@errorName(err)});
+        }
+        return;
+    };
     logConnectionTiming(started, io, client_to_guest_stats, guest_to_client_stats);
 }
 
-fn pumpAndShutdown(src_fd: std.posix.fd_t, dst_fd: std.posix.fd_t, stats: *PumpStats) void {
+fn pumpAndShutdown(io: std.Io, src_fd: std.posix.fd_t, dst_fd: std.posix.fd_t, stats: *PumpStats) !void {
+    const src_file: std.Io.File = .{
+        .handle = src_fd,
+        .flags = .{ .nonblocking = false },
+    };
+    const dst_file: std.Io.File = .{
+        .handle = dst_fd,
+        .flags = .{ .nonblocking = false },
+    };
     var buffer: [pump_buffer_len]u8 = undefined;
     while (true) {
-        const n = readFd(src_fd, &buffer) catch {
-            stats.read_errors += 1;
-            break;
+        const n = src_file.readStreaming(io, &.{buffer[0..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.Canceled => |e| return e,
+            else => {
+                stats.read_errors += 1;
+                break;
+            },
         };
         stats.read_calls += 1;
         if (n == 0) break;
         stats.bytes += n;
-        writeAll(dst_fd, buffer[0..n], stats) catch {
-            stats.write_errors += 1;
-            break;
+        writeAll(io, dst_file, buffer[0..n], stats) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            else => {
+                stats.write_errors += 1;
+                break;
+            },
         };
     }
     shutdownSend(dst_fd);
 }
 
-fn readFd(fd: std.posix.fd_t, buffer: []u8) !usize {
-    while (true) {
-        const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-    }
-}
-
-fn writeAll(fd: std.posix.fd_t, bytes: []const u8, stats: *PumpStats) !void {
+fn writeAll(io: std.Io, file: std.Io.File, bytes: []const u8, stats: *PumpStats) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         stats.write_calls += 1;
-        const rc = std.posix.system.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {
-                const n: usize = @intCast(rc);
-                if (n == 0) return error.WriteFailed;
-                offset += n;
-            },
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
+        const n = try file.writeStreaming(io, &.{}, &.{bytes[offset..]}, 1);
+        if (n == 0) return error.WriteFailed;
+        offset += n;
     }
 }
 
@@ -155,12 +165,8 @@ fn parseListenAddress(listen: []const u8) !std.Io.net.IpAddress {
     return std.Io.net.IpAddress.parseLiteral(listen) catch return error.InvalidListenAddress;
 }
 
-fn sleepMilliseconds(milliseconds: u32) void {
-    var request: std.c.timespec = .{
-        .sec = @intCast(milliseconds / std.time.ms_per_s),
-        .nsec = @intCast((milliseconds % std.time.ms_per_s) * std.time.ns_per_ms),
-    };
-    while (std.c.nanosleep(&request, &request) != 0) {}
+fn sleepMilliseconds(io: std.Io, milliseconds: u32) void {
+    io.sleep(.fromMilliseconds(milliseconds), .awake) catch {};
 }
 
 test "parseListenAddress accepts IPv4 host and port" {

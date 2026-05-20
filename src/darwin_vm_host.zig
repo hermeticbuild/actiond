@@ -192,25 +192,28 @@ pub fn serve(
 
     var fd_client = control_transport_fd.Client{ .opener = vm.opener() };
     defer fd_client.deinit(io);
+    var background_tasks: std.Io.Group = .init;
+    defer background_tasks.cancel(io);
     if (options.actiondfs_stats_path) |path| {
         const stats_path = try allocator.dupe(u8, path);
-        const stats_thread = try std.Thread.spawn(.{}, actiondfsStatsThread, .{ io, allocator, &fd_client, stats_path });
-        stats_thread.detach();
+        errdefer allocator.free(stats_path);
+        try background_tasks.concurrent(io, actiondfsStatsTask, .{ io, allocator, &fd_client, stats_path });
     }
     return grpc_vsock_bridge.serve(io, options.listen, &vm);
 }
 
-fn actiondfsStatsThread(
+fn actiondfsStatsTask(
     io: std.Io,
     allocator: std.mem.Allocator,
     client: *control_transport_fd.Client,
     path: []const u8,
-) void {
+) !void {
+    defer allocator.free(path);
     while (true) {
         writeActiondfsStatsSnapshot(io, allocator, client, path) catch |err| {
             std.log.warn("actiondfs stats snapshot failed: {s}", .{@errorName(err)});
         };
-        sleepMilliseconds(1_000);
+        try io.sleep(.fromMilliseconds(1_000), .awake);
     }
 }
 
@@ -256,14 +259,6 @@ fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !void {
     defer file.close(io);
     const size_bytes = try std.math.mul(u64, size_mib, 1024 * 1024);
     try file.setLength(io, size_bytes);
-}
-
-fn sleepMilliseconds(milliseconds: u32) void {
-    var request: std.c.timespec = .{
-        .sec = @intCast(milliseconds / std.time.ms_per_s),
-        .nsec = @intCast((milliseconds % std.time.ms_per_s) * std.time.ns_per_ms),
-    };
-    while (std.c.nanosleep(&request, &request) != 0) {}
 }
 
 fn parseU32(value: []const u8) !u32 {
