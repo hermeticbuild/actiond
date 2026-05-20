@@ -1,56 +1,61 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "linux-actiond",
     main = "main.zig",
     strip_debug_symbols = True,
-    deps = ["//src:actiond"],
     visibility = ["//visibility:public"],
+    deps = ["//src:actiond"],
 )
 
-zig_configure_binary(
+platform_transition_binary(
     name = "linux-actiond-linux-aarch64-raw",
-    actual = ":linux-actiond",
-    target = "//platforms:linux_aarch64",
-    zig_version = "0.16.0",
+    basename = "linux-actiond-linux-aarch64-raw",
+    binary = ":linux-actiond",
+    target_platform = "//platforms:linux_aarch64",
 )
 
 genrule(
     name = "linux-actiond-linux-aarch64",
-    srcs = [":linux-actiond-linux-aarch64-raw"],
     outs = ["linux-actiond-linux-aarch64.bin"],
     cmd = """
 set -euo pipefail
-cp "$(location :linux-actiond-linux-aarch64-raw)" "$@"
+cp "$(execpath :linux-actiond-linux-aarch64-raw)" "$@"
 chmod +w "$@"
 "$(execpath @llvm//tools:llvm-strip)" --strip-all "$@"
 chmod +x "$@"
-""",
+    """,
     executable = True,
-    tools = ["@llvm//tools:llvm-strip"],
+    tools = [
+        ":linux-actiond-linux-aarch64-raw",
+        "@llvm//tools:llvm-strip",
+    ],
     visibility = ["//visibility:public"],
 )
 
-zig_configure_binary(
+platform_transition_binary(
     name = "linux-actiond-linux-x86_64-raw",
-    actual = ":linux-actiond",
-    target = "//platforms:linux_x86_64",
-    zig_version = "0.16.0",
+    basename = "linux-actiond-linux-x86_64-raw",
+    binary = ":linux-actiond",
+    target_platform = "//platforms:linux_x86_64",
 )
 
 genrule(
     name = "linux-actiond-linux-x86_64",
-    srcs = [":linux-actiond-linux-x86_64-raw"],
     outs = ["linux-actiond-linux-x86_64.bin"],
     cmd = """
 set -euo pipefail
-cp "$(location :linux-actiond-linux-x86_64-raw)" "$@"
+cp "$(execpath :linux-actiond-linux-x86_64-raw)" "$@"
 chmod +w "$@"
 "$(execpath @llvm//tools:llvm-strip)" --strip-all "$@"
 chmod +x "$@"
-""",
+    """,
     executable = True,
-    tools = ["@llvm//tools:llvm-strip"],
+    tools = [
+        ":linux-actiond-linux-x86_64-raw",
+        "@llvm//tools:llvm-strip",
+    ],
     visibility = ["//visibility:public"],
 )
 
