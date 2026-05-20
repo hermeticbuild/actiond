@@ -910,16 +910,22 @@ pub const OutputFile = struct {
 pub const OutputDirectory = struct {
     path: []const u8 = "",
     tree_digest: ?Digest = null,
+    is_topologically_sorted: bool = false,
+    root_directory_digest: ?Digest = null,
 
     pub fn encode(self: OutputDirectory, writer: *protobuf.Writer) !void {
         if (self.path.len != 0) try writer.writeStringField(1, self.path);
         if (self.tree_digest) |digest| try writer.writeMessageField(3, digest);
+        if (self.is_topologically_sorted) try writer.writeBoolField(4, true);
+        if (self.root_directory_digest) |digest| try writer.writeMessageField(5, digest);
     }
 
     pub fn encodedLen(self: OutputDirectory) usize {
         var len: usize = 0;
         if (self.path.len != 0) len += protobuf.stringFieldLen(1, self.path.len);
         if (self.tree_digest) |digest| len += protobuf.messageFieldLen(3, digest.encodedLen());
+        if (self.is_topologically_sorted) len += protobuf.boolFieldLen(4);
+        if (self.root_directory_digest) |digest| len += protobuf.messageFieldLen(5, digest.encodedLen());
         return len;
     }
 
@@ -931,6 +937,11 @@ pub const OutputDirectory = struct {
                 3 => {
                     var nested = try reader.readMessage();
                     out.tree_digest = try Digest.decode(&nested);
+                },
+                4 => out.is_topologically_sorted = try reader.readBool(),
+                5 => {
+                    var nested = try reader.readMessage();
+                    out.root_directory_digest = try Digest.decode(&nested);
                 },
                 else => try reader.skipField(tag.wire_type),
             }
@@ -1730,7 +1741,12 @@ test "ActionResult round-trips exit code and stream digests" {
             .{ .path = "out/app", .digest = stdout_digest, .is_executable = true },
         },
         .output_directories = &.{
-            .{ .path = "out/tree", .tree_digest = stderr_digest },
+            .{
+                .path = "out/tree",
+                .tree_digest = stderr_digest,
+                .is_topologically_sorted = true,
+                .root_directory_digest = stdout_digest,
+            },
         },
         .exit_code = 7,
         .stdout_digest = stdout_digest,
@@ -1761,6 +1777,8 @@ test "ActionResult round-trips exit code and stream digests" {
     try std.testing.expectEqual(@as(usize, 1), decoded.output_directories.len);
     try std.testing.expectEqualStrings("out/tree", decoded.output_directories[0].path);
     try std.testing.expect(decoded.output_directories[0].tree_digest.?.eql(stderr_digest));
+    try std.testing.expect(decoded.output_directories[0].is_topologically_sorted);
+    try std.testing.expect(decoded.output_directories[0].root_directory_digest.?.eql(stdout_digest));
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));

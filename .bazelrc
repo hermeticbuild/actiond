@@ -5,6 +5,5 @@ build:macos --sandbox_add_mount_pair=/var/tmp
 
 common:remote --jobs=500
 common:remote --extra_execution_platforms=@llvm//:rbe_platform
-common:remote --remote_cache_compression
 
 test --test_output=errors

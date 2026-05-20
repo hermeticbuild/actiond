@@ -20,18 +20,15 @@ cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-32768}"
 run_vm="${ACTIOND_LLVM_SMOKE_VM:-1}"
 run_mac_host="${ACTIOND_LLVM_SMOKE_MAC_HOST:-1}"
 server_target="${ACTIOND_LLVM_SMOKE_SERVER_TARGET:-//cmd/darwin_actiond:darwin-actiond-standalone_pkg}"
+server_script_path="${ACTIOND_LLVM_SMOKE_SERVER_SCRIPT_PATH:-/tmp/darwin-actiond-standalone}"
 build_mode_flags=(
   -c opt
   --strip=always
   --stripopt=--strip-all
 )
 bazel_build_flags=()
-bazel_query_flags=()
 if [[ -n "${ACTIOND_BAZEL_BUILD_FLAGS:-}" ]]; then
   read -r -a bazel_build_flags <<<"${ACTIOND_BAZEL_BUILD_FLAGS}"
-fi
-if [[ -n "${ACTIOND_BAZEL_QUERY_FLAGS:-}" ]]; then
-  read -r -a bazel_query_flags <<<"${ACTIOND_BAZEL_QUERY_FLAGS}"
 fi
 
 server_pid=""
@@ -94,22 +91,17 @@ wait_for_guest_ready() {
   done
 }
 
-server_output() {
-  local label="$1"
-  local path
-  path="$(cd "${repo_root}" && bazel cquery "${build_mode_flags[@]}" ${bazel_query_flags[@]+"${bazel_query_flags[@]}"} --output=files "${label}" | tail -n 1)"
-  if [[ "${path}" != /* ]]; then
-    path="${repo_root}/${path}"
-  fi
-  printf '%s\n' "${path}"
-}
-
-build_server() {
+prepare_server() {
+  mkdir -p "$(dirname "${server_script_path}")"
   (
     cd "${repo_root}"
-    bazel build "${build_mode_flags[@]}" ${bazel_build_flags[@]+"${bazel_build_flags[@]}"} \
+    bazel run --config=remote \
+      --script_path="${server_script_path}" \
+      "${build_mode_flags[@]}" \
+      ${bazel_build_flags[@]+"${bazel_build_flags[@]}"} \
       "${server_target}"
-  )
+  ) >&2
+  printf '%s\n' "${server_script_path}"
 }
 
 run_smoke() {
@@ -122,7 +114,7 @@ run_smoke() {
 
   mkdir -p "${output_root}"
   "${repo_root}/tools/create_ext4_image.sh" "${cas_image}" "${cas_image_size_mib}"
-  server="$(server_output "${server_target}")"
+  server="$(prepare_server)"
   server_log="${output_root}/darwin-actiond-vm.log"
 
   "${server}" serve-vm \
@@ -263,7 +255,6 @@ fi
 mkdir -p "${output_root}"
 echo "smoke output: ${output_root}" >&2
 if [[ "${run_vm}" == "1" ]]; then
-  build_server
   run_smoke
 fi
 if [[ "${run_mac_host}" == "1" ]]; then

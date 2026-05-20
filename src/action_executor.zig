@@ -1135,6 +1135,7 @@ pub fn actionResultFromOutcomeOwned(
         output_directories[i] = .{
             .path = output_directory.path,
             .tree_digest = try appendDigest(allocator, &hash_strings, output_directory.tree_digest),
+            .root_directory_digest = if (output_directory.root_directory_digest) |digest| try appendDigest(allocator, &hash_strings, digest) else null,
         };
     }
 
@@ -1279,15 +1280,17 @@ fn collectOutputFiles(
     }
 
     if (command.output_paths.len != 0) {
+        const include_root_directory_digest = shouldIncludeRootDirectoryDigest(command);
         for (command.output_paths) |path| {
-            try collectOutputPath(io, allocator, store, staged_index, work_root, path, &output_files, &output_directories);
+            try collectOutputPath(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, &output_files, &output_directories);
         }
     } else {
         for (command.output_files) |path| {
             try collectOutputFile(io, allocator, store, staged_index, work_root, path, &output_files);
         }
+        const include_root_directory_digest = shouldIncludeRootDirectoryDigest(command);
         for (command.output_directories) |path| {
-            try collectOutputDirectory(io, allocator, store, staged_index, work_root, path, &output_directories);
+            try collectOutputDirectory(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, &output_directories);
         }
     }
 
@@ -1302,6 +1305,7 @@ fn collectOutputPath(
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
+    include_root_directory_digest: bool,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
@@ -1312,7 +1316,7 @@ fn collectOutputPath(
     };
     switch (stat.kind) {
         .file => try collectOutputFileWithStat(io, allocator, store, staged_index, work_root, path, stat, output_files),
-        .directory => try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories),
+        .directory => try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, output_directories),
         else => return error.FailedPrecondition,
     }
 }
@@ -1405,6 +1409,7 @@ fn collectOutputDirectory(
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
+    include_root_directory_digest: bool,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
     try execroot.validatePath(path);
@@ -1413,7 +1418,7 @@ fn collectOutputDirectory(
         else => return err,
     };
     if (stat.kind != .directory) return error.FailedPrecondition;
-    try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories);
+    try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, output_directories);
 }
 
 fn collectOutputDirectoryWithStat(
@@ -1423,13 +1428,14 @@ fn collectOutputDirectoryWithStat(
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
+    include_root_directory_digest: bool,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
     var dir = try work_root.openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     var tree = OutputTreeBuilder{};
     defer tree.deinit(allocator);
-    _ = try putOutputDirectoryTree(io, allocator, store, staged_index, dir, &tree, true);
+    const root_directory_digest = try putOutputDirectoryTree(io, allocator, store, staged_index, dir, &tree, true);
     const tree_digest = try tree.putTreeProto(io, allocator, store);
     if (staged_index) |index| try index.add(io, allocator, tree_digest);
 
@@ -1438,7 +1444,15 @@ fn collectOutputDirectoryWithStat(
     try output_directories.append(allocator, .{
         .path = path_copy,
         .tree_digest = tree_digest,
+        .root_directory_digest = if (include_root_directory_digest) root_directory_digest else null,
     });
+}
+
+fn shouldIncludeRootDirectoryDigest(command: reapi.Command) bool {
+    return switch (command.output_directory_format orelse .tree_only) {
+        .tree_only => false,
+        .directory_only, .tree_and_directory => true,
+    };
 }
 
 fn prepareOutputParents(
@@ -2217,6 +2231,7 @@ test "collectOutputFiles uploads requested output files and directories" {
 
     try collectOutputFiles(std.testing.io, std.testing.allocator, store, null, work_dir, .{
         .output_paths = &.{ "out/file.txt", "tree" },
+        .output_directory_format = .tree_and_directory,
     }, &outcome);
 
     try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
@@ -2271,6 +2286,44 @@ test "collectOutputFiles uploads requested output files and directories" {
     try std.testing.expectEqualStrings("tree", result.result.output_directories[0].path);
     var tree_hash: [64]u8 = undefined;
     try std.testing.expect(result.result.output_directories[0].tree_digest.?.eql(outcome.output_directories[0].tree_digest.toReapi(&tree_hash)));
+    var root_hash: [64]u8 = undefined;
+    try std.testing.expect(result.result.output_directories[0].root_directory_digest.?.eql(outcome.output_directories[0].root_directory_digest.?.toReapi(&root_hash)));
+}
+
+test "collectOutputFiles omits root directory digest for tree-only output directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const store = cas.Store.init(cas_dir);
+    try work_dir.createDirPath(std.testing.io, "tree");
+    try work_dir.writeFile(std.testing.io, .{
+        .sub_path = "tree/file.txt",
+        .data = "leaf",
+    });
+
+    var outcome: action_runner.Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = try std.testing.allocator.alloc(u8, 0),
+        .stderr = try std.testing.allocator.alloc(u8, 0),
+    };
+    defer outcome.deinit(std.testing.allocator);
+
+    try collectOutputFiles(std.testing.io, std.testing.allocator, store, null, work_dir, .{
+        .output_paths = &.{"tree"},
+    }, &outcome);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
+    try std.testing.expect(outcome.output_directories[0].root_directory_digest == null);
+
+    var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.result.output_directories[0].tree_digest != null);
+    try std.testing.expect(result.result.output_directories[0].root_directory_digest == null);
 }
 
 test "collectOutputFiles strips chroot execroot prefix from depfiles" {
