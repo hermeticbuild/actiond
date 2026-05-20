@@ -37,6 +37,7 @@ build_remote() {
     "${build_mode_flags[@]}" \
     --platforms="${target_platform}" \
     --host_platform="${host_platform}" \
+    --extra_execution_platforms=//e2e:actiond_linux_arm64_musl_exec \
     --remote_executor="${executor}" \
     --remote_cache="${cache}" \
     --experimental_remote_downloader= \

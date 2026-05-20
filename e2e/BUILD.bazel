@@ -1,5 +1,20 @@
 load(":exec_warmup.bzl", "exec_warmup")
 
+platform(
+    name = "actiond_linux_arm64_musl_exec",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+        "@llvm//constraints/libc:musl",
+    ],
+    exec_properties = {
+        "Arch": "arm64",
+        "OSFamily": "Linux",
+        "container-image": "docker://ubuntu:22.04",
+    },
+    visibility = ["//visibility:public"],
+)
+
 exec_warmup(
     name = "llvm_exec_warmup",
     deps = [
