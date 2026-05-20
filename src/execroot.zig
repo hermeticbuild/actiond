@@ -167,7 +167,7 @@ pub const Materializer = struct {
         else source: {
             var blob = try self.store.openBlob(io, input.digest);
             blob.close(io);
-            var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+            var blob_path_buffer: [cas.blob_path_len]u8 = undefined;
             const blob_path = cas.blobSubPath(input.digest, &blob_path_buffer);
             break :source try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path.?, blob_path }, 0);
         };
@@ -197,7 +197,7 @@ pub const Materializer = struct {
         if (!try self.store.hasTree(io, input.digest)) return error.MissingInputTree;
         try self.root.createDirPath(io, input.path);
 
-        var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+        var tree_path_buffer: [cas.tree_path_len]u8 = undefined;
         const tree_path = cas.treeSubPath(input.digest, &tree_path_buffer);
         const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cas_root_path.?, tree_path }, 0);
         errdefer allocator.free(source);
@@ -242,8 +242,9 @@ fn blobPathFromRoot(
     blob_root_path: []const u8,
     digest: cas.Digest,
 ) ![:0]u8 {
-    var hash: [64]u8 = undefined;
-    return std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ blob_root_path, digest.formatHex(&hash) }, 0);
+    var sharded_path_buffer: [cas.digest_sharded_path_len]u8 = undefined;
+    const sharded_path = cas.digestShardedSubPath(digest, &sharded_path_buffer);
+    return std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ blob_root_path, sharded_path }, 0);
 }
 
 fn blobPathExists(io: std.Io, path: [:0]const u8) !bool {
@@ -424,7 +425,7 @@ test "Materializer copies CAS blobs into an execroot" {
     );
     defer std.testing.allocator.free(restored);
     try std.testing.expectEqualStrings("hello\n", restored);
-    var hello_blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+    var hello_blob_path_buffer: [cas.blob_path_len]u8 = undefined;
     const hello_blob_path = cas.blobSubPath(hello, &hello_blob_path_buffer);
     const hello_cas_stat = try cas_dir.statFile(std.testing.io, hello_blob_path, .{});
     const hello_work_stat = try work_dir.statFile(std.testing.io, "src/hello.txt", .{});
@@ -468,7 +469,7 @@ test "Materializer prepares read-only bind mounts for chroot inputs" {
 
     try std.testing.expectEqual(@as(usize, 2), materialization.bind_mounts.len);
 
-    var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+    var blob_path_buffer: [cas.blob_path_len]u8 = undefined;
     const blob_path = cas.blobSubPath(digest, &blob_path_buffer);
     const expected_source = try std.fmt.allocPrint(
         std.testing.allocator,
@@ -533,7 +534,7 @@ test "Materializer can bind executable chroot inputs outside the copy list" {
 
     try std.testing.expectEqual(@as(usize, 1), materialization.bind_mounts.len);
 
-    var blob_path_buffer: [cas.blob_prefix_len + 64]u8 = undefined;
+    var blob_path_buffer: [cas.blob_path_len]u8 = undefined;
     const blob_path = cas.blobSubPath(data, &blob_path_buffer);
     const expected_source = try std.fmt.allocPrint(
         std.testing.allocator,
@@ -572,7 +573,7 @@ test "Materializer prepares read-only bind mounts for chroot tree inputs" {
     const store = cas.Store.init(cas_dir);
     try store.ensureLayout(std.testing.io);
     const tree_digest = cas.Digest.fromBytes("tree proto");
-    var tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+    var tree_path_buffer: [cas.tree_path_len]u8 = undefined;
     const tree_path = cas.treeSubPath(tree_digest, &tree_path_buffer);
     try cas_dir.createDirPath(std.testing.io, tree_path);
 
@@ -648,11 +649,12 @@ test "Materializer chooses staged blob root before immutable blob root" {
     defer materialization.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), materialization.bind_mounts.len);
-    var hash: [64]u8 = undefined;
+    var sharded_path_buffer: [cas.digest_sharded_path_len]u8 = undefined;
+    const sharded_path = cas.digestShardedSubPath(digest, &sharded_path_buffer);
     const expected_source = try std.fmt.allocPrint(
         std.testing.allocator,
         "{s}/{s}",
-        .{ staged_blob_root, digest.formatHex(&hash) },
+        .{ staged_blob_root, sharded_path },
     );
     defer std.testing.allocator.free(expected_source);
     try std.testing.expectEqualStrings(expected_source, materialization.bind_mounts[0].source);

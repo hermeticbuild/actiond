@@ -14,6 +14,11 @@ const blob_prefix = "blobs/sha256/";
 pub const blob_prefix_len = blob_prefix.len;
 const tree_prefix = "trees/sha256/";
 pub const tree_prefix_len = tree_prefix.len;
+pub const digest_hex_len = 64;
+pub const digest_shard_hex_len = 2;
+pub const digest_sharded_path_len = digest_shard_hex_len + 1 + digest_hex_len;
+pub const blob_path_len = blob_prefix.len + digest_sharded_path_len;
+pub const tree_path_len = tree_prefix.len + digest_sharded_path_len;
 const hex_chars = "0123456789abcdef";
 const copy_buffer_len = 128 * 1024;
 const temp_path_prefix = blob_prefix ++ ".tmp-";
@@ -108,7 +113,7 @@ pub const Store = struct {
     pub fn has(self: Store, io: std.Io, digest: Digest) !bool {
         if (digest.isEmpty()) return true;
 
-        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
+        var path_buffer: [blob_path_len]u8 = undefined;
         const path = blobPath(digest, &path_buffer);
         self.root.access(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return false,
@@ -120,7 +125,7 @@ pub const Store = struct {
     pub fn deleteBlob(self: Store, io: std.Io, digest: Digest) !void {
         if (digest.isEmpty()) return;
 
-        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
+        var path_buffer: [blob_path_len]u8 = undefined;
         const path = blobPath(digest, &path_buffer);
         self.root.deleteFile(io, path) catch |err| switch (err) {
             error.FileNotFound => {},
@@ -129,7 +134,7 @@ pub const Store = struct {
     }
 
     pub fn hasTree(self: Store, io: std.Io, digest: Digest) !bool {
-        var path_buffer: [tree_prefix.len + 64]u8 = undefined;
+        var path_buffer: [tree_path_len]u8 = undefined;
         const path = treeSubPath(digest, &path_buffer);
         const stat = self.root.statFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return false,
@@ -170,7 +175,7 @@ pub const Store = struct {
     }
 
     pub fn openBlob(self: Store, io: std.Io, digest: Digest) !std.Io.File {
-        var path_buffer: [blob_prefix.len + 64]u8 = undefined;
+        var path_buffer: [blob_path_len]u8 = undefined;
         const path = blobPath(digest, &path_buffer);
         if (comptime builtin.os.tag == .linux) return openFileLinuxRetry(self.root, path);
         return self.root.openFile(io, path, .{});
@@ -243,8 +248,9 @@ pub const Store = struct {
         if (try self.hasTree(io, digest)) return;
         try self.ensureLayoutIfNeeded(io);
 
-        var final_path_buffer: [tree_prefix.len + 64]u8 = undefined;
+        var final_path_buffer: [tree_path_len]u8 = undefined;
         const final_path = treeSubPath(digest, &final_path_buffer);
+        try self.root.createDirPath(io, digestParentPath(final_path));
 
         while (true) {
             const id = next_temp_id.fetchAdd(1, .monotonic);
@@ -318,6 +324,7 @@ pub const Store = struct {
         digest: Digest,
         final_path: []const u8,
     ) !void {
+        try self.root.createDirPath(io, digestParentPath(final_path));
         self.root.createDir(io, final_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => return,
             else => |e| return e,
@@ -337,7 +344,7 @@ pub const Store = struct {
         is_executable: bool,
     ) !void {
         if (!is_executable) {
-            var src_path_buffer: [blob_prefix.len + 64]u8 = undefined;
+            var src_path_buffer: [blob_path_len]u8 = undefined;
             const src_path = blobPath(digest, &src_path_buffer);
             var should_copy = false;
             self.root.hardLink(src_path, self.root, dest_path, io, .{}) catch |err| switch (err) {
@@ -442,8 +449,9 @@ pub const BlobWriter = struct {
             if (!digest.eql(value)) return error.DigestMismatch;
         }
 
-        var final_path_buffer: [blob_prefix.len + 64]u8 = undefined;
+        var final_path_buffer: [blob_path_len]u8 = undefined;
         const final_path = blobPath(digest, &final_path_buffer);
+        try self.store.root.createDirPath(io, digestParentPath(final_path));
         switch (self.temp_kind) {
             .named => {
                 self.file.close(io);
@@ -600,22 +608,40 @@ test "Store can remove only a blob file" {
     try store.deleteBlob(std.testing.io, digest);
 }
 
-fn blobPath(digest: Digest, out: *[blob_prefix.len + 64]u8) []const u8 {
+fn blobPath(digest: Digest, out: *[blob_path_len]u8) []const u8 {
     return blobSubPath(digest, out);
 }
 
-pub fn blobSubPath(digest: Digest, out: *[blob_prefix.len + 64]u8) []const u8 {
-    @memcpy(out[0..blob_prefix.len], blob_prefix);
-    var hex: [64]u8 = undefined;
-    @memcpy(out[blob_prefix.len..], digest.formatHex(&hex));
-    return out;
+pub fn blobSubPath(digest: Digest, out: *[blob_path_len]u8) []const u8 {
+    return shardedDigestSubPath(blob_prefix, digest, out);
 }
 
-pub fn treeSubPath(digest: Digest, out: *[tree_prefix.len + 64]u8) []const u8 {
-    @memcpy(out[0..tree_prefix.len], tree_prefix);
+pub fn treeSubPath(digest: Digest, out: *[tree_path_len]u8) []const u8 {
+    return shardedDigestSubPath(tree_prefix, digest, out);
+}
+
+pub fn digestShardedSubPath(digest: Digest, out: *[digest_sharded_path_len]u8) []const u8 {
     var hex: [64]u8 = undefined;
-    @memcpy(out[tree_prefix.len..], digest.formatHex(&hex));
-    return out;
+    const hash = digest.formatHex(&hex);
+
+    @memcpy(out[0..digest_shard_hex_len], hash[0..digest_shard_hex_len]);
+    out[digest_shard_hex_len] = '/';
+    @memcpy(out[digest_shard_hex_len + 1 .. digest_sharded_path_len], hash);
+    return out[0..digest_sharded_path_len];
+}
+
+fn shardedDigestSubPath(prefix: []const u8, digest: Digest, out: []u8) []const u8 {
+    const len = prefix.len + digest_sharded_path_len;
+    var sharded: [digest_sharded_path_len]u8 = undefined;
+    const path = digestShardedSubPath(digest, &sharded);
+
+    @memcpy(out[0..prefix.len], prefix);
+    @memcpy(out[prefix.len..len], path);
+    return out[0..len];
+}
+
+fn digestParentPath(path: []const u8) []const u8 {
+    return path[0 .. path.len - (digest_hex_len + 1)];
 }
 
 fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
@@ -639,7 +665,7 @@ fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
 fn openFileLinuxRetry(dir: std.Io.Dir, path: []const u8) !std.Io.File {
     if (comptime builtin.os.tag != .linux) unreachable;
 
-    var path_z: [blob_prefix.len + 64:0]u8 = undefined;
+    var path_z: [blob_path_len:0]u8 = undefined;
     if (path.len > path_z.len) return error.NameTooLong;
     @memcpy(path_z[0..path.len], path);
     path_z[path.len] = 0;
@@ -783,6 +809,23 @@ test "Digest computes stable SHA-256 and converts through REAPI" {
     try std.testing.expect(digest.eql(round_trip));
 }
 
+test "CAS subpaths use two-character digest prefix sharding" {
+    const digest = Digest.fromBytes("hello");
+    const expected_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    var blob_path_buffer: [blob_path_len]u8 = undefined;
+    const blob_path = blobSubPath(digest, &blob_path_buffer);
+    try std.testing.expectEqualStrings("blobs/sha256/2c/" ++ expected_hash, blob_path);
+
+    var tree_path_buffer: [tree_path_len]u8 = undefined;
+    const tree_path = treeSubPath(digest, &tree_path_buffer);
+    try std.testing.expectEqualStrings("trees/sha256/2c/" ++ expected_hash, tree_path);
+
+    var digest_path_buffer: [digest_sharded_path_len]u8 = undefined;
+    const digest_path = digestShardedSubPath(digest, &digest_path_buffer);
+    try std.testing.expectEqualStrings("2c/" ++ expected_hash, digest_path);
+}
+
 test "Store writes blobs once and reads them by digest" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -845,7 +888,7 @@ test "Store materializes directory protos as tree directories" {
     try store.materializeTree(std.testing.io, std.testing.allocator, root_digest);
     try std.testing.expect(try store.hasTree(std.testing.io, root_digest));
 
-    var tree_path_buffer: [tree_prefix_len + 64]u8 = undefined;
+    var tree_path_buffer: [tree_path_len]u8 = undefined;
     const tree_path = treeSubPath(root_digest, &tree_path_buffer);
     const leaf_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/sub/leaf.txt", .{tree_path});
     defer std.testing.allocator.free(leaf_path);

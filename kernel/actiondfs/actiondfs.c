@@ -48,6 +48,8 @@
 #define ACTIONDFS_BLOB_PATH_CACHE_BITS 14
 #define ACTIONDFS_BLOB_PATH_CACHE_MAX 16384
 #define ACTIONDFS_PROC_STATS "actiondfs_stats"
+#define ACTIONDFS_HASH_HEX_LEN 64
+#define ACTIONDFS_SHARDED_HASH_PATH_LEN (2 + 1 + ACTIONDFS_HASH_HEX_LEN)
 
 struct actiondfs_cached_child {
 	char *name;
@@ -939,13 +941,22 @@ static int actiondfs_valid_hash(const char *hash)
 {
 	size_t i;
 
-	if (strlen(hash) != 64)
+	if (strlen(hash) != ACTIONDFS_HASH_HEX_LEN)
 		return -EINVAL;
-	for (i = 0; i < 64; i++) {
+	for (i = 0; i < ACTIONDFS_HASH_HEX_LEN; i++) {
 		if (actiondfs_hex_nibble(hash[i]) < 0)
 			return -EINVAL;
 	}
 	return 0;
+}
+
+static void actiondfs_sharded_hash_path(const char *hash,
+					char out[ACTIONDFS_SHARDED_HASH_PATH_LEN + 1])
+{
+	memcpy(out, hash, 2);
+	out[2] = '/';
+	memcpy(out + 3, hash, ACTIONDFS_HASH_HEX_LEN);
+	out[ACTIONDFS_SHARDED_HASH_PATH_LEN] = '\0';
 }
 
 static bool actiondfs_retry_stale(int err, unsigned int *attempts)
@@ -985,12 +996,14 @@ static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 						 const char *hash)
 {
 	unsigned int stale_attempts = 0;
+	char path[ACTIONDFS_SHARDED_HASH_PATH_LEN + 1];
 	struct file *file;
 	int err;
 
+	actiondfs_sharded_hash_path(hash, path);
 	while (true) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_OPEN_ATTEMPTS);
-		file = file_open_root(&sbi->cas_path, hash, O_RDONLY, 0);
+		file = file_open_root(&sbi->cas_path, path, O_RDONLY, 0);
 		if (!IS_ERR(file))
 			return file;
 
@@ -1704,6 +1717,7 @@ static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 					  struct path *out)
 {
 	struct actiondfs_blob_path_cache_entry *entry;
+	char path[ACTIONDFS_SHARDED_HASH_PATH_LEN + 1];
 	struct path real_path;
 	int err;
 
@@ -1730,8 +1744,9 @@ static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_MISSES);
+	actiondfs_sharded_hash_path(hash, path);
 	err = vfs_path_lookup(sbi->cas_path.dentry, sbi->cas_path.mnt,
-			      hash, LOOKUP_FOLLOW, &real_path);
+			      path, LOOKUP_FOLLOW, &real_path);
 	if (err)
 		return err;
 

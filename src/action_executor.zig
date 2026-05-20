@@ -170,8 +170,9 @@ fn readCasBlobFromRootAlloc(
     digest: cas.Digest,
 ) ![]u8 {
     const len = std.math.cast(usize, digest.size_bytes) orelse return error.FileTooBig;
-    var hash: [64]u8 = undefined;
-    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ blob_root_path, digest.formatHex(&hash) }, 0);
+    var sharded_path_buffer: [cas.digest_sharded_path_len]u8 = undefined;
+    const sharded_path = cas.digestShardedSubPath(digest, &sharded_path_buffer);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ blob_root_path, sharded_path }, 0);
     defer allocator.free(path);
 
     var file = try openAbsoluteBlobPath(io, path);
@@ -2088,7 +2089,7 @@ test "collectInputs materializes bindable tree directories" {
     try std.testing.expect(dirs.items[0].digest.eql(child_digest));
     try std.testing.expect(try store.hasTree(std.testing.io, child_digest));
 
-    var child_tree_path_buffer: [cas.tree_prefix_len + 64]u8 = undefined;
+    var child_tree_path_buffer: [cas.tree_path_len]u8 = undefined;
     const child_tree_path = cas.treeSubPath(child_digest, &child_tree_path_buffer);
     const leaf_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/leaf.txt", .{child_tree_path});
     defer std.testing.allocator.free(leaf_path);
