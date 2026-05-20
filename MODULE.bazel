@@ -81,9 +81,9 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 """,
-    sha256 = "cc12a7644b4cef9e06627b29de8753e22b3d076703a9b52be84263e05c8b9830",
-    strip_prefix = "linux-6.12.87",
-    urls = ["https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.87.tar.xz"],
+    sha256 = "558c6bbab749492b34f99827fe807b0039a744693c21d3a7e03b3a48edaab96a",
+    strip_prefix = "linux-6.18.2",
+    urls = ["https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.2.tar.xz"],
 )
 
 glibc_deb_runtime = use_repo_rule("//runtimes:glibc_runtime_repo.bzl", "glibc_deb_runtime")

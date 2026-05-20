@@ -15,6 +15,7 @@
 #include <linux/err.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/fs_context.h>
 #include <linux/hashtable.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -1093,7 +1094,7 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	unsigned int stale_attempts = 0;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
-		.user_file = iocb->ki_filp,
+		.accessed = file_accessed,
 	};
 
 	if (!requested)
@@ -1138,7 +1139,7 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 	unsigned int stale_attempts = 0;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
-		.user_file = actiondfs_file,
+		.accessed = file_accessed,
 	};
 
 	if (!len)
@@ -1151,13 +1152,19 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 	wanted = min_t(u64, (u64)len, node->size - pos);
 
 	do {
+		struct kiocb backing_iocb;
+
 		file = actiondfs_get_node_blob_file(sbi, node, actiondfs_file);
 		if (IS_ERR(file))
 			return PTR_ERR(file);
 
+		init_sync_kiocb(&backing_iocb, actiondfs_file);
+		backing_iocb.ki_pos = pos;
 		actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READS);
-		nread = backing_file_splice_read(file, &pos, pipe, wanted,
-						 flags, &ctx);
+		nread = backing_file_splice_read(file, &backing_iocb, pipe,
+						 wanted, flags, &ctx);
+		if (nread > 0)
+			pos = backing_iocb.ki_pos;
 		if (nread == -ESTALE)
 			actiondfs_drop_node_blob_if_current(node, file);
 		fput(file);
@@ -1180,7 +1187,7 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 	int err;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
-		.user_file = actiondfs_file,
+		.accessed = file_accessed,
 	};
 
 	file = actiondfs_get_node_blob_file(sbi, node, actiondfs_file);
@@ -2249,8 +2256,13 @@ static const struct super_operations actiondfs_super_ops = {
 	.put_super = actiondfs_put_super,
 };
 
-static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
+struct actiondfs_mount_context {
+	char *options;
+};
+
+static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
+	struct actiondfs_mount_context *ctx = fc->fs_private;
 	struct actiondfs_sb_info *sbi;
 	struct inode *root_inode;
 	int err;
@@ -2275,7 +2287,7 @@ static int actiondfs_fill_super(struct super_block *sb, void *data, int silent)
 		goto fail;
 	}
 
-	err = actiondfs_parse_options(sbi, data);
+	err = actiondfs_parse_options(sbi, ctx ? ctx->options : NULL);
 	if (err)
 		goto fail;
 	err = kern_path(sbi->cas_root, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &sbi->cas_path);
@@ -2305,18 +2317,62 @@ fail:
 	return err;
 }
 
-static struct dentry *actiondfs_mount(struct file_system_type *fs_type,
-				      int flags,
-				      const char *dev_name,
-				      void *data)
+static int actiondfs_get_tree(struct fs_context *fc)
 {
-	return mount_nodev(fs_type, flags | SB_RDONLY, data, actiondfs_fill_super);
+	fc->sb_flags |= SB_RDONLY;
+	return get_tree_nodev(fc, actiondfs_fill_super);
+}
+
+static int actiondfs_parse_monolithic(struct fs_context *fc, void *data)
+{
+	struct actiondfs_mount_context *ctx = fc->fs_private;
+	char *options;
+
+	if (!ctx || !data)
+		return -EINVAL;
+
+	options = kstrdup(data, GFP_KERNEL);
+	if (!options)
+		return -ENOMEM;
+
+	kfree(ctx->options);
+	ctx->options = options;
+	return 0;
+}
+
+static void actiondfs_free_context(struct fs_context *fc)
+{
+	struct actiondfs_mount_context *ctx = fc->fs_private;
+
+	if (!ctx)
+		return;
+	kfree(ctx->options);
+	kfree(ctx);
+}
+
+static const struct fs_context_operations actiondfs_context_ops = {
+	.free = actiondfs_free_context,
+	.parse_monolithic = actiondfs_parse_monolithic,
+	.get_tree = actiondfs_get_tree,
+};
+
+static int actiondfs_init_fs_context(struct fs_context *fc)
+{
+	struct actiondfs_mount_context *ctx;
+
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+
+	fc->fs_private = ctx;
+	fc->ops = &actiondfs_context_ops;
+	return 0;
 }
 
 static struct file_system_type actiondfs_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "actiondfs",
-	.mount = actiondfs_mount,
+	.init_fs_context = actiondfs_init_fs_context,
 	.kill_sb = kill_anon_super,
 };
 
