@@ -1,9 +1,5 @@
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary", "zig_test")
 
-exports_files([
-    "build_linux_kernel.sh",
-])
-
 zig_binary(
     name = "initramfs_newc",
     linkopts = ["-lc"],

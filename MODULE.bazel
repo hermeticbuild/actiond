@@ -9,13 +9,23 @@ bazel_dep(name = "rules_cc", version = "0.2.18")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "llvm", version = "0.8.1")
+bazel_dep(name = "linux.bzl", version = "0.0.0")
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
+
+archive_override(
+    module_name = "linux.bzl",
+    integrity = "sha256-B6hOyy5HBzGtsPpQm1KxHIw5nw7TvNKm3+xIG7cg2LI=",
+    strip_prefix = "linux.bzl-369d05e04863f1bd68a0a1aac999b14277924353",
+    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/369d05e04863f1bd68a0a1aac999b14277924353.tar.gz"],
+)
+
 single_version_override(
     module_name = "llvm",
     patch_strip = 1,
     patches = ["//third_party/patches:llvm_musl_root_package_copy.patch"],
     version = "0.8.1",
 )
+
 single_version_override(
     module_name = "zstd",
     patch_strip = 1,
@@ -68,22 +78,39 @@ llvm_project.configure(
 )
 use_repo(llvm_project, "llvm-project")
 
-http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-http_archive(
-    name = "linux_kernel_src",
-    build_file_content = """
-exports_files(["Makefile"])
-
-filegroup(
-    name = "all",
-    srcs = glob(["**"]),
-    visibility = ["//visibility:public"],
-)
-""",
-    sha256 = "558c6bbab749492b34f99827fe807b0039a744693c21d3a7e03b3a48edaab96a",
+linux_kernel = use_extension("@linux.bzl//:linux.bzl", "linux_kernel")
+linux_kernel.archive(
+    name = "linux_6_18_2",
+    integrity = "sha256-VYxrurdJSSs0+Zgn/oB7ADmnRGk8IdOn4Ds6SO2quWo=",
     strip_prefix = "linux-6.18.2",
     urls = ["https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.2.tar.xz"],
+)
+linux_kernel.extra_source(
+    name = "actiondfs",
+    srcs = ["//kernel/actiondfs:srcs"],
+    kbuild = "//kernel/actiondfs:Makefile",
+    kconfig = "//kernel/actiondfs:Kconfig",
+    source_dir = "fs/actiondfs",
+)
+linux_kernel.kconfig(
+    name = "actiond_vm_kconfig",
+    config = "//vm:linux.config",
+)
+linux_kernel.compact(
+    name = "actiond_vm_compact",
+    config = "//vm:linux.config",
+    config_mode = "allnoconfig",
+    config_name = "aarch64",
+    extra_sources = ["actiondfs"],
+    kernel_name = "linux_kernel",
+    kernel_package = "vm",
+    source_repo = "linux_6_18_2",
+)
+use_repo(
+    linux_kernel,
+    "actiond_vm_compact",
+    "actiond_vm_kconfig",
+    "linux_6_18_2",
 )
 
 glibc_deb_runtime = use_repo_rule("//runtimes:glibc_runtime_repo.bzl", "glibc_deb_runtime")

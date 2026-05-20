@@ -22,6 +22,14 @@ build_mode_flags=(
   --strip=always
   --stripopt=--strip-all
 )
+bazel_build_flags=()
+bazel_query_flags=()
+if [[ -n "${ACTIOND_BAZEL_BUILD_FLAGS:-}" ]]; then
+  read -r -a bazel_build_flags <<<"${ACTIOND_BAZEL_BUILD_FLAGS}"
+fi
+if [[ -n "${ACTIOND_BAZEL_QUERY_FLAGS:-}" ]]; then
+  read -r -a bazel_query_flags <<<"${ACTIOND_BAZEL_QUERY_FLAGS}"
+fi
 
 server_pid=""
 server_log=""
@@ -62,15 +70,36 @@ wait_for_port() {
   done
 }
 
+wait_for_guest_ready() {
+  local stats_path="$1"
+  local timeout="${2:-120}"
+  local start
+  start="$(date +%s)"
+  while true; do
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      echo "darwin-actiond exited before the guest became ready" >&2
+      return 1
+    fi
+    if [[ -s "${stats_path}" ]]; then
+      return 0
+    fi
+    if (( "$(date +%s)" - start >= timeout )); then
+      echo "timed out waiting for guest actiond readiness; stats path: ${stats_path}" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
 bazel_output() {
   local label="$1"
-  (cd "${repo_root}" && bazel cquery --output=files "${label}") | tail -n 1
+  (cd "${repo_root}" && bazel cquery "${bazel_query_flags[@]}" --output=files "${label}") | tail -n 1
 }
 
 build_vm_artifacts() {
   (
     cd "${repo_root}"
-    bazel build \
+    bazel build "${bazel_build_flags[@]}" \
       //cmd/darwin_actiond:darwin-actiond-signed \
       //vm:linux_kernel_zst \
       //vm:initramfs \
@@ -112,6 +141,7 @@ run_smoke() {
   server_pid="$!"
 
   wait_for_port 90
+  wait_for_guest_ready "${output_root}/actiondfs_stats.txt" 120
 
   if ! ACTIOND_LLVM_SMOKE_EXECUTOR="grpc://${endpoint}" \
     ACTIOND_LLVM_SMOKE_CACHE="grpc://${endpoint}" \

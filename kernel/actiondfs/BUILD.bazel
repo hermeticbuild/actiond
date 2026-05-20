@@ -1,4 +1,8 @@
-exports_files(["actiondfs.c"])
+exports_files([
+    "Kconfig",
+    "Makefile",
+    "actiondfs.c",
+])
 
 filegroup(
     name = "srcs",

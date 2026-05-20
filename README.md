@@ -36,17 +36,13 @@ bazel build //cmd/linux_actiond:linux-actiond-standalone-x86_64
 bazel build //vm:linux_kernel_zst //vm:initramfs //runtimes:runtimes_squashfs
 ```
 
-On macOS, kernel builds run Kbuild in Docker and always reuse Docker named
-volumes for the localized kernel source and `O=` directory:
+The VM kernel is built by `linux.bzl` from the Linux archive declared in
+`MODULE.bazel`. The repository currently uses a `local_path_override` for
+`linux.bzl` until the needed ruleset changes are published.
 
 ```bash
-ACTIOND_KERNEL_DOCKER_CONTEXT=colima bazel build //vm:linux_kernel_zst
+bazel build //vm:linux_kernel_zst
 ```
-
-The first run is still a full kernel build. Later actiondfs-only edits should
-reuse Kbuild state without changing Bazel action environment. If the cache needs
-to be reset, remove the printed `actiond-kernel-src-*` and
-`actiond-kernel-out-*` Docker volumes.
 
 For optimized artifacts:
 
@@ -117,7 +113,7 @@ tools/docker/run_linux_e2e.sh
 VM e2e on macOS:
 
 ```bash
-ACTIOND_KERNEL_DOCKER_CONTEXT=colima tools/e2e.sh vm
+tools/e2e.sh vm
 ```
 
 Heavier LLVM smoke against an already-running VM worker:
@@ -135,7 +131,7 @@ Standalone artifact e2e:
 
 ```bash
 ACTIOND_E2E_STANDALONE=1 tools/docker/run_linux_e2e.sh
-ACTIOND_KERNEL_DOCKER_CONTEXT=colima ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
+ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
 ```
 
 The `test/` directory is a separate Bazel workspace used as a stress harness.

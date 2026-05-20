@@ -343,29 +343,17 @@ Bazel owns the full build:
 
 - `rules_zig` builds all Zig binaries.
 - `@llvm` provides C/C++/Objective-C tooling and the macOS SDK framework setup.
-- `http_archive` pulls Linux kernel sources.
+- `linux.bzl` downloads Linux kernel sources and builds the VM kernel from a
+  compact Bazel-native object graph.
 - `repository_ctx.download_and_extract(..., type = ".deb")` extracts glibc
   runtime packages.
-- a Docker-backed Kbuild genrule builds the arm64 kernel on macOS.
-
-On macOS, kernel builds use Docker because the kernel build is Linux-oriented.
-The script searches for a working Docker context and can be pointed at one:
 
 ```bash
-ACTIOND_KERNEL_DOCKER_CONTEXT=colima bazel build //vm:linux_kernel_zst
+bazel build //vm:linux_kernel_zst
 ```
 
-On macOS the Docker-backed kernel build always uses a persistent Kbuild cache:
-
-```bash
-ACTIOND_KERNEL_DOCKER_CONTEXT=colima bazel build //vm:linux_kernel_zst
-```
-
-On macOS this uses Docker named volumes for the localized Linux source tree and
-`O=` build directory, so the first build is still a full kernel build but later
-actiondfs-only edits should reuse the previous Kbuild state without changing
-Bazel action environment. If the cache needs to be reset, remove the printed
-`actiond-kernel-src-*` and `actiond-kernel-out-*` Docker volumes.
+`MODULE.bazel` currently uses a `local_path_override` for `/Users/dzbarsky/linux.bzl`
+until the ruleset changes needed by actiond are published.
 
 ## Testing Strategy
 
@@ -385,10 +373,10 @@ Useful commands:
 bazel build //...
 bazel test //...
 tools/docker/run_linux_e2e.sh
-ACTIOND_KERNEL_DOCKER_CONTEXT=colima tools/e2e.sh vm
+tools/e2e.sh vm
 e2e/llvm_tblgen_smoke.sh
 ACTIOND_E2E_STANDALONE=1 tools/docker/run_linux_e2e.sh
-ACTIOND_KERNEL_DOCKER_CONTEXT=colima ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
+ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
 ```
 
 The LLVM smoke uses the bootstrapped workspace's

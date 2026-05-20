@@ -2,6 +2,7 @@ load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 MACOS_SDK = "@macos_sdk//sysroot:sysroot"
+
 MACOS_SDK_LINKOPTS = [
     "-F$(execpath %s)/System/Library/Frameworks" % MACOS_SDK,
     "-L$(execpath %s)/usr/lib" % MACOS_SDK,
@@ -49,7 +50,9 @@ cp "$(location :darwin-actiond-bin)" "$@"
 chmod +x "$@"
 /usr/bin/codesign --force --sign - --entitlements "$(location darwin-actiond.entitlements)" "$@"
 """,
+    exec_compatible_with = ["@platforms//os:macos"],
     executable = True,
+    tags = ["local"],
     target_compatible_with = ["@platforms//os:macos"],
     visibility = ["//visibility:public"],
 )
@@ -97,7 +100,11 @@ printf '%s\n' 'void actiond_standalone_payload_anchor(void) {}' > "$${anchor_c}"
   -sectcreate __ACTIOND __runtimes "$(location //runtimes:runtimes_squashfs_aarch64)" \
   -o "$@"
 """,
-    tags = ["manual"],
+    exec_compatible_with = ["@platforms//os:macos"],
+    tags = [
+        "local",
+        "manual",
+    ],
     target_compatible_with = ["@platforms//os:macos"],
 )
 
@@ -114,8 +121,12 @@ cp "$(location :darwin-actiond-standalone-bin)" "$@"
 chmod +x "$@"
 /usr/bin/codesign --force --sign - --entitlements "$(location darwin-actiond.entitlements)" "$@"
 """,
+    exec_compatible_with = ["@platforms//os:macos"],
     executable = True,
-    tags = ["manual"],
+    tags = [
+        "local",
+        "manual",
+    ],
     target_compatible_with = ["@platforms//os:macos"],
     visibility = ["//visibility:public"],
 )

@@ -1,3 +1,5 @@
+load("@linux.bzl//:linux.bzl", "linux")
+
 genrule(
     name = "initramfs",
     srcs = ["//cmd/linux_actiond_guest:linux-actiond-guest-aarch64"],
@@ -7,24 +9,19 @@ genrule(
     visibility = ["//visibility:public"],
 )
 
-genrule(
+linux(
     name = "linux_kernel",
-    srcs = [
-        "//kernel/actiondfs:srcs",
-        "//kernel/actiondfs:actiondfs.c",
-        "linux.config",
-        "//tools:build_linux_kernel.sh",
-        "//tools/docker:kernel.Dockerfile",
-        "@linux_kernel_src//:Makefile",
-        "@linux_kernel_src//:all",
-    ],
-    outs = ["Image"],
-    cmd = "$(location //tools:build_linux_kernel.sh) $@ $(location linux.config) $(execpath @linux_kernel_src//:Makefile) $(location //tools/docker:kernel.Dockerfile) $(location //kernel/actiondfs:actiondfs.c)",
-    tags = [
-        "local",
-        "manual",
-        "no-sandbox",
-    ],
+    compact_repos = {
+        "aarch64": "@actiond_vm_compact",
+    },
+    config = "@actiond_vm_kconfig//:kconfig",
+    config_mode = "allnoconfig",
+    extra_kconfigs = {
+        "//kernel/actiondfs:Kconfig": "fs/actiondfs",
+    },
+    extra_srcs = ["//kernel/actiondfs:srcs"],
+    image_format = "Image",
+    source_repo = "@linux_6_18_2",
     visibility = ["//visibility:public"],
 )
 
@@ -33,11 +30,6 @@ genrule(
     srcs = [":linux_kernel"],
     outs = ["Image.zst"],
     cmd = "$(execpath //tools:zstd_file) $(location :linux_kernel) $@",
-    tags = [
-        "local",
-        "manual",
-        "no-sandbox",
-    ],
     tools = ["//tools:zstd_file"],
     visibility = ["//visibility:public"],
 )
@@ -49,6 +41,5 @@ filegroup(
         ":linux_kernel_zst",
         "//runtimes:runtimes_squashfs",
     ],
-    tags = ["manual"],
     visibility = ["//visibility:public"],
 )
