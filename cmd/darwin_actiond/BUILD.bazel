@@ -54,46 +54,26 @@ zig_binary(
     strip_debug_symbols = True,
     target_compatible_with = ["@platforms//os:macos"],
     deps = [
-        ":darwin-standalone-payload-lib",
+        ":darwin-standalone-payload-sections",
         ":vz_bridge",
         "//src:actiond",
         "@zstd",
     ],
 )
 
-genrule(
-    name = "darwin-standalone-payload",
-    srcs = [
+cc_library(
+    name = "darwin-standalone-payload-sections",
+    additional_linker_inputs = [
         "//runtimes:runtimes_squashfs_aarch64",
         "//vm:initramfs",
         "//vm:linux_kernel_zst",
     ],
-    outs = ["darwin-standalone-payload.o"],
-    cmd = """
-set -euo pipefail
-anchor_c="$(@D)/darwin-standalone-payload-anchor.c"
-anchor_o="$(@D)/darwin-standalone-payload-anchor.o"
-printf '%s\n' 'void actiond_standalone_payload_anchor(void) {}' > "$${anchor_c}"
-"$(execpath @llvm//tools:clang)" -c -target arm64-apple-macos14.0 "$${anchor_c}" -o "$${anchor_o}"
-"$(execpath @llvm//tools:llvm-objcopy)" \
-  --add-section __ACTIOND,__kernel="$(location //vm:linux_kernel_zst)" \
-  --add-section __ACTIOND,__initramfs="$(location //vm:initramfs)" \
-  --add-section __ACTIOND,__runtimes="$(location //runtimes:runtimes_squashfs_aarch64)" \
-  "$${anchor_o}" "$@"
-""",
-    tags = ["manual"],
-    target_compatible_with = ["@platforms//os:macos"],
-    tools = [
-        "@llvm//tools:clang",
-        "@llvm//tools:llvm-objcopy",
+    linkopts = [
+        "-Wl,-sectcreate,__ACTIOND,__kernel,$(location //vm:linux_kernel_zst)",
+        "-Wl,-sectcreate,__ACTIOND,__initramfs,$(location //vm:initramfs)",
+        "-Wl,-sectcreate,__ACTIOND,__runtimes,$(location //runtimes:runtimes_squashfs_aarch64)",
     ],
-)
-
-cc_library(
-    name = "darwin-standalone-payload-lib",
-    srcs = [":darwin-standalone-payload"],
     target_compatible_with = ["@platforms//os:macos"],
-    alwayslink = True,
 )
 
 genrule(
