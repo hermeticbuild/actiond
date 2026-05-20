@@ -97,7 +97,7 @@ wait_for_guest_ready() {
 server_output() {
   local label="$1"
   local path
-  path="$(cd "${repo_root}" && bazel cquery "${build_mode_flags[@]}" ${bazel_query_flags[@]+"${bazel_query_flags[@]}"} --output=files "${label}" | tail -n 1)"
+  path="$(cd "${repo_root}" && bazel cquery "${build_mode_flags[@]}" --config=remote ${bazel_query_flags[@]+"${bazel_query_flags[@]}"} --output=files "${label}" | tail -n 1)"
   if [[ "${path}" != /* ]]; then
     path="${repo_root}/${path}"
   fi
@@ -107,7 +107,7 @@ server_output() {
 build_server() {
   (
     cd "${repo_root}"
-    bazel build "${build_mode_flags[@]}" ${bazel_build_flags[@]+"${bazel_build_flags[@]}"} \
+    bazel build "${build_mode_flags[@]}" --config=remote ${bazel_build_flags[@]+"${bazel_build_flags[@]}"} \
       "${server_target}"
   )
 }
@@ -150,6 +150,8 @@ run_smoke() {
     ACTIOND_LLVM_SMOKE_SERVER_LOG="${server_log}" \
     ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG="${measured_server_log}" \
     ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG="${remote_grpc_log}" \
+    ACTIOND_LLVM_SMOKE_SAMPLE_PID="${server_pid}" \
+    ACTIOND_LLVM_SMOKE_SAMPLE_PATH="${ACTIOND_LLVM_SMOKE_SAMPLE_PATH:-${output_root}/darwin-actiond-vm.sample.txt}" \
     ACTIOND_LLVM_SMOKE_SKIP_CLEAN=0 \
     "${repo_root}/e2e/llvm_tblgen_smoke.sh" >"${build_log}" 2>&1; then
     echo "LLVM smoke failed; build log: ${build_log}" >&2

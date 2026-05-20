@@ -14,11 +14,22 @@ jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
 server_log="${ACTIOND_LLVM_SMOKE_SERVER_LOG:-}"
 measured_server_log="${ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG:-}"
 remote_grpc_log="${ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG:-}"
+sample_pid=""
 build_mode_flags=(
   -c opt
   --strip=always
   --stripopt=--strip-all
 )
+
+cleanup_sample() {
+  if [[ -n "${sample_pid}" ]]; then
+    kill "${sample_pid}" >/dev/null 2>&1 || true
+    wait "${sample_pid}" >/dev/null 2>&1 || true
+    sample_pid=""
+  fi
+}
+
+trap cleanup_sample EXIT
 
 cd "${workspace}"
 
@@ -54,6 +65,30 @@ build_remote() {
     --jobs="${jobs}"
 }
 
+start_measured_sample() {
+  local seconds="${ACTIOND_LLVM_SMOKE_SAMPLE_SECONDS:-0}"
+  if [[ "${seconds}" == "0" || -z "${seconds}" ]]; then
+    return 0
+  fi
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "darwin-actiond sampling requested but sample(1) is only available on macOS" >&2
+    return 0
+  fi
+  if ! command -v sample >/dev/null 2>&1; then
+    echo "darwin-actiond sampling requested but sample(1) was not found" >&2
+    return 0
+  fi
+  if [[ -z "${ACTIOND_LLVM_SMOKE_SAMPLE_PID:-}" ]]; then
+    echo "darwin-actiond sampling requested but ACTIOND_LLVM_SMOKE_SAMPLE_PID is unset" >&2
+    return 0
+  fi
+
+  local sample_path="${ACTIOND_LLVM_SMOKE_SAMPLE_PATH:-darwin-actiond-vm.sample.txt}"
+  sample "${ACTIOND_LLVM_SMOKE_SAMPLE_PID}" "${seconds}" -file "${sample_path}" >"${sample_path}.stderr" 2>&1 &
+  sample_pid="$!"
+  echo "darwin-actiond measured-build sample: ${sample_path}" >&2
+}
+
 if [[ "${ACTIOND_LLVM_SMOKE_SKIP_CLEAN:-0}" != "1" ]]; then
   bazel clean --expunge
 fi
@@ -69,11 +104,13 @@ if [[ -n "${server_log}" && -n "${measured_server_log}" && -f "${server_log}" ]]
 fi
 
 echo "LLVM smoke measured build: ${target}" >&2
+start_measured_sample
 if [[ -n "${warmup_target}" ]]; then
   build_remote "${target}" 1 toplevel
 else
   build_remote "${target}" 0 toplevel
 fi
+cleanup_sample
 
 if [[ -n "${server_log}" && -n "${measured_server_log}" && -f "${server_log}" ]]; then
   tail -c "+$((measured_offset + 1))" "${server_log}" >"${measured_server_log}"
