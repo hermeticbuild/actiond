@@ -14,9 +14,9 @@ bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
 
 archive_override(
     module_name = "linux.bzl",
-    integrity = "sha256-B6hOyy5HBzGtsPpQm1KxHIw5nw7TvNKm3+xIG7cg2LI=",
-    strip_prefix = "linux.bzl-369d05e04863f1bd68a0a1aac999b14277924353",
-    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/369d05e04863f1bd68a0a1aac999b14277924353.tar.gz"],
+    integrity = "sha256-PTgVoy6PPI+VcjREj2gop7587mPbLPVgdJgzutg/aBA=",
+    strip_prefix = "linux.bzl-a8bd938d87f0954f9834c74a0fb48cae511f14d9",
+    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/a8bd938d87f0954f9834c74a0fb48cae511f14d9.tar.gz"],
 )
 
 single_version_override(

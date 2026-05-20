@@ -6,6 +6,7 @@ workspace="${ACTIOND_LLVM_SMOKE_WORKSPACE:-${repo_root}}"
 target="${ACTIOND_LLVM_SMOKE_TARGET:-@llvm-project//llvm:llvm-tblgen}"
 warmup_target="${ACTIOND_LLVM_SMOKE_WARMUP_TARGET-//e2e:llvm_exec_warmup}"
 target_platform="${ACTIOND_LLVM_SMOKE_TARGET_PLATFORM:-@llvm//platforms:linux_arm64_musl}"
+# LLVM host tools are built for the VM, not for the macOS launcher.
 host_platform="${ACTIOND_LLVM_SMOKE_HOST_PLATFORM:-${target_platform}}"
 executor="${ACTIOND_LLVM_SMOKE_EXECUTOR:-grpc://127.0.0.1:8998}"
 cache="${ACTIOND_LLVM_SMOKE_CACHE:-${executor}}"
@@ -25,27 +26,26 @@ build_remote() {
   local label="$1"
   local accept_cached="${2:-0}"
   local download_outputs="${3:-toplevel}"
-  local cache_flags=()
-  local grpc_log_flags=()
+  local bazel_args=(
+    build "${label}"
+    "${build_mode_flags[@]}"
+    --platforms="${target_platform}"
+    --host_platform="${host_platform}"
+    --extra_execution_platforms=//e2e:actiond_linux_arm64_musl_exec
+    --remote_executor="${executor}"
+    --remote_cache="${cache}"
+    --experimental_remote_downloader=
+    --experimental_remote_downloader_local_fallback=true
+    --noremote_cache_compression
+    --remote_download_outputs="${download_outputs}"
+  )
   if [[ "${accept_cached}" != "1" ]]; then
-    cache_flags+=(--noremote_accept_cached)
+    bazel_args+=(--noremote_accept_cached)
   fi
   if [[ -n "${remote_grpc_log}" ]]; then
-    grpc_log_flags+=(--remote_grpc_log="${remote_grpc_log}")
+    bazel_args+=(--remote_grpc_log="${remote_grpc_log}")
   fi
-  bazel build "${label}" \
-    "${build_mode_flags[@]}" \
-    --platforms="${target_platform}" \
-    --host_platform="${host_platform}" \
-    --extra_execution_platforms=//e2e:actiond_linux_arm64_musl_exec \
-    --remote_executor="${executor}" \
-    --remote_cache="${cache}" \
-    --experimental_remote_downloader= \
-    --experimental_remote_downloader_local_fallback=true \
-    --noremote_cache_compression \
-    --remote_download_outputs="${download_outputs}" \
-    "${cache_flags[@]}" \
-    "${grpc_log_flags[@]}" \
+  bazel "${bazel_args[@]}" \
     --remote_local_fallback=false \
     --remote_upload_local_results=false \
     --disk_cache= \

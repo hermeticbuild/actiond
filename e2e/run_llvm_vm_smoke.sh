@@ -6,6 +6,8 @@ workspace="${ACTIOND_LLVM_SMOKE_WORKSPACE:-${repo_root}}"
 smoke_target="${ACTIOND_LLVM_SMOKE_TARGET:-@llvm-project//llvm:llvm-tblgen}"
 warmup_target="${ACTIOND_LLVM_SMOKE_WARMUP_TARGET-//e2e:llvm_exec_warmup}"
 target_platform="${ACTIOND_LLVM_SMOKE_TARGET_PLATFORM:-@llvm//platforms:linux_arm64_musl}"
+# LLVM builds host-configured tools that execute remotely in the VM.
+host_platform="${ACTIOND_LLVM_SMOKE_HOST_PLATFORM:-${target_platform}}"
 host="${ACTIOND_LLVM_VM_SMOKE_HOST:-127.0.0.1}"
 port="${ACTIOND_LLVM_VM_SMOKE_PORT:-8998}"
 endpoint="${host}:${port}"
@@ -17,6 +19,7 @@ cas_image="${ACTIOND_VM_CAS_IMAGE:-${output_root}/server/cas.ext4}"
 cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-32768}"
 run_vm="${ACTIOND_LLVM_SMOKE_VM:-1}"
 run_mac_host="${ACTIOND_LLVM_SMOKE_MAC_HOST:-1}"
+server_target="${ACTIOND_LLVM_SMOKE_SERVER_TARGET:-//cmd/darwin_actiond:darwin-actiond-standalone_pkg}"
 build_mode_flags=(
   -c opt
   --strip=always
@@ -91,19 +94,21 @@ wait_for_guest_ready() {
   done
 }
 
-bazel_output() {
+server_output() {
   local label="$1"
-  (cd "${repo_root}" && bazel cquery "${bazel_query_flags[@]}" --output=files "${label}") | tail -n 1
+  local path
+  path="$(cd "${repo_root}" && bazel cquery "${build_mode_flags[@]}" ${bazel_query_flags[@]+"${bazel_query_flags[@]}"} --output=files "${label}" | tail -n 1)"
+  if [[ "${path}" != /* ]]; then
+    path="${repo_root}/${path}"
+  fi
+  printf '%s\n' "${path}"
 }
 
-build_vm_artifacts() {
+build_server() {
   (
     cd "${repo_root}"
-    bazel build "${bazel_build_flags[@]}" \
-      //cmd/darwin_actiond:darwin-actiond-signed \
-      //vm:linux_kernel_zst \
-      //vm:initramfs \
-      //runtimes:runtimes_squashfs
+    bazel build "${build_mode_flags[@]}" ${bazel_build_flags[@]+"${bazel_build_flags[@]}"} \
+      "${server_target}"
   )
 }
 
@@ -113,17 +118,11 @@ run_smoke() {
   local remote_grpc_log="${ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG:-}"
   local timings="${output_root}/timings.md"
   local server
-  local kernel
-  local initramfs
-  local runtimes
   local elapsed
 
   mkdir -p "${output_root}"
   "${repo_root}/tools/create_ext4_image.sh" "${cas_image}" "${cas_image_size_mib}"
-  server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
-  kernel="$(bazel_output //vm:linux_kernel_zst)"
-  initramfs="$(bazel_output //vm:initramfs)"
-  runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
+  server="$(server_output "${server_target}")"
   server_log="${output_root}/darwin-actiond-vm.log"
 
   "${server}" serve-vm \
@@ -133,9 +132,6 @@ run_smoke() {
     --cas-image-size-mib="${cas_image_size_mib}" \
     --memory-mib="${memory_mib}" \
     --cpus="${cpus}" \
-    --kernel="${kernel}" \
-    --initramfs="${initramfs}" \
-    --runtime-image="${runtimes}" \
     --actiondfs-stats-path="${output_root}/actiondfs_stats.txt" \
     >"${server_log}" 2>&1 &
   server_pid="$!"
@@ -150,7 +146,7 @@ run_smoke() {
     ACTIOND_LLVM_SMOKE_TARGET="${smoke_target}" \
     ACTIOND_LLVM_SMOKE_WARMUP_TARGET="${warmup_target}" \
     ACTIOND_LLVM_SMOKE_TARGET_PLATFORM="${target_platform}" \
-    ACTIOND_LLVM_SMOKE_HOST_PLATFORM="${target_platform}" \
+    ACTIOND_LLVM_SMOKE_HOST_PLATFORM="${host_platform}" \
     ACTIOND_LLVM_SMOKE_SERVER_LOG="${server_log}" \
     ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG="${measured_server_log}" \
     ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG="${remote_grpc_log}" \
@@ -267,7 +263,7 @@ fi
 mkdir -p "${output_root}"
 echo "smoke output: ${output_root}" >&2
 if [[ "${run_vm}" == "1" ]]; then
-  build_vm_artifacts
+  build_server
   run_smoke
 fi
 if [[ "${run_mac_host}" == "1" ]]; then
