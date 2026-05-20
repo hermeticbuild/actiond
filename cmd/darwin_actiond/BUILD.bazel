@@ -74,19 +74,19 @@ set -euo pipefail
 anchor_c="$(@D)/darwin-standalone-payload-anchor.c"
 anchor_o="$(@D)/darwin-standalone-payload-anchor.o"
 printf '%s\n' 'void actiond_standalone_payload_anchor(void) {}' > "$${anchor_c}"
-/usr/bin/clang -c -arch arm64 "$${anchor_c}" -o "$${anchor_o}"
-/usr/bin/ld -r -arch arm64 "$${anchor_o}" \
-  -sectcreate __ACTIOND __kernel "$(location //vm:linux_kernel_zst)" \
-  -sectcreate __ACTIOND __initramfs "$(location //vm:initramfs)" \
-  -sectcreate __ACTIOND __runtimes "$(location //runtimes:runtimes_squashfs_aarch64)" \
-  -o "$@"
+"$(execpath @llvm//tools:clang)" -c -target arm64-apple-macos14.0 "$${anchor_c}" -o "$${anchor_o}"
+"$(execpath @llvm//tools:llvm-objcopy)" \
+  --add-section __ACTIOND,__kernel="$(location //vm:linux_kernel_zst)" \
+  --add-section __ACTIOND,__initramfs="$(location //vm:initramfs)" \
+  --add-section __ACTIOND,__runtimes="$(location //runtimes:runtimes_squashfs_aarch64)" \
+  "$${anchor_o}" "$@"
 """,
-    exec_compatible_with = ["@platforms//os:macos"],
-    tags = [
-        "local",
-        "manual",
-    ],
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:macos"],
+    tools = [
+        "@llvm//tools:clang",
+        "@llvm//tools:llvm-objcopy",
+    ],
 )
 
 cc_library(
