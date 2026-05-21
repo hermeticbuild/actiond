@@ -31,10 +31,16 @@ Important targets:
 
 ```bash
 bazel build //cmd/darwin_actiond:darwin-actiond-standalone
-bazel build //cmd/linux_actiond:linux-actiond-standalone-aarch64
-bazel build //cmd/linux_actiond:linux-actiond-standalone-x86_64
+bazel build //cmd/linux_actiond:linux-actiond-standalone \
+  --platforms=//platforms:linux_aarch64
+bazel build //cmd/linux_actiond:linux-actiond-standalone \
+  --platforms=//platforms:linux_x86_64
 bazel build //vm:linux_kernel_zst //vm:initramfs //runtimes:runtimes_squashfs
 ```
+
+The Linux standalone target follows Bazel's target platform. Its embedded
+runtime image comes from `//runtimes:runtimes_squashfs`, which selects the
+matching runtime SquashFS for the target CPU.
 
 The VM kernel is built by `linux.bzl` from the Linux archive declared in
 `MODULE.bazel`. The repository currently uses a `local_path_override` for
@@ -47,10 +53,11 @@ bazel build //vm:linux_kernel_zst
 For optimized artifacts:
 
 ```bash
-bazel build -c opt \
-  //cmd/darwin_actiond:darwin-actiond-standalone_pkg \
-  //cmd/linux_actiond:linux-actiond-standalone-aarch64_pkg \
-  //cmd/linux_actiond:linux-actiond-standalone-x86_64_pkg
+bazel build -c opt //cmd/darwin_actiond:darwin-actiond-standalone_pkg
+bazel build -c opt //cmd/linux_actiond:linux-actiond-standalone_pkg \
+  --platforms=//platforms:linux_aarch64
+bazel build -c opt //cmd/linux_actiond:linux-actiond-standalone_pkg \
+  --platforms=//platforms:linux_x86_64
 ```
 
 ## Running
