@@ -43,17 +43,23 @@ The VM bundle is produced by Bazel:
 - `//vm:initramfs`: zstd-compressed initramfs cpio
 - `//runtimes:runtimes_squashfs`: zstd-compressed SquashFS runtime image
 
-The Darwin standalone binary embeds compressed payloads in Mach-O sections:
+Standalone binaries embed compressed payloads in native executable sections.
+
+The Darwin standalone binary uses Mach-O sections:
 
 - `__ACTIOND,__kernel`: `Image.zst`
 - `__ACTIOND,__initramfs`: `initramfs.cpio.zst`
 - `__ACTIOND,__runtimes`: `runtimes-aarch64.sqfs`
 
+The Linux standalone binary uses an ELF section:
+
+- `.actiond.runtimes`: runtime SquashFS
+
 At runtime, boot artifacts are extracted under the worker root. Zstd payloads
 are inflated to content-addressed files in `root/boot/` before
 Virtualization.framework is called. The runtime SquashFS remains compressed and
-is staged under the worker root and attached to the guest as a read-only virtio
-block device.
+is staged under the worker root. VM mode attaches it to the guest as a
+read-only virtio block device; direct Linux execution mounts it locally.
 
 ## VM Shape
 
