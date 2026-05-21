@@ -116,7 +116,8 @@ pub const Server = struct {
         if (std.mem.eql(u8, method, ac_update_action_result)) {
             const result_store = self.action_cache_store orelse return error.UnsupportedMethod;
             var reader = protobuf.Reader.init(payload);
-            const request = try reapi.UpdateActionResultRequest.decode(&reader);
+            var request = try reapi.UpdateActionResultRequest.decodeOwned(allocator, &reader);
+            defer request.deinit(allocator);
             const response = try action_cache_service.updateActionResult(io, allocator, result_store, request);
             return try encodeResponse(allocator, response);
         }
@@ -457,8 +458,12 @@ test "Server dispatches ActionCache update and get" {
 
     const action_digest = cas.Digest.fromBytes("action");
     const stdout_digest = cas.Digest.fromBytes("stdout");
+    const tree_digest = cas.Digest.fromBytes("tree");
+    const root_directory_digest = cas.Digest.fromBytes("root directory");
     var action_hash: [64]u8 = undefined;
     var stdout_hash: [64]u8 = undefined;
+    var tree_hash: [64]u8 = undefined;
+    var root_directory_hash: [64]u8 = undefined;
 
     const server: Server = .{
         .store = cas.Store.init(cas_dir),
@@ -470,6 +475,13 @@ test "Server dispatches ActionCache update and get" {
         .action_result = .{
             .exit_code = 2,
             .stdout_digest = stdout_digest.toReapi(&stdout_hash),
+            .output_directories = &.{
+                .{
+                    .path = "out/tree",
+                    .tree_digest = tree_digest.toReapi(&tree_hash),
+                    .root_directory_digest = root_directory_digest.toReapi(&root_directory_hash),
+                },
+            },
         },
     });
     defer std.testing.allocator.free(update_request);
@@ -496,9 +508,14 @@ test "Server dispatches ActionCache update and get" {
     defer std.testing.allocator.free(get_response_record);
 
     var reader = protobuf.Reader.init(try singlePayload(get_response_record));
-    const result = try reapi.ActionResult.decode(&reader);
+    var result = try reapi.ActionResult.decodeOwned(std.testing.allocator, &reader);
+    defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(i32, 2), result.exit_code);
     try std.testing.expect(result.stdout_digest.?.eql(stdout_digest.toReapi(&stdout_hash)));
+    try std.testing.expectEqual(@as(usize, 1), result.output_directories.len);
+    try std.testing.expectEqualStrings("out/tree", result.output_directories[0].path);
+    try std.testing.expect(result.output_directories[0].tree_digest.?.eql(tree_digest.toReapi(&tree_hash)));
+    try std.testing.expect(result.output_directories[0].root_directory_digest.?.eql(root_directory_digest.toReapi(&root_directory_hash)));
 }
 
 test "Server dispatches internal CAS blob cleanup" {

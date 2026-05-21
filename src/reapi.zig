@@ -1111,6 +1111,11 @@ pub const UpdateActionResultRequest = struct {
     action_digest: ?Digest = null,
     action_result: ?ActionResult = null,
 
+    pub fn deinit(self: *UpdateActionResultRequest, allocator: std.mem.Allocator) void {
+        if (self.action_result) |*result| result.deinit(allocator);
+        self.* = .{};
+    }
+
     pub fn encode(self: UpdateActionResultRequest, writer: *protobuf.Writer) !void {
         if (self.instance_name.len != 0) try writer.writeStringField(1, self.instance_name);
         if (self.action_digest) |digest| try writer.writeMessageField(2, digest);
@@ -1129,6 +1134,26 @@ pub const UpdateActionResultRequest = struct {
                 3 => {
                     var nested = try reader.readMessage();
                     out.action_result = try ActionResult.decode(&nested);
+                },
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+
+    pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !UpdateActionResultRequest {
+        var out: UpdateActionResultRequest = .{};
+        errdefer out.deinit(allocator);
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.instance_name = try reader.readString(),
+                2 => {
+                    var nested = try reader.readMessage();
+                    out.action_digest = try Digest.decode(&nested);
+                },
+                3 => {
+                    var nested = try reader.readMessage();
+                    out.action_result = try ActionResult.decodeOwned(allocator, &nested);
                 },
                 else => try reader.skipField(tag.wire_type),
             }
