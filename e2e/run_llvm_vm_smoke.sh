@@ -13,7 +13,12 @@ port="${ACTIOND_LLVM_VM_SMOKE_PORT:-8998}"
 endpoint="${host}:${port}"
 memory_mib="${ACTIOND_VM_MEMORY_MIB:-4096}"
 cpus="${ACTIOND_VM_CPUS:-8}"
-jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
+jobs="${ACTIOND_LLVM_SMOKE_JOBS-}"
+jobs_label="${jobs:-bazel default}"
+jobs_flags=()
+if [[ -n "${jobs}" ]]; then
+  jobs_flags=(--jobs="${jobs}")
+fi
 output_root="${ACTIOND_LLVM_VM_SMOKE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-llvm-vm-smoke.XXXXXX")}"
 cas_image="${ACTIOND_VM_CAS_IMAGE:-${output_root}/server/cas.ext4}"
 cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
@@ -162,7 +167,7 @@ run_smoke() {
     --mode "llvm-vm" \
     --command "e2e/run_llvm_vm_smoke.sh" \
     --bazel-elapsed "${elapsed:-unknown}" \
-    --workload "${smoke_target}, warmup=${warmup_target:-none}, jobs=${jobs}" \
+    --workload "${smoke_target}, warmup=${warmup_target:-none}, jobs=${jobs_label}" \
     --output "${timings}"
 
   cleanup_server 0
@@ -200,7 +205,7 @@ run_mac_host_smoke() {
         --noremote_accept_cached \
         --remote_upload_local_results=false \
         --disk_cache= \
-        --jobs="${jobs}"
+        "${jobs_flags[@]}"
     ) >"${warmup_log}" 2>&1; then
       echo "LLVM mac-host warmup failed; build log: ${warmup_log}" >&2
       tail -200 "${warmup_log}" >&2 || true
@@ -221,7 +226,7 @@ run_mac_host_smoke() {
       --noremote_accept_cached \
       --remote_upload_local_results=false \
       --disk_cache= \
-      --jobs="${jobs}"
+      "${jobs_flags[@]}"
   ) >"${build_log}" 2>&1; then
     echo "LLVM mac-host smoke failed; build log: ${build_log}" >&2
     tail -200 "${build_log}" >&2 || true
@@ -236,7 +241,7 @@ run_mac_host_smoke() {
 - Command: \`e2e/run_llvm_vm_smoke.sh\`
 - Warmup log: \`${warmup_log}\`
 - Source log: \`${build_log}\`
-- Workload: \`${smoke_target}\`, warmup=${warmup_target:-none}, jobs=${jobs}
+- Workload: \`${smoke_target}\`, warmup=${warmup_target:-none}, jobs=${jobs_label}
 - Target platform: \`${target_platform}\`
 - Host platform: default macOS host platform
 - Platform note: target actions compile for Linux musl; local exec/host tools remain macOS binaries so Bazel can run them locally.

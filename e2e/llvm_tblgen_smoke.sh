@@ -10,7 +10,11 @@ target_platform="${ACTIOND_LLVM_SMOKE_TARGET_PLATFORM:-@llvm//platforms:linux_ar
 host_platform="${ACTIOND_LLVM_SMOKE_HOST_PLATFORM:-${target_platform}}"
 executor="${ACTIOND_LLVM_SMOKE_EXECUTOR:-grpc://127.0.0.1:8998}"
 cache="${ACTIOND_LLVM_SMOKE_CACHE:-${executor}}"
-jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
+jobs="${ACTIOND_LLVM_SMOKE_JOBS-}"
+jobs_flags=()
+if [[ -n "${jobs}" ]]; then
+  jobs_flags=(--jobs="${jobs}")
+fi
 server_log="${ACTIOND_LLVM_SMOKE_SERVER_LOG:-}"
 measured_server_log="${ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG:-}"
 remote_grpc_log="${ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG:-}"
@@ -51,7 +55,7 @@ build_remote() {
     --disk_cache= \
     --spawn_strategy=remote \
     --genrule_strategy=remote \
-    --jobs="${jobs}"
+    "${jobs_flags[@]}"
 }
 
 if [[ "${ACTIOND_LLVM_SMOKE_SKIP_CLEAN:-0}" != "1" ]]; then
