@@ -100,7 +100,7 @@ prepare_server() {
   mkdir -p "$(dirname "${server_script_path}")"
   (
     cd "${repo_root}"
-    bazel run \
+    bazel run --config=remote \
       --script_path="${server_script_path}" \
       "${build_mode_flags[@]}" \
       ${bazel_build_flags[@]+"${bazel_build_flags[@]}"} \
