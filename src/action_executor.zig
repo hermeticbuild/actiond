@@ -1281,17 +1281,15 @@ fn collectOutputFiles(
     }
 
     if (command.output_paths.len != 0) {
-        const include_root_directory_digest = shouldIncludeRootDirectoryDigest(command);
         for (command.output_paths) |path| {
-            try collectOutputPath(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, &output_files, &output_directories);
+            try collectOutputPath(io, allocator, store, staged_index, work_root, path, &output_files, &output_directories);
         }
     } else {
         for (command.output_files) |path| {
             try collectOutputFile(io, allocator, store, staged_index, work_root, path, &output_files);
         }
-        const include_root_directory_digest = shouldIncludeRootDirectoryDigest(command);
         for (command.output_directories) |path| {
-            try collectOutputDirectory(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, &output_directories);
+            try collectOutputDirectory(io, allocator, store, staged_index, work_root, path, &output_directories);
         }
     }
 
@@ -1306,7 +1304,6 @@ fn collectOutputPath(
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
-    include_root_directory_digest: bool,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
@@ -1317,7 +1314,7 @@ fn collectOutputPath(
     };
     switch (stat.kind) {
         .file => try collectOutputFileWithStat(io, allocator, store, staged_index, work_root, path, stat, output_files),
-        .directory => try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, output_directories),
+        .directory => try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories),
         else => return error.FailedPrecondition,
     }
 }
@@ -1410,7 +1407,6 @@ fn collectOutputDirectory(
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
-    include_root_directory_digest: bool,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
     try execroot.validatePath(path);
@@ -1419,7 +1415,7 @@ fn collectOutputDirectory(
         else => return err,
     };
     if (stat.kind != .directory) return error.FailedPrecondition;
-    try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, include_root_directory_digest, output_directories);
+    try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories);
 }
 
 fn collectOutputDirectoryWithStat(
@@ -1429,7 +1425,6 @@ fn collectOutputDirectoryWithStat(
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
     path: []const u8,
-    include_root_directory_digest: bool,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
     var dir = try work_root.openDir(io, path, .{ .iterate = true });
@@ -1445,15 +1440,8 @@ fn collectOutputDirectoryWithStat(
     try output_directories.append(allocator, .{
         .path = path_copy,
         .tree_digest = tree_digest,
-        .root_directory_digest = if (include_root_directory_digest) root_directory_digest else null,
+        .root_directory_digest = root_directory_digest,
     });
-}
-
-fn shouldIncludeRootDirectoryDigest(command: reapi.Command) bool {
-    return switch (command.output_directory_format orelse .tree_only) {
-        .tree_only => false,
-        .directory_only, .tree_and_directory => true,
-    };
 }
 
 fn prepareOutputParents(
@@ -2291,7 +2279,7 @@ test "collectOutputFiles uploads requested output files and directories" {
     try std.testing.expect(result.result.output_directories[0].root_directory_digest.?.eql(outcome.output_directories[0].root_directory_digest.?.toReapi(&root_hash)));
 }
 
-test "collectOutputFiles omits root directory digest for tree-only output directories" {
+test "collectOutputFiles includes root directory digest for tree-only output directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -2319,12 +2307,12 @@ test "collectOutputFiles omits root directory digest for tree-only output direct
     }, &outcome);
 
     try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
-    try std.testing.expect(outcome.output_directories[0].root_directory_digest == null);
+    try std.testing.expect(outcome.output_directories[0].root_directory_digest != null);
 
     var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
     defer result.deinit(std.testing.allocator);
     try std.testing.expect(result.result.output_directories[0].tree_digest != null);
-    try std.testing.expect(result.result.output_directories[0].root_directory_digest == null);
+    try std.testing.expect(result.result.output_directories[0].root_directory_digest != null);
 }
 
 test "collectOutputFiles strips chroot execroot prefix from depfiles" {
