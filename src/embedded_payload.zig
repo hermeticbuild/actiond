@@ -1,21 +1,16 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub const Error = error{
     CorruptEmbeddedPayload,
-    DuplicateEmbeddedPayload,
     InvalidEmbeddedPayloadName,
-    NoEmbeddedPayload,
 };
 
 pub const runtimes_name = "runtimes.sqfs";
 pub const kernel_name = "linux_kernel";
 pub const initramfs_name = "initramfs.cpio.zst";
 
-const magic = "ACTIOND_PAYLOAD_V1";
-const trailer_len = 8 + magic.len;
 const copy_buffer_len = 128 * 1024;
-const hex_chars = "0123456789abcdef";
+
 const mach_o_segment_name = "__ACTIOND";
 const mach_o_kernel_section = "__kernel";
 const mach_o_initramfs_section = "__initramfs";
@@ -24,78 +19,14 @@ const mh_magic_64: u32 = 0xfeedfacf;
 const lc_segment_64: u32 = 0x19;
 const mach_header_64_len = 32;
 const segment_command_64_len = 72;
-const section_64_len = 80;
+const mach_o_section_64_len = 80;
 
-pub const PayloadSpec = struct {
-    name: []const u8,
-    path: []const u8,
-};
+const elf_runtimes_section = ".actiond.runtimes";
 
-const Entry = struct {
-    name: []const u8,
+const Range = struct {
     offset: u64,
     size: u64,
-    hash: [32]u8,
 };
-
-pub fn appendPayloads(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    output_path: []const u8,
-    base_path: []const u8,
-    payloads: []const PayloadSpec,
-) !void {
-    var output = try std.Io.Dir.cwd().createFile(io, output_path, .{
-        .read = true,
-        .truncate = true,
-        .permissions = .executable_file,
-    });
-    defer output.close(io);
-
-    var base = try std.Io.Dir.cwd().openFile(io, base_path, .{});
-    defer base.close(io);
-
-    var write_offset: u64 = 0;
-    try copyFileRange(io, base, output, 0, try base.length(io), &write_offset, null);
-
-    var manifest: std.ArrayListUnmanaged(u8) = .empty;
-    defer manifest.deinit(allocator);
-
-    for (payloads) |payload| {
-        try validateName(payload.name);
-        if (manifestContainsName(manifest.items, payload.name)) return error.DuplicateEmbeddedPayload;
-
-        var file = try std.Io.Dir.cwd().openFile(io, payload.path, .{});
-        defer file.close(io);
-
-        const offset = write_offset;
-        const size = try file.length(io);
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        try copyFileRange(io, file, output, 0, size, &write_offset, &hasher);
-
-        var hash: [32]u8 = undefined;
-        hasher.final(&hash);
-        const hash_hex = std.fmt.bytesToHex(hash, .lower);
-        const line = try std.fmt.allocPrint(allocator, "{s} {d} {d} {s}\n", .{
-            payload.name,
-            offset,
-            size,
-            hash_hex,
-        });
-        defer allocator.free(line);
-        try manifest.appendSlice(allocator, line);
-    }
-
-    try output.writePositionalAll(io, manifest.items, write_offset);
-    write_offset += manifest.items.len;
-
-    var manifest_len_bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &manifest_len_bytes, manifest.items.len, .little);
-    try output.writePositionalAll(io, &manifest_len_bytes, write_offset);
-    write_offset += manifest_len_bytes.len;
-    try output.writePositionalAll(io, magic, write_offset);
-    try output.sync(io);
-}
 
 pub fn extractFromSelf(
     io: std.Io,
@@ -120,32 +51,25 @@ pub fn extractFromExecutablePath(
     var executable = try std.Io.Dir.cwd().openFile(io, executable_path, .{});
     defer executable.close(io);
 
-    const manifest = readManifest(io, allocator, executable) catch |err| switch (err) {
-        error.NoEmbeddedPayload => return try extractMachOSection(io, allocator, root_dir, executable, name),
-        else => return err,
-    };
-    defer allocator.free(manifest);
-
-    const entry = findEntry(manifest, name) orelse return null;
-    return try extractEntry(io, allocator, root_dir, executable, entry);
+    const range = try findPayloadSection(io, allocator, executable, name) orelse return null;
+    return try extractRange(io, allocator, root_dir, executable, name, range);
 }
 
-const Range = struct {
-    offset: u64,
-    size: u64,
-};
-
-fn extractMachOSection(
+fn findPayloadSection(
     io: std.Io,
     allocator: std.mem.Allocator,
-    root_dir: std.Io.Dir,
     executable: std.Io.File,
     name: []const u8,
-) !?[]u8 {
-    if (builtin.os.tag != .macos) return null;
-    const section_name = machOSectionNameForPayload(name) orelse return null;
-    const range = try findMachOSection(io, executable, mach_o_segment_name, section_name) orelse return null;
-    return try extractRange(io, allocator, root_dir, executable, name, range);
+) !?Range {
+    if (machOSectionNameForPayload(name)) |section_name| {
+        if (try findMachOSection(io, executable, mach_o_segment_name, section_name)) |range| return range;
+    }
+
+    if (std.mem.eql(u8, name, runtimes_name)) {
+        if (try findElfSection(io, allocator, executable, elf_runtimes_section)) |range| return range;
+    }
+
+    return null;
 }
 
 fn machOSectionNameForPayload(name: []const u8) ?[]const u8 {
@@ -186,48 +110,7 @@ fn extractRange(
     });
     defer output.close(io);
 
-    var write_offset: u64 = 0;
-    try copyFileRange(io, executable, output, range.offset, range.size, &write_offset, null);
-    try output.sync(io);
-
-    return try absoluteSubPath(io, allocator, root_dir, output_rel);
-}
-
-fn extractEntry(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    root_dir: std.Io.Dir,
-    executable: std.Io.File,
-    entry: Entry,
-) ![]u8 {
-    try root_dir.createDirPath(io, "embedded");
-
-    const hash_hex = std.fmt.bytesToHex(entry.hash, .lower);
-    const output_rel = try std.fmt.allocPrint(allocator, "embedded/{s}-{s}", .{ entry.name, hash_hex });
-    defer allocator.free(output_rel);
-
-    if (root_dir.statFile(io, output_rel, .{})) |stat| {
-        if (stat.kind == .file and stat.size == entry.size) {
-            return try absoluteSubPath(io, allocator, root_dir, output_rel);
-        }
-    } else |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    }
-
-    var output = try root_dir.createFile(io, output_rel, .{
-        .read = true,
-        .truncate = true,
-        .permissions = .default_file,
-    });
-    defer output.close(io);
-
-    var write_offset: u64 = 0;
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    try copyFileRange(io, executable, output, entry.offset, entry.size, &write_offset, &hasher);
-    var actual_hash: [32]u8 = undefined;
-    hasher.final(&actual_hash);
-    if (!std.mem.eql(u8, &actual_hash, &entry.hash)) return error.CorruptEmbeddedPayload;
+    try copyFileRange(io, executable, output, range.offset, range.size);
     try output.sync(io);
 
     return try absoluteSubPath(io, allocator, root_dir, output_rel);
@@ -244,60 +127,12 @@ fn absoluteSubPath(
     return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root_buffer[0..root_len], sub_path });
 }
 
-fn readManifest(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File) ![]u8 {
-    const file_len = try file.length(io);
-    if (file_len < trailer_len) return error.NoEmbeddedPayload;
-
-    var trailer: [trailer_len]u8 = undefined;
-    const trailer_offset = file_len - trailer.len;
-    const trailer_read = try file.readPositionalAll(io, &trailer, trailer_offset);
-    if (trailer_read != trailer.len) return error.CorruptEmbeddedPayload;
-    if (!std.mem.eql(u8, trailer[8..], magic)) return error.NoEmbeddedPayload;
-
-    const manifest_len = std.mem.readInt(u64, trailer[0..8], .little);
-    if (manifest_len > file_len - trailer_len) return error.CorruptEmbeddedPayload;
-    if (manifest_len > std.math.maxInt(usize)) return error.CorruptEmbeddedPayload;
-    const manifest_offset = trailer_offset - manifest_len;
-    const manifest = try allocator.alloc(u8, @intCast(manifest_len));
-    errdefer allocator.free(manifest);
-    const manifest_read = try file.readPositionalAll(io, manifest, manifest_offset);
-    if (manifest_read != manifest.len) return error.CorruptEmbeddedPayload;
-    return manifest;
-}
-
-fn findEntry(manifest: []const u8, name: []const u8) ?Entry {
-    var it = std.mem.splitScalar(u8, manifest, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        var fields = std.mem.splitScalar(u8, line, ' ');
-        const entry_name = fields.next() orelse return null;
-        const offset_text = fields.next() orelse return null;
-        const size_text = fields.next() orelse return null;
-        const hash_text = fields.next() orelse return null;
-        if (fields.next() != null) return null;
-        if (!std.mem.eql(u8, entry_name, name)) continue;
-        return .{
-            .name = entry_name,
-            .offset = std.fmt.parseInt(u64, offset_text, 10) catch return null,
-            .size = std.fmt.parseInt(u64, size_text, 10) catch return null,
-            .hash = parseHash(hash_text) catch return null,
-        };
-    }
-    return null;
-}
-
-fn manifestContainsName(manifest: []const u8, name: []const u8) bool {
-    return findEntry(manifest, name) != null;
-}
-
 fn copyFileRange(
     io: std.Io,
     source: std.Io.File,
     dest: std.Io.File,
     source_offset: u64,
     size: u64,
-    dest_offset: *u64,
-    maybe_hasher: ?*std.crypto.hash.sha2.Sha256,
 ) !void {
     var buffer: [copy_buffer_len]u8 = undefined;
     var copied: u64 = 0;
@@ -306,10 +141,8 @@ fn copyFileRange(
         const chunk_len: usize = @intCast(@min(remaining, buffer.len));
         const n = try source.readPositionalAll(io, buffer[0..chunk_len], source_offset + copied);
         if (n == 0) return error.CorruptEmbeddedPayload;
-        if (maybe_hasher) |hasher| hasher.update(buffer[0..n]);
-        try dest.writePositionalAll(io, buffer[0..n], dest_offset.*);
+        try dest.writePositionalAll(io, buffer[0..n], copied);
         copied += n;
-        dest_offset.* += n;
     }
 }
 
@@ -351,12 +184,12 @@ fn findMachOSection(
 
     const ncmds = std.mem.readInt(u32, header[16..20], .little);
     const sizeofcmds = std.mem.readInt(u32, header[20..24], .little);
-    if (@as(u64, mach_header_64_len) + sizeofcmds > file_len) return error.CorruptEmbeddedPayload;
+    if (!rangeWithinFile(file_len, mach_header_64_len, sizeofcmds)) return error.CorruptEmbeddedPayload;
 
     var command_offset: u64 = mach_header_64_len;
     var i: u32 = 0;
     while (i < ncmds) : (i += 1) {
-        if (command_offset + 8 > file_len) return error.CorruptEmbeddedPayload;
+        if (!rangeWithinFile(file_len, command_offset, 8)) return error.CorruptEmbeddedPayload;
 
         var command_header: [8]u8 = undefined;
         if (try file.readPositionalAll(io, &command_header, command_offset) != command_header.len) {
@@ -376,24 +209,24 @@ fn findMachOSection(
                 return error.CorruptEmbeddedPayload;
             }
             const nsects = std.mem.readInt(u32, segment[64..68], .little);
-            const sections_len = @as(u64, nsects) * section_64_len;
+            const sections_len = @as(u64, nsects) * mach_o_section_64_len;
             if (@as(u64, segment_command_64_len) + sections_len > cmdsize) return error.CorruptEmbeddedPayload;
 
             if (fixedMachONameEquals(segment[8..24], segment_name)) {
                 var section_offset = command_offset + segment_command_64_len;
                 var section_index: u32 = 0;
                 while (section_index < nsects) : (section_index += 1) {
-                    var section: [section_64_len]u8 = undefined;
+                    var section: [mach_o_section_64_len]u8 = undefined;
                     if (try file.readPositionalAll(io, &section, section_offset) != section.len) {
                         return error.CorruptEmbeddedPayload;
                     }
                     if (fixedMachONameEquals(section[0..16], section_name)) {
                         const size = std.mem.readInt(u64, section[40..48], .little);
                         const offset = std.mem.readInt(u32, section[48..52], .little);
-                        if (@as(u64, offset) + size > file_len) return error.CorruptEmbeddedPayload;
+                        if (!rangeWithinFile(file_len, offset, size)) return error.CorruptEmbeddedPayload;
                         return .{ .offset = offset, .size = size };
                     }
-                    section_offset += section_64_len;
+                    section_offset += mach_o_section_64_len;
                 }
             }
         }
@@ -409,24 +242,78 @@ fn fixedMachONameEquals(field: []const u8, name: []const u8) bool {
     return std.mem.eql(u8, field[0..zero], name);
 }
 
-fn parseHash(text: []const u8) ![32]u8 {
-    if (text.len != 64) return error.CorruptEmbeddedPayload;
-    var out: [32]u8 = undefined;
-    for (&out, 0..) |*byte, i| {
-        const high = try parseHexNibble(text[i * 2]);
-        const low = try parseHexNibble(text[i * 2 + 1]);
-        byte.* = (high << 4) | low;
+fn findElfSection(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    file: std.Io.File,
+    section_name: []const u8,
+) !?Range {
+    const file_len = try file.length(io);
+
+    var read_buffer: [4096]u8 = undefined;
+    var executable_reader = file.reader(io, &read_buffer);
+    try executable_reader.seekTo(0);
+    const header = std.elf.Header.read(&executable_reader.interface) catch |err| switch (err) {
+        error.InvalidElfMagic,
+        error.InvalidElfClass,
+        error.InvalidElfEndian,
+        error.InvalidElfVersion,
+        error.EndOfStream,
+        => return null,
+        else => return err,
+    };
+
+    const section_header_size: u16 = if (header.is_64) @sizeOf(std.elf.Elf64_Shdr) else @sizeOf(std.elf.Elf32_Shdr);
+    if (header.shoff == 0 or header.shnum == 0) return null;
+    if (header.shentsize != section_header_size or header.shstrndx >= header.shnum) return error.CorruptEmbeddedPayload;
+    if (!rangeWithinFile(file_len, header.shoff, @as(u64, section_header_size) * header.shnum)) {
+        return error.CorruptEmbeddedPayload;
     }
-    return out;
+
+    const shstrtab_header = try elfSectionHeaderAt(&header, &executable_reader, header.shstrndx);
+    if (shstrtab_header.sh_type != std.elf.SHT_STRTAB) return error.CorruptEmbeddedPayload;
+    if (!rangeWithinFile(file_len, shstrtab_header.sh_offset, shstrtab_header.sh_size)) return error.CorruptEmbeddedPayload;
+    if (shstrtab_header.sh_size > std.math.maxInt(usize)) return error.CorruptEmbeddedPayload;
+
+    const shstrtab = try allocator.alloc(u8, @intCast(shstrtab_header.sh_size));
+    defer allocator.free(shstrtab);
+    try executable_reader.seekTo(shstrtab_header.sh_offset);
+    try executable_reader.interface.readSliceAll(shstrtab);
+
+    var sections = header.iterateSectionHeaders(&executable_reader);
+    while (try sections.next()) |section| {
+        const current_name = try elfString(shstrtab, section.sh_name);
+        if (!std.mem.eql(u8, current_name, section_name)) continue;
+        if (section.sh_type != std.elf.SHT_PROGBITS) return error.CorruptEmbeddedPayload;
+        if (!rangeWithinFile(file_len, section.sh_offset, section.sh_size)) return error.CorruptEmbeddedPayload;
+        return .{ .offset = section.sh_offset, .size = section.sh_size };
+    }
+
+    return null;
 }
 
-fn parseHexNibble(byte: u8) !u8 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => byte - 'a' + 10,
-        'A'...'F' => byte - 'A' + 10,
-        else => error.CorruptEmbeddedPayload,
-    };
+fn elfSectionHeaderAt(
+    header: *const std.elf.Header,
+    executable_reader: *std.Io.File.Reader,
+    section_index: u16,
+) !std.elf.Elf64_Shdr {
+    var sections = header.iterateSectionHeaders(executable_reader);
+    var i: u16 = 0;
+    while (i < section_index) : (i += 1) {
+        _ = (try sections.next()) orelse return error.CorruptEmbeddedPayload;
+    }
+    return (try sections.next()) orelse error.CorruptEmbeddedPayload;
+}
+
+fn elfString(table: []const u8, name_offset: u32) ![]const u8 {
+    if (name_offset >= table.len) return error.CorruptEmbeddedPayload;
+    const tail = table[name_offset..];
+    const zero = std.mem.indexOfScalar(u8, tail, 0) orelse return error.CorruptEmbeddedPayload;
+    return tail[0..zero];
+}
+
+fn rangeWithinFile(file_len: u64, offset: u64, size: u64) bool {
+    return offset <= file_len and size <= file_len - offset;
 }
 
 fn validateName(name: []const u8) !void {
@@ -437,39 +324,51 @@ fn validateName(name: []const u8) !void {
     };
 }
 
-test "appendPayloads and extractFromExecutablePath round trip a payload" {
+test "extractFromExecutablePath extracts Mach-O payload section" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
+    const payload = "mach-o payload bytes\n";
+    const payload_offset = 0x100;
+    const commands_len = segment_command_64_len + mach_o_section_64_len;
+    const macho_len = payload_offset + payload.len;
+    var macho = [_]u8{0} ** macho_len;
+
+    std.mem.writeInt(u32, macho[0..4], mh_magic_64, .little);
+    std.mem.writeInt(u32, macho[16..20], 1, .little);
+    std.mem.writeInt(u32, macho[20..24], commands_len, .little);
+
+    const segment_offset = mach_header_64_len;
+    std.mem.writeInt(u32, macho[segment_offset..][0..4], lc_segment_64, .little);
+    std.mem.writeInt(u32, macho[segment_offset + 4 ..][0..4], commands_len, .little);
+    @memcpy(macho[segment_offset + 8 ..][0..mach_o_segment_name.len], mach_o_segment_name);
+    std.mem.writeInt(u64, macho[segment_offset + 40 ..][0..8], payload_offset, .little);
+    std.mem.writeInt(u64, macho[segment_offset + 48 ..][0..8], payload.len, .little);
+    std.mem.writeInt(u32, macho[segment_offset + 64 ..][0..4], 1, .little);
+
+    const section_offset = segment_offset + segment_command_64_len;
+    @memcpy(macho[section_offset..][0..mach_o_runtimes_section.len], mach_o_runtimes_section);
+    @memcpy(macho[section_offset + 16 ..][0..mach_o_segment_name.len], mach_o_segment_name);
+    std.mem.writeInt(u64, macho[section_offset + 40 ..][0..8], payload.len, .little);
+    std.mem.writeInt(u32, macho[section_offset + 48 ..][0..4], payload_offset, .little);
+
+    @memcpy(macho[payload_offset..][0..payload.len], payload);
+
     try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "base",
-        .data = "base executable\n",
-    });
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "payload",
-        .data = "payload bytes\n",
+        .sub_path = "macho",
+        .data = &macho,
     });
 
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
-    const root_path = root_buffer[0..root_len];
-
-    const base_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/base", .{root_path});
-    defer std.testing.allocator.free(base_path);
-    const payload_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/payload", .{root_path});
-    defer std.testing.allocator.free(payload_path);
-    const bundle_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/bundle", .{root_path});
-    defer std.testing.allocator.free(bundle_path);
-
-    try appendPayloads(std.testing.io, std.testing.allocator, bundle_path, base_path, &.{
-        .{ .name = runtimes_name, .path = payload_path },
-    });
+    const macho_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/macho", .{root_buffer[0..root_len]});
+    defer std.testing.allocator.free(macho_path);
 
     const extracted_path = (try extractFromExecutablePath(
         std.testing.io,
         std.testing.allocator,
         tmp.dir,
-        bundle_path,
+        macho_path,
         runtimes_name,
     )).?;
     defer std.testing.allocator.free(extracted_path);
@@ -481,7 +380,97 @@ test "appendPayloads and extractFromExecutablePath round trip a payload" {
         .limited(64),
     );
     defer std.testing.allocator.free(extracted);
-    try std.testing.expectEqualStrings("payload bytes\n", extracted);
+    try std.testing.expectEqualStrings(payload, extracted);
+}
+
+test "extractFromExecutablePath extracts ELF payload section" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const payload = "payload bytes\n";
+    const elf_header_64_len = @sizeOf(std.elf.Elf64_Ehdr);
+    const elf_section_64_len = @sizeOf(std.elf.Elf64_Shdr);
+    const payload_offset = 0x80;
+    const shstrtab_offset = 0xc0;
+    const section_headers_offset = 0x100;
+    const section_count = 3;
+    const elf_len = section_headers_offset + elf_section_64_len * section_count;
+    var elf = [_]u8{0} ** elf_len;
+
+    @memcpy(elf[0..4], std.elf.MAGIC);
+    elf[std.elf.EI.CLASS] = std.elf.ELFCLASS64;
+    elf[std.elf.EI.DATA] = std.elf.ELFDATA2LSB;
+    elf[std.elf.EI.VERSION] = 1;
+    std.mem.writeInt(u16, elf[16..18], 2, .little);
+    std.mem.writeInt(u16, elf[18..20], 0xb7, .little);
+    std.mem.writeInt(u32, elf[20..24], 1, .little);
+    std.mem.writeInt(u64, elf[40..48], section_headers_offset, .little);
+    std.mem.writeInt(u16, elf[52..54], elf_header_64_len, .little);
+    std.mem.writeInt(u16, elf[58..60], elf_section_64_len, .little);
+    std.mem.writeInt(u16, elf[60..62], section_count, .little);
+    std.mem.writeInt(u16, elf[62..64], 1, .little);
+
+    @memcpy(elf[payload_offset..][0..payload.len], payload);
+    const shstrtab = "\x00.shstrtab\x00.actiond.runtimes\x00";
+    @memcpy(elf[shstrtab_offset..][0..shstrtab.len], shstrtab);
+    const shstrtab_name_offset = 1;
+    const runtimes_name_offset = shstrtab_name_offset + ".shstrtab".len + 1;
+
+    writeElf64SectionHeader(
+        elf[section_headers_offset + elf_section_64_len ..][0..elf_section_64_len],
+        shstrtab_name_offset,
+        std.elf.SHT_STRTAB,
+        shstrtab_offset,
+        shstrtab.len,
+    );
+    writeElf64SectionHeader(
+        elf[section_headers_offset + elf_section_64_len * 2 ..][0..elf_section_64_len],
+        runtimes_name_offset,
+        std.elf.SHT_PROGBITS,
+        payload_offset,
+        payload.len,
+    );
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "elf",
+        .data = &elf,
+    });
+
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const elf_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/elf", .{root_buffer[0..root_len]});
+    defer std.testing.allocator.free(elf_path);
+
+    const extracted_path = (try extractFromExecutablePath(
+        std.testing.io,
+        std.testing.allocator,
+        tmp.dir,
+        elf_path,
+        runtimes_name,
+    )).?;
+    defer std.testing.allocator.free(extracted_path);
+
+    const extracted = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        extracted_path,
+        std.testing.allocator,
+        .limited(64),
+    );
+    defer std.testing.allocator.free(extracted);
+    try std.testing.expectEqualStrings(payload, extracted);
+}
+
+fn writeElf64SectionHeader(
+    out: []u8,
+    name_offset: u32,
+    section_type: u32,
+    file_offset: u64,
+    size: u64,
+) void {
+    std.mem.writeInt(u32, out[0..4], name_offset, .little);
+    std.mem.writeInt(u32, out[4..8], section_type, .little);
+    std.mem.writeInt(u64, out[24..32], file_offset, .little);
+    std.mem.writeInt(u64, out[32..40], size, .little);
 }
 
 test "extractFromExecutablePath returns null for binaries without payloads" {

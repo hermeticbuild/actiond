@@ -23,14 +23,6 @@ zig_test(
 )
 
 zig_binary(
-    name = "embed_payload",
-    main = "embed_payload.zig",
-    strip_debug_symbols = True,
-    visibility = ["//visibility:public"],
-    deps = ["//src:actiond"],
-)
-
-zig_binary(
     name = "sqfs_pack",
     linkopts = ["-lc"],
     main = "sqfs_pack.zig",

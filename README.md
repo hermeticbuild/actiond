@@ -92,6 +92,10 @@ bazel-bin/cmd/linux_actiond/linux-actiond-standalone serve \
   --root=/tmp/actiond
 ```
 
+The Linux standalone binary embeds the runtime SquashFS in the ELF
+`.actiond.runtimes` section and extracts it under the worker root at startup
+when `--runtime-image` and `--runtime-root` are omitted.
+
 Linux execution requires the privileges needed for chroot, bind mounts, mount
 namespaces, and cgroups. The Docker e2e harness runs privileged for this reason.
 
