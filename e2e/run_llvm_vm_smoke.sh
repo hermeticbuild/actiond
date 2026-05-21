@@ -13,7 +13,7 @@ port="${ACTIOND_LLVM_VM_SMOKE_PORT:-8998}"
 endpoint="${host}:${port}"
 memory_mib="${ACTIOND_VM_MEMORY_MIB:-4096}"
 cpus="${ACTIOND_VM_CPUS:-8}"
-jobs="${ACTIOND_LLVM_SMOKE_JOBS-}"
+jobs="${ACTIOND_LLVM_SMOKE_JOBS:-8}"
 jobs_label="${jobs:-bazel default}"
 jobs_flags=()
 if [[ -n "${jobs}" ]]; then

@@ -133,10 +133,27 @@ Heavier LLVM smoke against an already-running VM worker:
 e2e/llvm_tblgen_smoke.sh
 ```
 
-That smoke uses `--platforms=//platforms:linux_arm64_musl` and
-`--host_platform=//platforms:linux_arm64_musl` in `/Users/dzbarsky/bootstrapped2`
-so the build avoids glibc runtime actions and generated exec tools do not depend
-on glibc inside actiond chroots.
+Full LLVM smoke comparison, including VM startup and a mac-host baseline:
+
+```bash
+e2e/run_llvm_vm_smoke.sh
+```
+
+The VM smoke uses `--platforms=@llvm//platforms:linux_arm64_musl` and
+`--host_platform=@llvm//platforms:linux_arm64_musl` so generated exec tools run
+inside the Linux VM and do not depend on glibc inside actiond chroots.
+
+Current `@llvm-project//llvm:llvm-tblgen` timings from May 20, 2026, using
+`-c opt --strip=always --stripopt=--strip-all`:
+
+| Path | Jobs | Bazel elapsed |
+| --- | ---: | ---: |
+| actiond VM | 8 | 69.182s |
+| mac-host local | 8 | 93.153s |
+| actiond VM | 16 | 97.783s |
+| mac-host local | 16 | 133.437s |
+
+The wrapper defaults to `--jobs=8`; override with `ACTIOND_LLVM_SMOKE_JOBS`.
 
 Standalone artifact e2e:
 
