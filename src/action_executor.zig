@@ -28,6 +28,7 @@ const max_output_file_bytes = 1024 * 1024 * 1024;
 const chroot_execroot_prefix = "/workspace/";
 const worker_name = "actiond";
 const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
+var next_actiondfs_workspace_id = std.atomic.Value(u64).init(0);
 
 pub const RuntimeMountSources = struct {
     lib: ?[:0]const u8 = null,
@@ -71,6 +72,7 @@ pub const ExecuteOptions = struct {
     use_actiondfs: bool = false,
     cas_blob_root_path: ?[]const u8 = null,
     input_cas_blob_root_path: ?[]const u8 = null,
+    actiondfs_stage_root_path: ?[]const u8 = null,
     staged_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_index: ?*staged_cas_index.Index = null,
     runtime_mount_cache: ?RuntimeMountCache = null,
@@ -79,6 +81,7 @@ pub const ExecuteOptions = struct {
 pub const PreparedExecuteOptions = struct {
     options: ExecuteOptions,
     owned_cas_blob_root_path: ?[]u8 = null,
+    owned_actiondfs_stage_root_path: ?[]u8 = null,
     owns_runtime_mount_cache: bool = false,
 
     pub fn deinit(self: *PreparedExecuteOptions, allocator: std.mem.Allocator) void {
@@ -86,6 +89,7 @@ pub const PreparedExecuteOptions = struct {
             if (self.options.runtime_mount_cache) |*cache| cache.deinit(allocator);
         }
         if (self.owned_cas_blob_root_path) |path| allocator.free(path);
+        if (self.owned_actiondfs_stage_root_path) |path| allocator.free(path);
         self.* = undefined;
     }
 };
@@ -129,6 +133,13 @@ pub fn prepareExecuteOptions(
     if (prepared.options.input_cas_blob_root_path == null) {
         prepared.options.input_cas_blob_root_path = prepared.options.cas_blob_root_path;
     }
+    if (prepared.options.use_actiondfs and prepared.options.actiondfs_stage_root_path == null) {
+        var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
+        const path = try std.fmt.allocPrint(allocator, "{s}/actiondfs-stage", .{cas_root_buffer[0..cas_root_len]});
+        prepared.owned_actiondfs_stage_root_path = path;
+        prepared.options.actiondfs_stage_root_path = path;
+    }
     if (prepared.options.runtime_root_path) |runtime_root_path| {
         if (prepared.options.runtime_mount_cache == null) {
             prepared.options.runtime_mount_cache = try discoverRuntimeMounts(io, allocator, runtime_root_path);
@@ -149,6 +160,11 @@ fn casReadRoots(options: ExecuteOptions) CasReadRoots {
 
 fn actiondfsInputBlobRootPath(options: ExecuteOptions) ?[]const u8 {
     return options.input_cas_blob_root_path orelse options.cas_blob_root_path;
+}
+
+fn executionPlatform(action: reapi.Action, command: reapi.Command) ?reapi.Platform {
+    if (action.platform) |platform| return platform;
+    return command.platform;
 }
 
 fn actionMutatesInputs(platform: ?reapi.Platform) bool {
@@ -321,6 +337,7 @@ pub fn executeActionWithOptions(
     var command_reader = protobuf.Reader.init(command_bytes);
     var command = try reapi.Command.decodeOwned(allocator, &command_reader);
     defer command.deinit(allocator);
+    const platform = executionPlatform(action, command);
 
     const input_root_digest = try cas.Digest.fromReapi(action.input_root_digest orelse return error.MissingInputRootDigest);
     var inputs: std.ArrayListUnmanaged(execroot.Input) = .empty;
@@ -333,7 +350,7 @@ pub fn executeActionWithOptions(
     const use_actiondfs_inputs = use_workspace_chroot and options.use_actiondfs;
     const input_mode: ActionInputMode = if (!use_actiondfs_inputs)
         .materialized
-    else if (actionMutatesInputs(action.platform))
+    else if (actionMutatesInputs(platform))
         .actiondfs_overlay
     else
         .actiondfs_strict;
@@ -360,7 +377,7 @@ pub fn executeActionWithOptions(
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
     const work_root_path = cwd_buffer[0..cwd_len];
 
-    const libc_runtime = try libcRuntimeFromPlatform(action.platform);
+    const libc_runtime = try libcRuntimeFromPlatform(platform);
     var exec_root_dir = work_root;
     var workspace_dir: ?std.Io.Dir = null;
     defer if (workspace_dir) |*dir| dir.close(io);
@@ -399,6 +416,7 @@ pub fn executeActionWithOptions(
             io,
             allocator,
             cas_blob_root_path,
+            options.actiondfs_stage_root_path,
             work_root_path,
             exec_root_path,
             input_root_digest,
@@ -440,19 +458,10 @@ pub fn executeActionWithOptions(
         };
     }
     defer materialization.deinit(allocator);
-    prepareOutputPaths(
-        io,
-        allocator,
-        store,
-        read_roots,
-        input_root_digest,
-        exec_root_dir,
-        command,
-        if (use_workspace_chroot) "/workspace" else "",
-    ) catch |err| switch (err) {
+    prepareOutputParents(io, exec_root_dir, command) catch |err| switch (err) {
         error.FileNotFound => return error.OutputParentCreateFailed,
         else => {
-            logExecuteSetupError("prepare output paths", action_digest, err);
+            logExecuteSetupError("prepare output parents", action_digest, err);
             return err;
         },
     };
@@ -510,7 +519,7 @@ pub fn executeActionWithOptions(
         .exec_path_override = actiondfs_exec_path_override,
         .bind_mounts = bind_mounts.items,
         .actiondfs_mounts = if (actiondfs_workspace) |*workspace| workspace.mounts[0..] else &.{},
-        .cgroup_limits = action_runner.CgroupLimits.fromPlatform(action.platform),
+        .cgroup_limits = action_runner.CgroupLimits.fromPlatform(platform),
     });
     errdefer outcome.deinit(allocator);
     const execution_completed_wall = timestampNow(io);
@@ -845,14 +854,14 @@ const ActiondfsWorkspace = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         cas_blob_root: []const u8,
+        stage_root_path: ?[]const u8,
         work_root_path: []const u8,
         workspace_path: []const u8,
         input_root_digest: cas.Digest,
         mode: ActionInputMode,
     ) !ActiondfsWorkspace {
-        const base_path = try std.fmt.allocPrint(allocator, "{s}.actiondfs", .{work_root_path});
+        const base_path = try createActiondfsBasePath(io, allocator, stage_root_path, work_root_path);
         errdefer allocator.free(base_path);
-        try std.Io.Dir.cwd().createDir(io, base_path, .default_dir);
 
         var base_dir = try std.Io.Dir.openDirAbsolute(io, base_path, .{});
         defer base_dir.close(io);
@@ -867,15 +876,15 @@ const ActiondfsWorkspace = struct {
         const actiondfs_data = if (mode == .actiondfs_strict)
             try std.fmt.allocPrintSentinel(
                 allocator,
-                "root={s},cas={s},stage={s}",
-                .{ root_hex, cas_blob_root, stage_path },
+                "root={s},root_size={d},cas={s},stage={s}",
+                .{ root_hex, input_root_digest.size_bytes, cas_blob_root, stage_path },
                 0,
             )
         else
             try std.fmt.allocPrintSentinel(
                 allocator,
-                "root={s},cas={s}",
-                .{ root_hex, cas_blob_root },
+                "root={s},root_size={d},cas={s}",
+                .{ root_hex, input_root_digest.size_bytes, cas_blob_root },
                 0,
             );
         errdefer allocator.free(actiondfs_data);
@@ -1001,6 +1010,35 @@ const ActiondfsWorkspace = struct {
         self.* = undefined;
     }
 };
+
+fn createActiondfsBasePath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stage_root_path: ?[]const u8,
+    work_root_path: []const u8,
+) ![]u8 {
+    const root = stage_root_path orelse {
+        const base_path = try std.fmt.allocPrint(allocator, "{s}.actiondfs", .{work_root_path});
+        errdefer allocator.free(base_path);
+        try std.Io.Dir.cwd().createDir(io, base_path, .default_dir);
+        return base_path;
+    };
+
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    var root_dir = try std.Io.Dir.openDirAbsolute(io, root, .{});
+    defer root_dir.close(io);
+
+    while (true) {
+        const id = next_actiondfs_workspace_id.fetchAdd(1, .monotonic);
+        const name = try std.fmt.allocPrint(allocator, "action-{d}", .{id});
+        defer allocator.free(name);
+        root_dir.createDir(io, name, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => |e| return e,
+        };
+        return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, name });
+    }
+}
 
 fn runtimeArch() ![]const u8 {
     return switch (builtin.cpu.arch) {
@@ -1476,7 +1514,7 @@ fn putOutputFile(
     work_root: std.Io.Dir,
     path: []const u8,
 ) !cas.Digest {
-    if (!isDepfileOutput(path)) return store.putFile(io, work_root, path);
+    if (!isDepfileOutput(path)) return store.putFilePromote(io, work_root, path);
 
     const bytes = try work_root.readFileAlloc(io, path, allocator, .limited(max_output_file_bytes));
     defer allocator.free(bytes);
@@ -1549,49 +1587,17 @@ fn collectOutputDirectoryWithStat(
     });
 }
 
-fn prepareOutputPaths(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    read_roots: CasReadRoots,
-    input_root_digest: cas.Digest,
-    work_root: std.Io.Dir,
-    command: reapi.Command,
-    workspace_prefix: []const u8,
-) !void {
-    _ = allocator;
-    _ = store;
-    _ = read_roots;
-    _ = input_root_digest;
-    _ = workspace_prefix;
-    try prepareOutputParents(io, work_root, command);
-}
-
 fn prepareOutputParents(
     io: std.Io,
     work_root: std.Io.Dir,
     command: reapi.Command,
 ) !void {
     if (command.output_paths.len != 0) {
-        const precreate_output_paths = commandOutputPathsAreDirectories(command);
-        for (command.output_paths) |path| {
-            if (precreate_output_paths) {
-                try createOutputDirectory(io, work_root, path);
-            } else {
-                try createOutputParent(io, work_root, path);
-            }
-        }
+        for (command.output_paths) |path| try createOutputParent(io, work_root, path);
     }
 
     for (command.output_files) |path| try createOutputParent(io, work_root, path);
-    for (command.output_directories) |path| try createOutputDirectory(io, work_root, path);
-}
-
-fn commandOutputPathsAreDirectories(command: reapi.Command) bool {
-    if (command.arguments.len == 0) return false;
-    const argv0 = command.arguments[0];
-    return std.mem.eql(u8, argv0, "copy_to_directory") or
-        std.mem.endsWith(u8, argv0, "/copy_to_directory");
+    for (command.output_directories) |path| try createOutputParent(io, work_root, path);
 }
 
 fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void {
@@ -1600,12 +1606,6 @@ fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void
     const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
     if (last_slash == 0) return;
     try work_root.createDirPath(io, path[0..last_slash]);
-}
-
-fn createOutputDirectory(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void {
-    if (path.len == 0) return;
-    try execroot.validatePath(path);
-    try work_root.createDirPath(io, path);
 }
 
 fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
@@ -1710,7 +1710,7 @@ fn putOutputDirectoryTree(
         switch (entry.kind) {
             .file => {
                 const stat = try dir.statFile(io, entry.name, .{});
-                const digest = try store.putFile(io, dir, entry.name);
+                const digest = try store.putFilePromote(io, dir, entry.name);
                 if (staged_index) |index| try index.add(io, allocator, digest);
                 try files.append(allocator, .{
                     .name = try tree.dupe(allocator, entry.name),
@@ -1883,6 +1883,21 @@ test "libc runtime platform property accepts pinned runtimes" {
     try std.testing.expectError(error.UnsupportedLibcRuntime, libcRuntimeFromPlatform(.{
         .properties = &.{.{ .name = "libc", .value = "glibc2.17" }},
     }));
+}
+
+test "execution platform falls back to command platform" {
+    const platform = executionPlatform(
+        .{},
+        .{ .platform = .{ .properties = &.{.{ .name = "libc", .value = "glibc2.35" }} } },
+    );
+    try std.testing.expectEqualStrings("libc", platform.?.properties[0].name);
+    try std.testing.expectEqualStrings("glibc2.35", platform.?.properties[0].value);
+
+    const action_platform = executionPlatform(
+        .{ .platform = .{ .properties = &.{.{ .name = "libc", .value = "glibc2.39" }} } },
+        .{ .platform = .{ .properties = &.{.{ .name = "libc", .value = "glibc2.35" }} } },
+    );
+    try std.testing.expectEqualStrings("glibc2.39", action_platform.?.properties[0].value);
 }
 
 test "actionMutatesInputs parses platform property" {
@@ -2196,6 +2211,23 @@ test "actiondfs uses input CAS root for blob reads" {
     };
 
     try std.testing.expectEqualStrings("/host-cas/blobs/sha256", actiondfsInputBlobRootPath(options).?);
+}
+
+test "prepareExecuteOptions places actiondfs stage beside CAS" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    try cas.Store.init(cas_dir).ensureLayout(std.testing.io);
+
+    var prepared = try prepareExecuteOptions(std.testing.io, std.testing.allocator, cas.Store.initReady(cas_dir), .{
+        .use_actiondfs = true,
+    });
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expect(prepared.options.actiondfs_stage_root_path != null);
+    try std.testing.expect(std.mem.endsWith(u8, prepared.options.actiondfs_stage_root_path.?, "/cas/actiondfs-stage"));
 }
 
 test "collectInputs materializes bindable tree directories" {
@@ -2520,7 +2552,7 @@ test "prepareOutputParents creates parent directories for declared outputs" {
     _ = try work_dir.statFile(std.testing.io, "gen", .{});
 }
 
-test "prepareOutputParents creates declared output directories" {
+test "prepareOutputParents creates parent directories for declared output directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -2530,21 +2562,8 @@ test "prepareOutputParents creates declared output directories" {
     try prepareOutputParents(std.testing.io, work_dir, .{
         .output_directories = &.{"gen/tree"},
     });
-    _ = try work_dir.statFile(std.testing.io, "gen/tree", .{});
-}
-
-test "prepareOutputParents creates copy_to_directory output_paths as directories" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
-    defer work_dir.close(std.testing.io);
-
-    try prepareOutputParents(std.testing.io, work_dir, .{
-        .arguments = &.{ "external/tools/copy_to_directory", "config.json" },
-        .output_paths = &.{"bazel-out/bin/pkg/tree"},
-    });
-    _ = try work_dir.statFile(std.testing.io, "bazel-out/bin/pkg/tree", .{});
+    _ = try work_dir.statFile(std.testing.io, "gen", .{});
+    try std.testing.expectError(error.FileNotFound, work_dir.statFile(std.testing.io, "gen/tree", .{}));
 }
 
 test "prepareOutputParents creates parent directories for declared output paths" {

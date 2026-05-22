@@ -33,38 +33,40 @@ subset of the VM `llvm-tblgen` graph.
 
 ## Latest Checked-In Result
 
-- Generated: `2026-05-21 11:02:31 EDT`
-- Command: `ACTIOND_LLVM_SMOKE_MAC_HOST=0 e2e/run_llvm_vm_smoke.sh`
-- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.p6bLf5`
+- Generated: `2026-05-22 09:20:29 EDT`
+- Command: `ACTIOND_LLVM_VM_SMOKE_ROOT=/tmp/actiond-llvm-cas-stage-stats-20260522-091717 ACTIOND_LLVM_SMOKE_MAC_HOST=0 ACTIOND_LLVM_SMOKE_VM=1 ACTIOND_LLVM_SMOKE_JOBS=8 e2e/run_llvm_vm_smoke.sh`
+- Output root: `/tmp/actiond-llvm-cas-stage-stats-20260522-091717`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
 - VM warmup target: `//e2e:llvm_exec_warmup`
 - Target platform: `@llvm//platforms:linux_arm64_musl`
 - VM host platform: `@llvm//platforms:linux_arm64_musl`
 - Build mode: `-c opt --strip=always --stripopt=--strip-all`
-- VM warmup elapsed: `68.120s`
+- VM warmup elapsed: `55.146s`
 - VM warmup processes: `2207 processes: 190 internal, 2017 remote`
-- VM Bazel elapsed: `61.317s`
+- VM Bazel elapsed: `59.657s`
 - VM executions: `2106`
 - VM timing records parsed: `2106`
 - VM Bazel processes: `2310 processes: 4 action cache hit, 204 internal, 2106 remote`
-- Mac-host baseline: not run for this VM-focused actiondfs copy-file-range check
+- Mac-host baseline: not run for this VM-focused actiondfs staging check
 
 ## Run Comparison
 
-This compares the previous staged-write stats run against the current
-copy-file-range run.
+This compares the previous VFS-backed `copy_file_range` run, where the
+actiondfs stage lived on `/work` tmpfs, against the current run, where the
+stage lives under `/cas/actiondfs-stage` on the VM ext4 CAS image and output
+collection can promote same-filesystem staged files into CAS by rename.
 
-| Metric            | Previous |     New |    Delta |
-| ----------------- | -------: | ------: | -------: |
-| VM measured build |  74.793s | 61.317s | -13.476s |
-| VM warmup         |  76.621s | 68.120s |  -8.501s |
+| Metric            | Previous |     New |   Delta |
+| ----------------- | -------: | ------: | ------: |
+| VM measured build |  60.358s | 59.657s | -0.701s |
+| VM warmup         |  57.041s | 55.146s | -1.895s |
 
 | VM Stage                | Previous Mean |  New Mean |     Delta |
 | ----------------------- | ------------: | --------: | --------: |
-| total                   |     231.941ms | 190.514ms | -41.427ms |
-| input fetch/materialize |       0.300ms |   0.290ms |  -0.010ms |
-| execute                 |     230.521ms | 189.311ms | -41.210ms |
-| output upload/collect   |       1.119ms |   0.912ms |  -0.207ms |
+| total                   |     194.454ms | 191.940ms |  -2.514ms |
+| input fetch/materialize |       0.177ms |   0.769ms |  +0.592ms |
+| execute                 |     193.525ms | 190.507ms |  -3.018ms |
+| output upload/collect   |       0.751ms |   0.664ms |  -0.087ms |
 
 ## VM Stage Timing
 
@@ -72,10 +74,10 @@ All values are milliseconds.
 
 | Stage                   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |      Max |
 | ----------------------- | ----: | -----: | -----: | -----: | -------: | ------: | -------: |
-| total                   | 3.494 | 15.565 | 19.844 | 31.844 | 1077.847 | 190.514 | 6231.866 |
-| input fetch/materialize | 0.092 |  0.134 |  0.191 |  0.308 |    0.532 |   0.290 |   33.406 |
-| execute                 | 2.942 | 14.888 | 19.197 | 30.750 | 1075.575 | 189.311 | 6227.906 |
-| output upload/collect   | 0.122 |  0.223 |  0.277 |  0.597 |    2.467 |   0.912 |  346.293 |
+| total                   | 3.270 | 15.173 | 18.612 | 28.997 | 1110.783 | 191.940 | 6422.421 |
+| input fetch/materialize | 0.459 |  0.633 |  0.661 |  0.753 |    1.247 |   0.769 |   13.720 |
+| execute                 | 2.010 | 14.190 | 17.550 | 27.497 | 1108.179 | 190.507 | 6418.218 |
+| output upload/collect   | 0.085 |  0.188 |  0.209 |  0.354 |    1.950 |   0.664 |  196.492 |
 
 ## Runner Timing
 
@@ -84,12 +86,12 @@ filesystem reads issued by the action through the mounted actiondfs tree.
 
 | Runner Stage   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |      Max |
 | -------------- | ----: | -----: | -----: | -----: | -------: | ------: | -------: |
-| parent prepare | 0.057 |  0.082 |  0.103 |  0.203 |    0.338 |   0.169 |    7.530 |
-| fork           | 0.189 |  0.370 |  0.450 |  1.253 |    4.529 |   1.123 |   14.288 |
-| child setup    | 0.002 |  0.197 |  0.431 |  1.575 |    4.802 |   1.266 |   51.295 |
-| process/io     | 0.020 | 12.635 | 16.846 | 27.921 | 1073.156 | 186.682 | 6225.742 |
-| wait           | 0.000 |  0.000 |  0.000 |  0.006 |    0.016 |   0.005 |    1.131 |
-| stdio digest   | 0.000 |  0.001 |  0.001 |  0.001 |    0.001 |   0.001 |    1.008 |
+| parent prepare | 0.076 |  0.111 |  0.123 |  0.141 |    0.280 |   0.147 |    1.300 |
+| fork           | 0.189 |  0.384 |  0.412 |  0.519 |    4.190 |   0.875 |    8.956 |
+| child setup    | 0.002 |  0.196 |  0.381 |  1.876 |    4.646 |   1.202 |    9.335 |
+| process/io     | 0.071 | 12.023 | 15.826 | 25.333 | 1103.368 | 188.210 | 6413.176 |
+| wait           | 0.000 |  0.000 |  0.000 |  0.007 |    0.015 |   0.006 |    2.646 |
+| stdio digest   | 0.000 |  0.000 |  0.001 |  0.001 |    0.001 |   0.001 |    0.124 |
 
 ## VM Bridge Timing
 
@@ -97,19 +99,19 @@ These counters measure the raw TCP-to-vsock pump in `darwin-actiond serve-vm`.
 The elapsed column is connection lifetime, not CPU time.
 
 - Bridge connections logged: `2`
-- Total client to guest bytes: `28.27 MiB`
+- Total client to guest bytes: `28.47 MiB`
 - Total guest to client bytes: `37.76 MiB`
 - Pump errors: read=`0`, write=`0`
 
 | Bridge Metric          |       Min |       p25 |       p50 |       p75 |       p95 |      Mean |       Max |
 | ---------------------- | --------: | --------: | --------: | --------: | --------: | --------: | --------: |
-| connection elapsed     | 46370.233 | 50291.404 | 54212.574 | 58133.745 | 61270.681 | 54212.574 | 62054.916 |
-| client to guest KiB    |    9288.3 |   11882.4 |   14476.6 |   17070.7 |   19146.0 |   14476.6 |   19664.8 |
-| guest to client KiB    |   18376.7 |   18854.4 |   19332.1 |   19809.8 |   20192.0 |   19332.1 |   20287.5 |
-| client to guest reads  |      5553 |      6806 |      8058 |      9311 |     10313 |    8058.5 |     10564 |
-| client to guest writes |      5552 |      6805 |      8058 |      9310 |     10312 |    8057.5 |     10563 |
-| guest to client reads  |     14956 |     18964 |     22972 |     26980 |     30186 |   22972.0 |     30988 |
-| guest to client writes |     14955 |     18963 |     22971 |     26979 |     30185 |   22971.0 |     30987 |
+| connection elapsed     | 58487.024 | 58945.210 | 59403.396 | 59861.582 | 60228.131 | 59403.396 | 60319.768 |
+| client to guest KiB    |   10708.4 |   12643.2 |   14577.9 |   16512.7 |   18060.5 |   14577.9 |   18447.5 |
+| guest to client KiB    |   17063.6 |   18197.9 |   19332.2 |   20466.5 |   21374.0 |   19332.2 |   21600.8 |
+| client to guest reads  |      8447 |      8554 |      8661 |      8768 |      8854 |    8661.0 |      8875 |
+| client to guest writes |      8446 |      8553 |      8660 |      8767 |      8853 |    8660.0 |      8874 |
+| guest to client reads  |     21741 |     22158 |     22575 |     22992 |     23326 |   22575.0 |     23409 |
+| guest to client writes |     21740 |     22157 |     22574 |     22991 |     23325 |   22574.0 |     23408 |
 
 ## actiondfs Counters
 
@@ -119,12 +121,12 @@ These counters are from `/proc/actiondfs_stats` at the end of the VM run.
 | ------------------------- | -----------: |
 | mounts                    |         4123 |
 | root directory parses     |         4123 |
-| cached directory hits     |       155481 |
-| cached directory misses   |         5213 |
+| cached directory hits     |       155471 |
+| cached directory misses   |         5223 |
 | lookups                   |      1407093 |
 | lookup hits               |       842187 |
 | lookup negative           |       564906 |
-| blob open attempts        |       453352 |
+| blob open attempts        |       453362 |
 | blob path cache hits      |       437047 |
 | blob path cache misses    |         6969 |
 | blob path cache inserts   |         6969 |
@@ -139,8 +141,8 @@ These counters are from `/proc/actiondfs_stats` at the end of the VM run.
 | mmap calls                |        53243 |
 | mmap bytes                | 1901688811520 |
 | mmap failures             |            0 |
-| directory blob reads      |         9335 |
-| directory blob bytes      |      3181793 |
+| directory blob reads      |         9344 |
+| directory blob bytes      |      3182957 |
 
 ## actiondfs Staged Counters
 
@@ -161,7 +163,7 @@ These counters are from `/proc/actiondfs_stats` at the end of the VM run.
 | stage inode lookup hits         |      35540 |
 | stage inode lookup negative     |    1371553 |
 | stage inode lookup errors       |          0 |
-| stage inode input dir merges    |      18403 |
+| stage inode input dir merges    |      18402 |
 | stage backing open attempts     |      41054 |
 | stage backing open failures     |          0 |
 | stage read calls                |          0 |
@@ -195,16 +197,37 @@ These counters are from `/proc/actiondfs_stats` at the end of the VM run.
 | stage copy_file_range bytes     |   31630764 |
 | stage copy_file_range fallbacks |          0 |
 
+## CAS Put-File Promotion Counters
+
+These counters are VM-lifetime counters collected at the same time as the
+actiondfs stats, so they include both warmup and measured builds.
+
+| Counter                                      |    Value |
+| -------------------------------------------- | -------: |
+| CAS put file calls                           |     7949 |
+| CAS put file promote attempts                |     7949 |
+| CAS put file promote success                 |     2089 |
+| CAS put file promote existing blob           |     5860 |
+| CAS put file promote bytes                   | 38021375 |
+| CAS put file promote cross-device fallbacks  |        0 |
+| CAS put file promote permission fallbacks    |        0 |
+| CAS put file copy calls                      |        0 |
+| CAS put file copy bytes                      |        0 |
+
 ## Staged Output Analysis
 
 | Derived Metric                                |     Value |
 | --------------------------------------------- | --------: |
 | staged write bytes                            | 101.43MiB |
 | copy_file_range bytes                         |  30.17MiB |
+| CAS promote bytes                             |  36.26MiB |
 | average bytes per staged write call           |   2859.6 |
 | staged writes per created file                |     3.10 |
 | average bytes per copy_file_range success     |   8263.0 |
 | copy_file_range fallback rate                 |    0.00% |
+| CAS put-file actual rename rate               |   26.28% |
+| CAS put-file existing-blob rate               |   73.72% |
+| CAS put-file copy fallback rate               |    0.00% |
 | backing opens beyond staged write calls       |     3860 |
 | stage ensure dir components per ensure call   |     8.50 |
 | staged inode lookup hit rate                  |    2.53% |
@@ -217,22 +240,27 @@ filesystem metadata and mapped-file access happen while the child process is
 running, so that time appears in `execute`, primarily in `process/io`, rather
 than in `input fetch/materialize`.
 
-This run validates the actiondfs `copy_file_range` path under the concurrent
-`copy_to_directory` workload used by the LLVM smoke. It used the existing
-bounded digest-to-CAS-path cache and the default temporary VM CAS image
-settings.
+This run validates the actiondfs `copy_file_range` path and the ext4-backed
+stage under the concurrent `copy_to_directory` workload used by the LLVM smoke.
+The actiondfs stage is now under `/cas/actiondfs-stage`, so staged outputs and
+CAS blobs live on the same ext4 filesystem inside the guest.
 
 Go's `io.Copy` attempted `copy_file_range` `3828` times. The actiondfs hook
-handled all `3828` attempts and copied `30.17MiB` with zero fallbacks. A lower
-`vfs_copy_file_range` pass had fallen back for every attempt because the CAS
-input root and staged output root are separate filesystems, so this path uses a
-bounded in-kernel buffered copy for actiondfs input-or-staged source files into
-staged output files.
+handled all `3828` attempts and copied `30.17MiB`. For CAS or staged actiondfs
+source files, actiondfs opens the real source backing file and the real staged
+output file, then calls `vfs_copy_file_range`. There is no bounded in-kernel
+buffered fallback in actiondfs; a selected backing-copy failure increments
+`stage_copy_file_range_fallbacks` and is treated as an error.
+
+CAS output collection saw `7949` `putFile` calls during the VM lifetime. All of
+them attempted same-filesystem promotion; `2089` were actual staged-file renames
+into CAS, `5860` found that the destination blob already existed, and none fell
+back to byte-copying. The actual rename path promoted `36.26MiB` of output data
+into CAS without a second file copy.
 
 The staged counters show that `copy_file_range` moved part of the
 `copy_to_directory` traffic out of userspace read/write loops. Staged write
-callbacks dropped from `41548` to `37194`, and staged write bytes dropped from
-`131.60MiB` to `101.43MiB`; the remaining `30.17MiB` was accounted by
+bytes were `101.43MiB`, while another `30.17MiB` was accounted by
 `stage_copy_file_range_bytes`. The `3860` backing opens beyond staged write
 calls are the `3828` copy-file-range output opens plus `32` staged mmap opens.
 

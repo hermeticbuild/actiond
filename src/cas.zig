@@ -28,6 +28,27 @@ const stale_retry_sleep_ns = 2 * std.time.ns_per_ms;
 const cas_blob_mode: std.posix.mode_t = 0o444;
 
 var next_temp_id = std.atomic.Value(u64).init(0);
+var put_file_calls = std.atomic.Value(u64).init(0);
+var put_file_promote_attempts = std.atomic.Value(u64).init(0);
+var put_file_promote_success = std.atomic.Value(u64).init(0);
+var put_file_promote_existing = std.atomic.Value(u64).init(0);
+var put_file_promote_bytes = std.atomic.Value(u64).init(0);
+var put_file_promote_cross_device_fallbacks = std.atomic.Value(u64).init(0);
+var put_file_promote_permission_fallbacks = std.atomic.Value(u64).init(0);
+var put_file_copy_calls = std.atomic.Value(u64).init(0);
+var put_file_copy_bytes = std.atomic.Value(u64).init(0);
+
+pub const PutFileStats = struct {
+    calls: u64,
+    promote_attempts: u64,
+    promote_success: u64,
+    promote_existing: u64,
+    promote_bytes: u64,
+    promote_cross_device_fallbacks: u64,
+    promote_permission_fallbacks: u64,
+    copy_calls: u64,
+    copy_bytes: u64,
+};
 
 pub const Digest = struct {
     hash: [32]u8,
@@ -223,20 +244,107 @@ pub const Store = struct {
         src_dir: std.Io.Dir,
         src_path: []const u8,
     ) !Digest {
+        _ = put_file_calls.fetchAdd(1, .monotonic);
+        return self.putFileCopy(io, src_dir, src_path);
+    }
+
+    pub fn putFilePromote(
+        self: Store,
+        io: std.Io,
+        src_dir: std.Io.Dir,
+        src_path: []const u8,
+    ) !Digest {
+        _ = put_file_calls.fetchAdd(1, .monotonic);
+        if (comptime builtin.os.tag == .linux) {
+            return self.putFileByRenameLinux(io, src_dir, src_path) catch |err| switch (err) {
+                error.CrossDevice => return self.putFileCopy(io, src_dir, src_path),
+                error.PermissionDenied, error.AccessDenied => return self.putFileCopy(io, src_dir, src_path),
+                else => |e| return e,
+            };
+        }
+        return self.putFileCopy(io, src_dir, src_path);
+    }
+
+    fn putFileCopy(
+        self: Store,
+        io: std.Io,
+        src_dir: std.Io.Dir,
+        src_path: []const u8,
+    ) !Digest {
+        _ = put_file_copy_calls.fetchAdd(1, .monotonic);
         var src = try src_dir.openFile(io, src_path, .{});
         defer src.close(io);
 
         var writer = try BlobWriter.begin(io, self);
         defer writer.deinit(io);
 
+        var size_bytes: u64 = 0;
         var buffer: [copy_buffer_len]u8 = undefined;
         while (true) {
             const n = try readFd(src.handle, &buffer);
             if (n == 0) break;
             try writer.writeAll(buffer[0..n]);
+            size_bytes += n;
         }
 
-        return try writer.finish(io, null);
+        const digest = try writer.finish(io, null);
+        _ = put_file_copy_bytes.fetchAdd(size_bytes, .monotonic);
+        return digest;
+    }
+
+    fn putFileByRenameLinux(
+        self: Store,
+        io: std.Io,
+        src_dir: std.Io.Dir,
+        src_path: []const u8,
+    ) !Digest {
+        if (comptime builtin.os.tag != .linux) unreachable;
+        _ = put_file_promote_attempts.fetchAdd(1, .monotonic);
+
+        var src = try src_dir.openFile(io, src_path, .{});
+        var src_open = true;
+        defer if (src_open) src.close(io);
+        const original_mode = (try src_dir.statFile(io, src_path, .{})).permissions.toMode();
+
+        const digest = try digestFile(src);
+        var final_path_buffer: [blob_path_len]u8 = undefined;
+        const final_path = blobPath(digest, &final_path_buffer);
+        try self.root.createDirPath(io, digestParentPath(final_path));
+
+        setFdMode(src.handle, cas_blob_mode) catch |err| switch (err) {
+            error.PermissionDenied, error.AccessDenied => {
+                _ = put_file_promote_permission_fallbacks.fetchAdd(1, .monotonic);
+                return self.putFileCopy(io, src_dir, src_path);
+            },
+            else => |e| return e,
+        };
+
+        src_dir.renamePreserve(src_path, self.root, final_path, io) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                setFdMode(src.handle, original_mode) catch {};
+                _ = put_file_promote_existing.fetchAdd(1, .monotonic);
+                return digest;
+            },
+            error.CrossDevice => {
+                setFdMode(src.handle, original_mode) catch {};
+                _ = put_file_promote_cross_device_fallbacks.fetchAdd(1, .monotonic);
+                return error.CrossDevice;
+            },
+            error.PermissionDenied, error.AccessDenied => {
+                setFdMode(src.handle, original_mode) catch {};
+                _ = put_file_promote_permission_fallbacks.fetchAdd(1, .monotonic);
+                return err;
+            },
+            else => |e| {
+                setFdMode(src.handle, original_mode) catch {};
+                return e;
+            },
+        };
+        src.close(io);
+        src_open = false;
+        _ = put_file_promote_success.fetchAdd(1, .monotonic);
+        _ = put_file_promote_bytes.fetchAdd(digest.size_bytes, .monotonic);
+        return digest;
     }
 
     pub fn materializeTree(
@@ -364,6 +472,48 @@ pub const Store = struct {
         );
     }
 };
+
+pub fn snapshotPutFileStats() PutFileStats {
+    return .{
+        .calls = put_file_calls.load(.monotonic),
+        .promote_attempts = put_file_promote_attempts.load(.monotonic),
+        .promote_success = put_file_promote_success.load(.monotonic),
+        .promote_existing = put_file_promote_existing.load(.monotonic),
+        .promote_bytes = put_file_promote_bytes.load(.monotonic),
+        .promote_cross_device_fallbacks = put_file_promote_cross_device_fallbacks.load(.monotonic),
+        .promote_permission_fallbacks = put_file_promote_permission_fallbacks.load(.monotonic),
+        .copy_calls = put_file_copy_calls.load(.monotonic),
+        .copy_bytes = put_file_copy_bytes.load(.monotonic),
+    };
+}
+
+pub fn appendPutFileStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+    const stats = snapshotPutFileStats();
+    const text = try std.fmt.allocPrint(allocator,
+        \\cas_put_file_calls {d}
+        \\cas_put_file_promote_attempts {d}
+        \\cas_put_file_promote_success {d}
+        \\cas_put_file_promote_existing {d}
+        \\cas_put_file_promote_bytes {d}
+        \\cas_put_file_promote_cross_device_fallbacks {d}
+        \\cas_put_file_promote_permission_fallbacks {d}
+        \\cas_put_file_copy_calls {d}
+        \\cas_put_file_copy_bytes {d}
+        \\
+    , .{
+        stats.calls,
+        stats.promote_attempts,
+        stats.promote_success,
+        stats.promote_existing,
+        stats.promote_bytes,
+        stats.promote_cross_device_fallbacks,
+        stats.promote_permission_fallbacks,
+        stats.copy_calls,
+        stats.copy_bytes,
+    });
+    defer allocator.free(text);
+    try out.appendSlice(allocator, text);
+}
 
 pub const BlobWriter = struct {
     store: Store,
@@ -644,6 +794,41 @@ fn digestParentPath(path: []const u8) []const u8 {
     return path[0 .. path.len - (digest_hex_len + 1)];
 }
 
+fn digestFile(file: std.Io.File) !Digest {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var size_bytes: u64 = 0;
+    var buffer: [copy_buffer_len]u8 = undefined;
+    while (true) {
+        const n = try readFd(file.handle, &buffer);
+        if (n == 0) break;
+        hasher.update(buffer[0..n]);
+        size_bytes += n;
+    }
+
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+    return .{
+        .hash = hash,
+        .size_bytes = size_bytes,
+    };
+}
+
+fn setFdMode(fd: std.Io.File.Handle, mode: std.posix.mode_t) !void {
+    if (comptime builtin.os.tag != .linux) unreachable;
+    while (true) {
+        const rc = std.os.linux.fchmod(fd, @intCast(mode));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .ACCES => return error.AccessDenied,
+            .PERM => return error.PermissionDenied,
+            .IO => return error.InputOutput,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => return error.Unexpected,
+        }
+    }
+}
+
 fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
     var stale_attempts: usize = 0;
     while (true) {
@@ -918,4 +1103,58 @@ test "BlobWriter streams data into CAS" {
     const bytes = try store.readAlloc(std.testing.io, std.testing.allocator, digest);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("hello", bytes);
+}
+
+test "Store putFile keeps the source file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "copy me",
+    });
+
+    const digest = try store.putFile(std.testing.io, stage, "out.txt");
+    try std.testing.expect(digest.eql(Digest.fromBytes("copy me")));
+    try std.testing.expect(try store.has(std.testing.io, digest));
+    const stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    try std.testing.expectEqual(@as(u64, "copy me".len), stat.size);
+}
+
+test "Store promotes same-filesystem files into CAS" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "promote me",
+    });
+
+    const before = snapshotPutFileStats();
+    const digest = try store.putFilePromote(std.testing.io, stage, "out.txt");
+    const after = snapshotPutFileStats();
+    try std.testing.expect(digest.eql(Digest.fromBytes("promote me")));
+    try std.testing.expect(try store.has(std.testing.io, digest));
+    try std.testing.expectEqual(before.calls + 1, after.calls);
+    if (comptime builtin.os.tag == .linux) {
+        try std.testing.expectEqual(before.promote_attempts + 1, after.promote_attempts);
+        try std.testing.expectEqual(before.promote_success + 1, after.promote_success);
+        try std.testing.expectEqual(before.promote_bytes + @as(u64, "promote me".len), after.promote_bytes);
+        try std.testing.expectError(error.FileNotFound, stage.statFile(std.testing.io, "out.txt", .{}));
+    } else {
+        try std.testing.expectEqual(before.copy_calls + 1, after.copy_calls);
+        try std.testing.expectEqual(before.copy_bytes + @as(u64, "promote me".len), after.copy_bytes);
+        const stat = try stage.statFile(std.testing.io, "out.txt", .{});
+        try std.testing.expectEqual(@as(u64, "promote me".len), stat.size);
+    }
 }

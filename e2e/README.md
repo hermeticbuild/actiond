@@ -24,7 +24,7 @@ upload.
 VM mode expects a writable ext4 CAS image attached as virtio-blk. The runner
 creates one automatically with `tools/create_ext4_image.sh`; set
 `ACTIOND_VM_CAS_IMAGE=/path/cas.ext4` to reuse a persistent image, and
-`ACTIOND_VM_CAS_IMAGE_SIZE_MIB=32768` to adjust the default sparse size. If
+`ACTIOND_VM_CAS_IMAGE_SIZE_MIB=8192` to override the default sparse size. If
 the host lacks `mkfs.ext4`, the helper formats through Docker; set
 `ACTIOND_EXT4_IMAGE_DOCKER_IMAGE` to use an image that already contains
 `mkfs.ext4` and avoid package installation during the run.
@@ -43,7 +43,9 @@ e2e/run_llvm_vm_smoke.sh
 By default it uses an 8 CPU, 4096 MiB VM. The last output directory is written
 to `/tmp/actiond-last-llvm-vm-smoke-path`. Set `ACTIOND_LLVM_SMOKE_MAC_HOST=0`
 to skip the mac-host baseline, or `ACTIOND_LLVM_SMOKE_VM=0` to run only the
-mac-host baseline. By default the VM run first builds
+mac-host baseline. The runner defaults to `ACTIOND_LLVM_SMOKE_JOBS=8` for
+stable comparisons; set it to an empty value to let Bazel choose its default.
+By default the VM run first builds
 `//e2e:llvm_exec_warmup`, which transitions `@llvm-project//llvm:llvm-min-tblgen`
 to the Linux-musl exec configuration. Aquery shows that target exactly matches
 the Linux exec-config action set used by the VM `llvm-tblgen` build, so the

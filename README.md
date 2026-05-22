@@ -143,17 +143,10 @@ The VM smoke uses `--platforms=@llvm//platforms:linux_arm64_musl` and
 `--host_platform=@llvm//platforms:linux_arm64_musl` so generated exec tools run
 inside the Linux VM and do not depend on glibc inside actiond chroots.
 
-Current `@llvm-project//llvm:llvm-tblgen` timings from May 20, 2026, using
-`-c opt --strip=always --stripopt=--strip-all`:
-
-| Path | Jobs | Bazel elapsed |
-| --- | ---: | ---: |
-| actiond VM | 8 | 69.182s |
-| mac-host local | 8 | 93.153s |
-| actiond VM | 16 | 97.783s |
-| mac-host local | 16 | 133.437s |
-
-The wrapper defaults to `--jobs=8`; override with `ACTIOND_LLVM_SMOKE_JOBS`.
+The fresh-VM runner defaults to `--jobs=8` for stable comparisons; override it
+with `ACTIOND_LLVM_SMOKE_JOBS`, or set that variable to an empty value to let
+Bazel choose its default. The latest checked-in timing summary lives in
+`e2e/LLVM_VM_SMOKE_TIMINGS.md`.
 
 Standalone artifact e2e:
 

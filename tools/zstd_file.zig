@@ -64,8 +64,9 @@ test "max-level zstd compression round trips" {
     var input = std.Io.Reader.fixed(compressed);
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    var window: [zstd.default_window_len + zstd.block_size_max]u8 = undefined;
-    var decompressor: zstd.Decompress = .init(&input, &window, .{});
+    const window = try std.testing.allocator.alloc(u8, zstd.default_window_len + zstd.block_size_max);
+    defer std.testing.allocator.free(window);
+    var decompressor: zstd.Decompress = .init(&input, window, .{});
     const n = try decompressor.reader.streamRemaining(&output.writer);
 
     try std.testing.expectEqual(plain.len, n);

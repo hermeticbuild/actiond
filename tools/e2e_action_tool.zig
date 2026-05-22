@@ -51,10 +51,7 @@ fn expandArgs(
 
     for (raw_args) |arg| {
         if (arg.len > 1 and arg[0] == '@') {
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, arg[1..], allocator, .limited(64 * 1024 * 1024)) catch |err| {
-                std.debug.print("failed to read param file {s}: {s}\n", .{ arg[1..], @errorName(err) });
-                return err;
-            };
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, arg[1..], allocator, .limited(64 * 1024 * 1024));
             var it = std.mem.splitScalar(u8, bytes, '\n');
             while (it.next()) |line| {
                 const trimmed = std.mem.trim(u8, line, " \r\t");
@@ -113,8 +110,8 @@ fn expectNetworkBlocked() !void {
 
     const socket_rc = linux.socket(
         linux.AF.INET,
-        linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
-        linux.IPPROTO.TCP,
+        linux.SOCK.DGRAM | linux.SOCK.CLOEXEC,
+        linux.IPPROTO.UDP,
     );
     switch (std.posix.errno(socket_rc)) {
         .SUCCESS => {},
@@ -138,15 +135,44 @@ fn expectNetworkBlocked() !void {
     );
     switch (std.posix.errno(connect_rc)) {
         .NETUNREACH, .HOSTUNREACH, .NETDOWN, .ADDRNOTAVAIL, .ACCES, .PERM => return,
-        .SUCCESS, .INPROGRESS, .ALREADY, .ISCONN => {
-            std.debug.print("network block check found a reachable TCP path\n", .{});
-            return error.NetworkReachable;
+        .SUCCESS => {
+            var local_addr: linux.sockaddr.in = std.mem.zeroes(linux.sockaddr.in);
+            var local_addr_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+            switch (std.posix.errno(linux.getsockname(
+                fd,
+                @as(*linux.sockaddr, @ptrCast(&local_addr)),
+                &local_addr_len,
+            ))) {
+                .SUCCESS => {
+                    if (isBlockedLocalIpv4(local_addr.addr)) return;
+                    const source = std.mem.bigToNative(u32, local_addr.addr);
+                    std.debug.print(
+                        "network block check selected non-loopback source address {d}.{d}.{d}.{d}\n",
+                        .{
+                            (source >> 24) & 0xff,
+                            (source >> 16) & 0xff,
+                            (source >> 8) & 0xff,
+                            source & 0xff,
+                        },
+                    );
+                    return error.NetworkReachable;
+                },
+                else => |err| {
+                    std.debug.print("network block check returned unexpected getsockname errno: {s}\n", .{@tagName(err)});
+                    return error.NetworkCheckFailed;
+                },
+            }
         },
         else => |err| {
             std.debug.print("network block check returned unexpected connect errno: {s}\n", .{@tagName(err)});
             return error.NetworkCheckFailed;
         },
     }
+}
+
+fn isBlockedLocalIpv4(address_be: u32) bool {
+    const address = std.mem.bigToNative(u32, address_be);
+    return address == 0 or (address & 0xff000000) == 0x7f000000;
 }
 
 fn expectLocalhostHosts(io: std.Io, allocator: std.mem.Allocator) !void {
@@ -275,10 +301,7 @@ fn hashPath(
     path: []const u8,
     hash: *std.hash.Wyhash,
 ) anyerror!void {
-    const stat = root.statFile(io, path, .{}) catch |err| {
-        std.debug.print("failed to stat scan path {s}: {s}\n", .{ path, @errorName(err) });
-        return err;
-    };
+    const stat = try root.statFile(io, path, .{});
     hash.update(path);
     switch (stat.kind) {
         .file => try hashFile(io, root, path, hash),
@@ -322,10 +345,7 @@ fn hashDirectory(
 }
 
 fn hashFile(io: std.Io, root: std.Io.Dir, path: []const u8, hash: *std.hash.Wyhash) !void {
-    var file = root.openFile(io, path, .{}) catch |err| {
-        std.debug.print("failed to open scan file {s}: {s}\n", .{ path, @errorName(err) });
-        return err;
-    };
+    var file = try root.openFile(io, path, .{});
     defer file.close(io);
 
     var buffer: [128 * 1024]u8 = undefined;
@@ -362,11 +382,6 @@ fn writeTree(
         std.debug.print("failed to create output tree {s}: {s}\n", .{ path, @errorName(err) });
         return err;
     };
-    const tree_stat = root.statFile(io, path, .{}) catch |err| {
-        std.debug.print("failed to stat output tree after create {s}: {s}\n", .{ path, @errorName(err) });
-        return err;
-    };
-    std.debug.print("output tree after create {s}: kind={s}\n", .{ path, @tagName(tree_stat.kind) });
     var tree_dir = root.openDir(io, path, .{}) catch |err| {
         std.debug.print("failed to open output tree after create {s}: {s}\n", .{ path, @errorName(err) });
         return err;
@@ -419,10 +434,7 @@ fn writeDefaultFile(io: std.Io, root: std.Io.Dir, path: []const u8, data: []cons
 fn createParentDirs(io: std.Io, root: std.Io.Dir, path: []const u8) !void {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
     if (slash == 0) return;
-    root.createDirPath(io, path[0..slash]) catch |err| {
-        std.debug.print("failed to create output parent {s}: {s}\n", .{ path[0..slash], @errorName(err) });
-        return err;
-    };
+    try root.createDirPath(io, path[0..slash]);
 }
 
 fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
@@ -444,4 +456,11 @@ test "parseArgs accepts network block check" {
     try std.testing.expect(options.expect_localhost_hosts);
     try std.testing.expectEqual(@as(usize, 1), options.extra_out_files.items.len);
     try std.testing.expectEqualStrings("out/a.txt", options.extra_out_files.items[0]);
+}
+
+test "network block source address classifier allows only unspecified and loopback" {
+    try std.testing.expect(isBlockedLocalIpv4(std.mem.nativeToBig(u32, 0x00000000)));
+    try std.testing.expect(isBlockedLocalIpv4(std.mem.nativeToBig(u32, 0x7f000001)));
+    try std.testing.expect(!isBlockedLocalIpv4(std.mem.nativeToBig(u32, 0x0a000001)));
+    try std.testing.expect(!isBlockedLocalIpv4(std.mem.nativeToBig(u32, 0xc0a80102)));
 }

@@ -155,7 +155,9 @@ In VM mode:
 - the guest mounts that disk as ext4 at `/cas`
 - `linux-actiond-guest` stores CAS blobs, materialized trees, and ActionCache
   state there
-- per-action workspaces remain tmpfs under `/work`
+- per-action chroot roots remain tmpfs under `/work`; actiondfs staged output
+  files live under `/cas/actiondfs-stage` so output collection can promote them
+  into CAS by same-filesystem rename
 
 Client uploads and downloads cross the VM boundary as REAPI/ByteStream traffic,
 but action input reads and action output writes hit the guest's native Linux
@@ -174,13 +176,15 @@ The host does not mirror uploaded blobs into a second CAS.
 ### Inputs
 
 In VM mode, action input files are exposed through `actiondfs`, a small built-in
-read-only Linux filesystem in the repo under `kernel/actiondfs`. For each
-action, the guest passes the REAPI input-root digest to actiondfs. The child
-mount namespace mounts:
+Linux filesystem in the repo under `kernel/actiondfs`. For each action, the
+guest passes the REAPI input-root digest to actiondfs. The default child mount
+namespace mounts actiondfs directly at `/workspace`; it resolves REAPI directory
+and file nodes lazily from the guest CAS mounted at `/cas`, while staging new
+output files outside the CAS until output collection.
 
-- `actiondfs` as the lower filesystem, resolving REAPI directory and file nodes
-  lazily from the guest CAS mounted at `/cas`
-- stock overlayfs at `/workspace`, using per-action upper/work directories
+Actions that opt into `execution_requirements = {"mutates_inputs": "1"}` use
+the compatibility path: actiondfs is mounted read-only as an overlay lowerdir,
+and stock overlayfs is mounted at `/workspace` with a per-action upper/workdir.
 
 `actiondfs` caches parsed non-root Directory protos by digest and materializes
 per-mount child nodes only when lookup needs them. It is the only supported VM
@@ -218,13 +222,17 @@ which lets Docker e2e run on ordinary host kernels:
   whole directories
 - output parent directories are created in the writable execroot
 
-Hardlinks are not used as a fallback. The VM uses actiondfs plus overlayfs for
-inputs, while Linux-direct uses bind mounts.
+Hardlinks are not used as a fallback. The VM uses strict actiondfs by default
+and overlayfs only for explicit input-mutating actions, while Linux-direct uses
+bind mounts.
 
 ### Outputs
 
-The guest writes action outputs into its writable action root, then stores
+The guest writes action outputs into the actiondfs stage tree, then stores
 declared output files and directory trees directly into the guest `/cas`.
+When staged files and CAS blobs are on the same ext4 filesystem, output
+collection promotes files into CAS with a rename after hashing them; otherwise
+it falls back to byte-copying.
 `ExecuteResponse` is returned to the host as normal gRPC payload bytes; there is
 no post-Execute host import step in VM mode.
 
@@ -236,8 +244,9 @@ For each action:
 2. Read the input-root digest. The Linux-direct materialization path walks the
    tree; the VM actiondfs path lets the kernel filesystem resolve it lazily.
 3. Create a per-action work root.
-4. In VM/actiondfs mode, prepare actiondfs plus overlayfs lower/upper/work mount
-   paths. Otherwise materialize input paths using read-only bind mounts.
+4. In VM/actiondfs mode, prepare a strict actiondfs stage path, or overlay
+   lower/upper/work paths for actions marked `mutates_inputs`. Otherwise
+   materialize input paths using read-only bind mounts.
 5. If requested, attach libc runtime directories from SquashFS.
 6. Create output parent directories.
 7. Fork the action process.
@@ -249,7 +258,7 @@ For each action:
    - unshare the mount and network namespaces
    - bring up loopback inside the private network namespace
    - make mounts private
-   - mount `actiondfs` and overlayfs when an actiondfs lowerdir is active
+   - mount strict `actiondfs`, or actiondfs plus overlayfs for compatibility
    - apply read-only bind mounts
    - chroot into the work root
    - chdir to the requested working directory
@@ -401,8 +410,8 @@ present in the Bazel-built VM kernel.
 The main copy-minimizing choices are:
 
 - VM mode keeps CAS and ActionCache on a native guest ext4 filesystem
-- VM action inputs are served by an actiondfs input-root lowerdir plus stock
-  overlayfs upperdir instead of per-file bind mounts or hardlink forests
+- VM action inputs are served by strict actiondfs instead of per-file bind
+  mounts, hardlink forests, or the overlayfs compatibility path
 - Linux-host action inputs are bind-mounted instead of copied
 - tree directories are bind-mounted at directory granularity when available
 - runtimes are mounted from SquashFS instead of unpacked into the initramfs

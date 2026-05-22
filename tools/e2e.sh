@@ -28,7 +28,9 @@ Environment:
   ACTIOND_E2E_NESTED_FILES_PER_GROUP=96
   ACTIOND_E2E_STANDALONE=1
   ACTIOND_E2E_JOBS=8
+  ACTIOND_REPO_BAZEL_FLAGS="--config=remote"
   ACTIOND_E2E_REMOTE_GRPC_LOG=/path/to/remote_grpc.log
+  ACTIOND_E2E_ACTIONDFS_STATS_PATH=/path/to/actiondfs_stats.txt
 EOF
 }
 
@@ -40,12 +42,23 @@ e2e_root=""
 e2e_log=""
 e2e_log_label="actiond log"
 last_e2e_root=""
+repo_bazel_flags=()
+if [[ -n "${ACTIOND_REPO_BAZEL_FLAGS:-}" ]]; then
+  read -r -a repo_bazel_flags <<<"${ACTIOND_REPO_BAZEL_FLAGS}"
+fi
 
 cleanup_e2e_server() {
   local status="${1:-$?}"
+  if [[ "${status}" -ne 0 && -n "${ACTIOND_E2E_ACTIONDFS_STATS_PATH:-}" ]]; then
+    sleep 1.1
+  fi
   if [[ "${status}" -ne 0 && -n "${e2e_log}" && -f "${e2e_log}" ]]; then
     echo "----- ${e2e_log_label} (${e2e_log}) -----" >&2
     tail -200 "${e2e_log}" >&2 || true
+  fi
+  if [[ "${status}" -ne 0 && -n "${ACTIOND_E2E_ACTIONDFS_STATS_PATH:-}" && -f "${ACTIOND_E2E_ACTIONDFS_STATS_PATH}" ]]; then
+    echo "----- actiondfs stats (${ACTIOND_E2E_ACTIONDFS_STATS_PATH}) -----" >&2
+    tail -200 "${ACTIOND_E2E_ACTIONDFS_STATS_PATH}" >&2 || true
   fi
   if [[ -n "${e2e_server_pid}" ]]; then
     kill "${e2e_server_pid}" >/dev/null 2>&1 || true
@@ -72,7 +85,9 @@ cleanup_e2e_server() {
 }
 
 run_bazel() {
-  (cd "${repo_root}" && bazel "$@")
+  local command="$1"
+  shift
+  (cd "${repo_root}" && bazel "${command}" "${repo_bazel_flags[@]}" "$@")
 }
 
 bazel_output() {
@@ -141,6 +156,7 @@ run_stress_workspace() {
       --bes_upload_mode=nowait_for_upload_complete \
       --remote_executor="grpc://${endpoint}" \
       --remote_cache="grpc://${endpoint}" \
+      --remote_default_exec_properties=libc=glibc2.35 \
       --noremote_accept_cached \
       --remote_local_fallback=false \
       --remote_upload_local_results=false \
@@ -251,6 +267,9 @@ run_vm_e2e() {
       --initramfs="${initramfs}"
       --runtime-image="${runtimes}"
     )
+  fi
+  if [[ -n "${ACTIOND_E2E_ACTIONDFS_STATS_PATH:-}" ]]; then
+    server_args+=(--actiondfs-stats-path="${ACTIOND_E2E_ACTIONDFS_STATS_PATH}")
   fi
 
   "${server}" serve-vm "${server_args[@]}" >"${log}" 2>&1 &

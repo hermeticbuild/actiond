@@ -49,6 +49,11 @@ bazel build --config=remote //vm:linux_kernel_zst
 
 Use `--config=remote` for large kernel/package Bazel builds from this repo
 unless the user explicitly asks for a local-only build.
+For `tools/e2e.sh` repo-side build steps, pass it through with:
+
+```bash
+ACTIOND_REPO_BAZEL_FLAGS=--config=remote tools/e2e.sh vm
+```
 
 The VM guest owns the REAPI CAS and ActionCache on a writable ext4 disk image
 attached as a virtio block device and mounted at `/cas`. In VM mode there is a
@@ -134,11 +139,16 @@ bazel build @llvm-project//llvm:llvm-tblgen \
   --jobs=8
 ```
 
-The same command is wrapped by:
+The same smoke is wrapped by:
 
 ```bash
 e2e/llvm_tblgen_smoke.sh
 ```
+
+The standalone wrapper only passes `--jobs` when `ACTIOND_LLVM_SMOKE_JOBS` is
+set. The fresh-worker runner below defaults that variable to `8` for stable
+before/after comparisons; set it to an empty value to measure Bazel's own
+default job count.
 
 To run the LLVM VM smoke from a fresh worker and collect timing summaries, use:
 

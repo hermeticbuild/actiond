@@ -12,13 +12,16 @@ pub const Error = error{
     UnsupportedHost,
 };
 
-pub const guest_cas_blob_root_path = "/cas/blobs/sha256";
+pub const guest_cas_root_path = "/cas";
+pub const guest_cas_blob_root_path = guest_cas_root_path ++ "/blobs/sha256";
+pub const guest_actiondfs_stage_name = "actiondfs-stage";
+pub const guest_actiondfs_stage_root_path = guest_cas_root_path ++ "/" ++ guest_actiondfs_stage_name;
 
 pub fn run(io: std.Io) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
     const allocator = std.heap.smp_allocator;
-    var cas_dir = try std.Io.Dir.openDirAbsolute(io, "/cas", .{});
+    var cas_dir = try std.Io.Dir.openDirAbsolute(io, guest_cas_root_path, .{});
     defer cas_dir.close(io);
     var work_dir = try std.Io.Dir.openDirAbsolute(io, "/work", .{});
     defer work_dir.close(io);
@@ -26,6 +29,8 @@ pub fn run(io: std.Io) !void {
     defer action_work_dir.close(io);
 
     try cas.Store.init(cas_dir).ensureLayout(io);
+    try cas_dir.deleteTree(io, guest_actiondfs_stage_name);
+    try cas_dir.createDirPath(io, guest_actiondfs_stage_name);
     var ac_dir = try cas_dir.createDirPathOpen(io, "ac", .{});
     defer ac_dir.close(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
@@ -35,6 +40,7 @@ pub fn run(io: std.Io) !void {
         .use_actiondfs = true,
         .cas_blob_root_path = guest_cas_blob_root_path,
         .input_cas_blob_root_path = guest_cas_blob_root_path,
+        .actiondfs_stage_root_path = guest_actiondfs_stage_root_path,
     });
 
     const server: reapi_dispatch.Server = .{
@@ -214,6 +220,7 @@ fn readActiondfsStats(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
         try out.appendSlice(allocator, buffer[0..n]);
         if (out.items.len > 1024 * 1024) return error.MessageTooLarge;
     }
+    try cas.appendPutFileStats(allocator, &out);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -243,6 +250,7 @@ test "guest worker is Linux-only" {
 
 test "guest worker uses guest-native CAS for actiondfs reads" {
     try std.testing.expectEqualStrings("/cas/blobs/sha256", guest_cas_blob_root_path);
+    try std.testing.expectEqualStrings("/cas/actiondfs-stage", guest_actiondfs_stage_root_path);
 }
 
 test "guest worker rejects malformed actiondfs stats requests before touching proc" {
