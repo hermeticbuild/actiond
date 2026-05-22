@@ -40,11 +40,15 @@ Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.
 The VM kernel is built by `linux.bzl` from the kernel archive declared in
 `MODULE.bazel`; do not reintroduce the old Docker-backed Kbuild path. During
 local linux.bzl development, keep the `local_path_override` in `MODULE.bazel`
-pointing at `/Users/dzbarsky/linux.bzl` and verify the kernel with:
+pointing at `/Users/dzbarsky/linux.bzl` and verify the kernel with the remote
+Bazel config:
 
 ```bash
-bazel build //vm:linux_kernel_zst
+bazel build --config=remote //vm:linux_kernel_zst
 ```
+
+Use `--config=remote` for large kernel/package Bazel builds from this repo
+unless the user explicitly asks for a local-only build.
 
 The VM guest owns the REAPI CAS and ActionCache on a writable ext4 disk image
 attached as a virtio block device and mounted at `/cas`. In VM mode there is a

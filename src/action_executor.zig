@@ -96,6 +96,20 @@ const CasReadRoots = struct {
     staged_index: ?*staged_cas_index.Index = null,
 };
 
+const ActionInputMode = enum {
+    materialized,
+    actiondfs_strict,
+    actiondfs_overlay,
+
+    fn label(self: ActionInputMode) []const u8 {
+        return switch (self) {
+            .materialized => "materialized",
+            .actiondfs_strict => "actiondfs_strict",
+            .actiondfs_overlay => "actiondfs_overlay",
+        };
+    }
+};
+
 pub fn prepareExecuteOptions(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -135,6 +149,30 @@ fn casReadRoots(options: ExecuteOptions) CasReadRoots {
 
 fn actiondfsInputBlobRootPath(options: ExecuteOptions) ?[]const u8 {
     return options.input_cas_blob_root_path orelse options.cas_blob_root_path;
+}
+
+fn actionMutatesInputs(platform: ?reapi.Platform) bool {
+    const value = platform orelse return false;
+    for (value.properties) |property| {
+        if (!std.mem.eql(u8, property.name, "mutates_inputs")) continue;
+        if (property.value.len == 0) return false;
+        if (std.ascii.eqlIgnoreCase(property.value, "1") or
+            std.ascii.eqlIgnoreCase(property.value, "true") or
+            std.ascii.eqlIgnoreCase(property.value, "yes") or
+            std.ascii.eqlIgnoreCase(property.value, "on"))
+        {
+            return true;
+        }
+        if (std.ascii.eqlIgnoreCase(property.value, "0") or
+            std.ascii.eqlIgnoreCase(property.value, "false") or
+            std.ascii.eqlIgnoreCase(property.value, "no") or
+            std.ascii.eqlIgnoreCase(property.value, "off"))
+        {
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 fn readCasBlobAlloc(
@@ -293,6 +331,12 @@ pub fn executeActionWithOptions(
     defer freeDirectoryInputs(allocator, directory_inputs.items);
     const use_workspace_chroot = options.runtime_root_path != null;
     const use_actiondfs_inputs = use_workspace_chroot and options.use_actiondfs;
+    const input_mode: ActionInputMode = if (!use_actiondfs_inputs)
+        .materialized
+    else if (actionMutatesInputs(action.platform))
+        .actiondfs_overlay
+    else
+        .actiondfs_strict;
     if (!use_actiondfs_inputs) {
         const allow_directory_inputs = use_workspace_chroot;
         try collectInputs(io, allocator, store, read_roots, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
@@ -320,8 +364,8 @@ pub fn executeActionWithOptions(
     var exec_root_dir = work_root;
     var workspace_dir: ?std.Io.Dir = null;
     defer if (workspace_dir) |*dir| dir.close(io);
-    var actiondfs_upper_dir: ?std.Io.Dir = null;
-    defer if (actiondfs_upper_dir) |*dir| dir.close(io);
+    var actiondfs_stage_dir: ?std.Io.Dir = null;
+    defer if (actiondfs_stage_dir) |*dir| dir.close(io);
     var actiondfs_exec_path_override: ?[]u8 = null;
     defer if (actiondfs_exec_path_override) |path| allocator.free(path);
 
@@ -358,9 +402,10 @@ pub fn executeActionWithOptions(
             work_root_path,
             exec_root_path,
             input_root_digest,
+            input_mode,
         );
-        actiondfs_upper_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.?.mounts[0].upperdir, .{});
-        exec_root_dir = actiondfs_upper_dir.?;
+        actiondfs_stage_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.?.stagePath(), .{ .iterate = true });
+        exec_root_dir = actiondfs_stage_dir.?;
         actiondfs_exec_path_override = resolveActiondfsExecutablePath(
             io,
             allocator,
@@ -395,10 +440,19 @@ pub fn executeActionWithOptions(
         };
     }
     defer materialization.deinit(allocator);
-    prepareOutputParents(io, exec_root_dir, command) catch |err| switch (err) {
+    prepareOutputPaths(
+        io,
+        allocator,
+        store,
+        read_roots,
+        input_root_digest,
+        exec_root_dir,
+        command,
+        if (use_workspace_chroot) "/workspace" else "",
+    ) catch |err| switch (err) {
         error.FileNotFound => return error.OutputParentCreateFailed,
         else => {
-            logExecuteSetupError("prepare output parents", action_digest, err);
+            logExecuteSetupError("prepare output paths", action_digest, err);
             return err;
         },
     };
@@ -469,9 +523,9 @@ pub fn executeActionWithOptions(
     }
     if (actiondfs_workspace) |*workspace| {
         try workspace.mountForCollection();
-        var merged_dir = try std.Io.Dir.openDirAbsolute(io, workspace.mounts[0].overlay_target, .{ .iterate = true });
-        defer merged_dir.close(io);
-        try collectOutputFiles(io, allocator, store, options.staged_cas_index, merged_dir, command, &outcome);
+        var output_dir = try std.Io.Dir.openDirAbsolute(io, workspace.collectionPath(), .{ .iterate = true });
+        defer output_dir.close(io);
+        try collectOutputFiles(io, allocator, store, options.staged_cas_index, output_dir, command, &outcome);
     } else {
         try collectOutputFiles(io, allocator, store, options.staged_cas_index, exec_root_dir, command, &outcome);
     }
@@ -506,6 +560,7 @@ pub fn executeActionWithOptions(
         outcome.output_files.len,
         outcome.output_directories.len,
         stressCaseFromCommand(command),
+        input_mode,
     );
     if (outcome.runner_timing) |timing| {
         logRunnerTiming(action_digest, timing);
@@ -777,12 +832,13 @@ fn commandPath(command: reapi.Command) ?[]const u8 {
 
 const ActiondfsWorkspace = struct {
     base_path: []u8,
-    lower_target: [:0]u8,
-    overlay_target: [:0]u8,
-    upperdir: [:0]u8,
+    mode: ActionInputMode,
+    lower_target: ?[:0]u8 = null,
+    overlay_target: ?[:0]u8 = null,
+    stage_dir: [:0]u8,
     actiondfs_data: [:0]u8,
-    overlay_data: [:0]u8,
-    mounts: [1]action_runner.ActiondfsOverlayMount,
+    overlay_data: ?[:0]u8 = null,
+    mounts: [1]action_runner.ActiondfsMount,
     collection_mounted: bool = false,
 
     fn init(
@@ -792,37 +848,66 @@ const ActiondfsWorkspace = struct {
         work_root_path: []const u8,
         workspace_path: []const u8,
         input_root_digest: cas.Digest,
+        mode: ActionInputMode,
     ) !ActiondfsWorkspace {
         const base_path = try std.fmt.allocPrint(allocator, "{s}.actiondfs", .{work_root_path});
         errdefer allocator.free(base_path);
         try std.Io.Dir.cwd().createDir(io, base_path, .default_dir);
 
-        const lower_path = try std.fmt.allocPrintSentinel(allocator, "{s}/lower", .{base_path}, 0);
-        errdefer allocator.free(lower_path);
-        const upper_path = try std.fmt.allocPrintSentinel(allocator, "{s}/upper", .{base_path}, 0);
-        errdefer allocator.free(upper_path);
-        const work_path = try std.fmt.allocPrint(allocator, "{s}/work", .{base_path});
-        defer allocator.free(work_path);
-
         var base_dir = try std.Io.Dir.openDirAbsolute(io, base_path, .{});
         defer base_dir.close(io);
-        try base_dir.createDir(io, "lower", .default_dir);
-        try base_dir.createDir(io, "upper", .default_dir);
-        try base_dir.createDir(io, "work", .default_dir);
+        try base_dir.createDir(io, "stage", .default_dir);
+
+        const stage_path = try std.fmt.allocPrintSentinel(allocator, "{s}/stage", .{base_path}, 0);
+        errdefer allocator.free(stage_path);
 
         var root_hash: [64]u8 = undefined;
 
-        const actiondfs_data = try std.fmt.allocPrintSentinel(
-            allocator,
-            "root={s},cas={s}",
-            .{ input_root_digest.formatHex(&root_hash), cas_blob_root },
-            0,
-        );
+        const root_hex = input_root_digest.formatHex(&root_hash);
+        const actiondfs_data = if (mode == .actiondfs_strict)
+            try std.fmt.allocPrintSentinel(
+                allocator,
+                "root={s},cas={s},stage={s}",
+                .{ root_hex, cas_blob_root, stage_path },
+                0,
+            )
+        else
+            try std.fmt.allocPrintSentinel(
+                allocator,
+                "root={s},cas={s}",
+                .{ root_hex, cas_blob_root },
+                0,
+            );
         errdefer allocator.free(actiondfs_data);
+
+        if (mode == .actiondfs_strict) {
+            const target = try allocator.dupeZ(u8, workspace_path);
+            errdefer allocator.free(target);
+            return .{
+                .base_path = base_path,
+                .mode = mode,
+                .stage_dir = stage_path,
+                .actiondfs_data = actiondfs_data,
+                .mounts = .{.{ .strict = .{
+                    .fstype = "actiondfs",
+                    .target = target,
+                    .stage_dir = stage_path,
+                    .actiondfs_data = actiondfs_data,
+                } }},
+            };
+        }
+
+        const lower_path = try std.fmt.allocPrintSentinel(allocator, "{s}/lower", .{base_path}, 0);
+        errdefer allocator.free(lower_path);
+        const work_path = try std.fmt.allocPrint(allocator, "{s}/work", .{base_path});
+        defer allocator.free(work_path);
+        try base_dir.createDir(io, "lower", .default_dir);
+        try base_dir.createDir(io, "work", .default_dir);
+
         const overlay_data = try std.fmt.allocPrintSentinel(
             allocator,
             "lowerdir={s},upperdir={s},workdir={s}",
-            .{ lower_path, upper_path, work_path },
+            .{ lower_path, stage_path, work_path },
             0,
         );
         errdefer allocator.free(overlay_data);
@@ -831,30 +916,32 @@ const ActiondfsWorkspace = struct {
 
         return .{
             .base_path = base_path,
+            .mode = mode,
             .lower_target = lower_path,
             .overlay_target = overlay_target,
-            .upperdir = upper_path,
+            .stage_dir = stage_path,
             .actiondfs_data = actiondfs_data,
             .overlay_data = overlay_data,
-            .mounts = .{.{
+            .mounts = .{.{ .overlay = .{
                 .fstype = "actiondfs",
                 .lower_target = lower_path,
                 .overlay_target = overlay_target,
-                .upperdir = upper_path,
+                .upperdir = stage_path,
                 .actiondfs_data = actiondfs_data,
                 .overlay_data = overlay_data,
-            }},
+            } }},
         };
     }
 
     fn mountForCollection(self: *ActiondfsWorkspace) !void {
         if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
         if (self.collection_mounted) return;
+        if (self.mode == .actiondfs_strict) return;
 
         const linux = std.os.linux;
         const actiondfs_rc = linux.mount(
             "actiondfs",
-            self.lower_target.ptr,
+            self.lower_target.?.ptr,
             "actiondfs",
             linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME,
             @intFromPtr(self.actiondfs_data.ptr),
@@ -863,14 +950,14 @@ const ActiondfsWorkspace = struct {
             .SUCCESS => {},
             else => return error.MountFailed,
         }
-        errdefer _ = linux.umount2(self.lower_target.ptr, linux.MNT.DETACH);
+        errdefer _ = linux.umount2(self.lower_target.?.ptr, linux.MNT.DETACH);
 
         const overlay_rc = linux.mount(
             "overlay",
-            self.overlay_target.ptr,
+            self.overlay_target.?.ptr,
             "overlay",
             linux.MS.NOSUID | linux.MS.NODEV,
-            @intFromPtr(self.overlay_data.ptr),
+            @intFromPtr(self.overlay_data.?.ptr),
         );
         switch (std.posix.errno(overlay_rc)) {
             .SUCCESS => {},
@@ -879,22 +966,38 @@ const ActiondfsWorkspace = struct {
         self.collection_mounted = true;
     }
 
+    fn stagePath(self: *const ActiondfsWorkspace) [:0]const u8 {
+        return self.stage_dir;
+    }
+
+    fn collectionPath(self: *const ActiondfsWorkspace) [:0]const u8 {
+        return switch (self.mode) {
+            .actiondfs_strict => self.stage_dir,
+            .actiondfs_overlay => self.overlay_target.?,
+            .materialized => unreachable,
+        };
+    }
+
     fn deinit(self: *ActiondfsWorkspace, io: std.Io, allocator: std.mem.Allocator) void {
         if (comptime builtin.os.tag == .linux) {
             if (self.collection_mounted) {
-                _ = std.os.linux.umount2(self.overlay_target.ptr, std.os.linux.MNT.DETACH);
-                _ = std.os.linux.umount2(self.lower_target.ptr, std.os.linux.MNT.DETACH);
+                if (self.overlay_target) |target| _ = std.os.linux.umount2(target.ptr, std.os.linux.MNT.DETACH);
+                if (self.lower_target) |target| _ = std.os.linux.umount2(target.ptr, std.os.linux.MNT.DETACH);
             }
         }
         std.Io.Dir.cwd().deleteTree(io, self.base_path) catch |err| {
             std.log.warn("failed to remove actiondfs workspace {s}: {s}", .{ self.base_path, @errorName(err) });
         };
         allocator.free(self.base_path);
-        allocator.free(self.lower_target);
-        allocator.free(self.overlay_target);
-        allocator.free(self.upperdir);
+        if (self.lower_target) |path| allocator.free(path);
+        if (self.overlay_target) |path| allocator.free(path);
+        allocator.free(self.stage_dir);
         allocator.free(self.actiondfs_data);
-        allocator.free(self.overlay_data);
+        if (self.overlay_data) |data| allocator.free(data);
+        switch (self.mounts[0]) {
+            .strict => |mount| allocator.free(mount.target),
+            .overlay => {},
+        }
         self.* = undefined;
     }
 };
@@ -1207,10 +1310,11 @@ fn logActionTiming(
     output_files: usize,
     output_directories: usize,
     stress_case: []const u8,
+    input_mode: ActionInputMode,
 ) void {
     var hash: [64]u8 = undefined;
     std.log.info(
-        "execute timing {s}/{d}: total_ns={d} input_fetch_ns={d} execution_ns={d} output_upload_ns={d} file_inputs={d} directory_inputs={d} bind_mounts={d} actiondfs_mounts={d} output_files={d} output_directories={d} stress_case={s}",
+        "execute timing {s}/{d}: total_ns={d} input_fetch_ns={d} execution_ns={d} output_upload_ns={d} file_inputs={d} directory_inputs={d} bind_mounts={d} actiondfs_mounts={d} output_files={d} output_directories={d} stress_case={s} input_mode={s}",
         .{
             action_digest.formatHex(&hash),
             action_digest.size_bytes,
@@ -1225,6 +1329,7 @@ fn logActionTiming(
             output_files,
             output_directories,
             stress_case,
+            input_mode.label(),
         },
     );
 }
@@ -1444,18 +1549,49 @@ fn collectOutputDirectoryWithStat(
     });
 }
 
+fn prepareOutputPaths(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    read_roots: CasReadRoots,
+    input_root_digest: cas.Digest,
+    work_root: std.Io.Dir,
+    command: reapi.Command,
+    workspace_prefix: []const u8,
+) !void {
+    _ = allocator;
+    _ = store;
+    _ = read_roots;
+    _ = input_root_digest;
+    _ = workspace_prefix;
+    try prepareOutputParents(io, work_root, command);
+}
+
 fn prepareOutputParents(
     io: std.Io,
     work_root: std.Io.Dir,
     command: reapi.Command,
 ) !void {
     if (command.output_paths.len != 0) {
-        for (command.output_paths) |path| try createOutputParent(io, work_root, path);
-        return;
+        const precreate_output_paths = commandOutputPathsAreDirectories(command);
+        for (command.output_paths) |path| {
+            if (precreate_output_paths) {
+                try createOutputDirectory(io, work_root, path);
+            } else {
+                try createOutputParent(io, work_root, path);
+            }
+        }
     }
 
     for (command.output_files) |path| try createOutputParent(io, work_root, path);
-    for (command.output_directories) |path| try createOutputParent(io, work_root, path);
+    for (command.output_directories) |path| try createOutputDirectory(io, work_root, path);
+}
+
+fn commandOutputPathsAreDirectories(command: reapi.Command) bool {
+    if (command.arguments.len == 0) return false;
+    const argv0 = command.arguments[0];
+    return std.mem.eql(u8, argv0, "copy_to_directory") or
+        std.mem.endsWith(u8, argv0, "/copy_to_directory");
 }
 
 fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void {
@@ -1464,6 +1600,12 @@ fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void
     const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
     if (last_slash == 0) return;
     try work_root.createDirPath(io, path[0..last_slash]);
+}
+
+fn createOutputDirectory(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void {
+    if (path.len == 0) return;
+    try execroot.validatePath(path);
+    try work_root.createDirPath(io, path);
 }
 
 fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
@@ -1740,6 +1882,25 @@ test "libc runtime platform property accepts pinned runtimes" {
     }));
     try std.testing.expectError(error.UnsupportedLibcRuntime, libcRuntimeFromPlatform(.{
         .properties = &.{.{ .name = "libc", .value = "glibc2.17" }},
+    }));
+}
+
+test "actionMutatesInputs parses platform property" {
+    try std.testing.expect(!actionMutatesInputs(null));
+    try std.testing.expect(!actionMutatesInputs(.{
+        .properties = &.{.{ .name = "mutates_inputs", .value = "false" }},
+    }));
+    try std.testing.expect(!actionMutatesInputs(.{
+        .properties = &.{.{ .name = "mutates_inputs", .value = "0" }},
+    }));
+    try std.testing.expect(actionMutatesInputs(.{
+        .properties = &.{.{ .name = "mutates_inputs", .value = "1" }},
+    }));
+    try std.testing.expect(actionMutatesInputs(.{
+        .properties = &.{.{ .name = "mutates_inputs", .value = "yes" }},
+    }));
+    try std.testing.expect(actionMutatesInputs(.{
+        .properties = &.{.{ .name = "mutates_inputs", .value = "legacy-tool" }},
     }));
 }
 
@@ -2357,6 +2518,33 @@ test "prepareOutputParents creates parent directories for declared outputs" {
         .output_files = &.{"gen/out.txt"},
     });
     _ = try work_dir.statFile(std.testing.io, "gen", .{});
+}
+
+test "prepareOutputParents creates declared output directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    try prepareOutputParents(std.testing.io, work_dir, .{
+        .output_directories = &.{"gen/tree"},
+    });
+    _ = try work_dir.statFile(std.testing.io, "gen/tree", .{});
+}
+
+test "prepareOutputParents creates copy_to_directory output_paths as directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    try prepareOutputParents(std.testing.io, work_dir, .{
+        .arguments = &.{ "external/tools/copy_to_directory", "config.json" },
+        .output_paths = &.{"bazel-out/bin/pkg/tree"},
+    });
+    _ = try work_dir.statFile(std.testing.io, "bazel-out/bin/pkg/tree", .{});
 }
 
 test "prepareOutputParents creates parent directories for declared output paths" {

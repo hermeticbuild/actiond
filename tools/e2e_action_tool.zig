@@ -51,7 +51,10 @@ fn expandArgs(
 
     for (raw_args) |arg| {
         if (arg.len > 1 and arg[0] == '@') {
-            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, arg[1..], allocator, .limited(64 * 1024 * 1024));
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, arg[1..], allocator, .limited(64 * 1024 * 1024)) catch |err| {
+                std.debug.print("failed to read param file {s}: {s}\n", .{ arg[1..], @errorName(err) });
+                return err;
+            };
             var it = std.mem.splitScalar(u8, bytes, '\n');
             while (it.next()) |line| {
                 const trimmed = std.mem.trim(u8, line, " \r\t");
@@ -272,7 +275,10 @@ fn hashPath(
     path: []const u8,
     hash: *std.hash.Wyhash,
 ) anyerror!void {
-    const stat = try root.statFile(io, path, .{});
+    const stat = root.statFile(io, path, .{}) catch |err| {
+        std.debug.print("failed to stat scan path {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
     hash.update(path);
     switch (stat.kind) {
         .file => try hashFile(io, root, path, hash),
@@ -316,7 +322,10 @@ fn hashDirectory(
 }
 
 fn hashFile(io: std.Io, root: std.Io.Dir, path: []const u8, hash: *std.hash.Wyhash) !void {
-    var file = try root.openFile(io, path, .{});
+    var file = root.openFile(io, path, .{}) catch |err| {
+        std.debug.print("failed to open scan file {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
     defer file.close(io);
 
     var buffer: [128 * 1024]u8 = undefined;
@@ -349,14 +358,32 @@ fn writeTree(
     value: u64,
     count: usize,
 ) !void {
-    try root.createDirPath(io, path);
+    root.createDirPath(io, path) catch |err| {
+        std.debug.print("failed to create output tree {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    const tree_stat = root.statFile(io, path, .{}) catch |err| {
+        std.debug.print("failed to stat output tree after create {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    std.debug.print("output tree after create {s}: kind={s}\n", .{ path, @tagName(tree_stat.kind) });
+    var tree_dir = root.openDir(io, path, .{}) catch |err| {
+        std.debug.print("failed to open output tree after create {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer tree_dir.close(io);
     var i: usize = 0;
     while (i < count) : (i += 1) {
+        const child_name = try std.fmt.allocPrint(allocator, "generated-{d}.txt", .{i});
+        defer allocator.free(child_name);
         const child = try std.fmt.allocPrint(allocator, "{s}/generated-{d}.txt", .{ path, i });
         defer allocator.free(child);
         const data = try std.fmt.allocPrint(allocator, "index={d}\nhash={x}\n", .{ i, value +% i });
         defer allocator.free(data);
-        try writeDefaultFile(io, root, child, data);
+        writeDefaultFile(io, tree_dir, child_name, data) catch |err| {
+            std.debug.print("failed to write output tree child via open dir {s}: {s}\n", .{ child, @errorName(err) });
+            return err;
+        };
     }
 }
 
@@ -375,17 +402,27 @@ fn writeGeneratedFile(
 }
 
 fn writeDefaultFile(io: std.Io, root: std.Io.Dir, path: []const u8, data: []const u8) !void {
-    try root.writeFile(io, .{
-        .sub_path = path,
-        .data = data,
-        .flags = .{ .read = true, .permissions = .default_file },
-    });
+    var file = root.createFile(io, path, .{
+        .read = true,
+        .permissions = .default_file,
+    }) catch |err| {
+        std.debug.print("failed to create output file {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer file.close(io);
+    file.writeStreamingAll(io, data) catch |err| {
+        std.debug.print("failed to write output file {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
 }
 
 fn createParentDirs(io: std.Io, root: std.Io.Dir, path: []const u8) !void {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
     if (slash == 0) return;
-    try root.createDirPath(io, path[0..slash]);
+    root.createDirPath(io, path[0..slash]) catch |err| {
+        std.debug.print("failed to create output parent {s}: {s}\n", .{ path[0..slash], @errorName(err) });
+        return err;
+    };
 }
 
 fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {

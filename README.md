@@ -182,6 +182,25 @@ execution_requirements = {"libc": "glibc2.35"}
 
 Unsupported libc names fail instead of silently falling back.
 
+## Input Mutation Semantics
+
+VM execution uses actiondfs for lazy CAS-backed inputs. By default, actiondfs
+treats declared inputs as immutable: reading input files is allowed, but opening
+an input for write or truncation fails. Actions may create new output files under
+input directories, and those writes are staged outside the CAS until output
+collection.
+
+Actions that intentionally rewrite, delete, or replace input files must opt into
+the overlayfs compatibility path:
+
+```python
+execution_requirements = {"mutates_inputs": "1"}
+```
+
+Use this only for tools that really mutate their input tree or declare outputs
+that overlap input files. Normal actions should use the default strict actiondfs
+path.
+
 ## Status
 
 This is active systems work, not a polished product. The core path works:

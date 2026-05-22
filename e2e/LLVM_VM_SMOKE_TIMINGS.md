@@ -33,35 +33,38 @@ subset of the VM `llvm-tblgen` graph.
 
 ## Latest Checked-In Result
 
-- Generated: `2026-05-19 08:12:12 EDT`
-- Command: `ACTIOND_LLVM_SMOKE_MAC_HOST=0 ACTIOND_VM_CAS_IMAGE_SIZE_MIB=8192 e2e/run_llvm_vm_smoke.sh`
-- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.OePPyw`
+- Generated: `2026-05-21 11:02:31 EDT`
+- Command: `ACTIOND_LLVM_SMOKE_MAC_HOST=0 e2e/run_llvm_vm_smoke.sh`
+- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.p6bLf5`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
 - VM warmup target: `//e2e:llvm_exec_warmup`
 - Target platform: `@llvm//platforms:linux_arm64_musl`
 - VM host platform: `@llvm//platforms:linux_arm64_musl`
 - Build mode: `-c opt --strip=always --stripopt=--strip-all`
-- VM warmup elapsed: `84.970s`
+- VM warmup elapsed: `68.120s`
 - VM warmup processes: `2207 processes: 190 internal, 2017 remote`
-- VM Bazel elapsed: `79.282s`
+- VM Bazel elapsed: `61.317s`
 - VM executions: `2106`
 - VM timing records parsed: `2106`
 - VM Bazel processes: `2310 processes: 4 action cache hit, 204 internal, 2106 remote`
-- Mac-host baseline: not run for this actiondfs CAS path cache check
+- Mac-host baseline: not run for this VM-focused actiondfs copy-file-range check
 
 ## Run Comparison
 
+This compares the previous staged-write stats run against the current
+copy-file-range run.
+
 | Metric            | Previous |     New |    Delta |
 | ----------------- | -------: | ------: | -------: |
-| VM measured build |  82.018s | 79.282s |  -2.736s |
-| VM warmup         |  72.421s | 84.970s | +12.549s |
+| VM measured build |  74.793s | 61.317s | -13.476s |
+| VM warmup         |  76.621s | 68.120s |  -8.501s |
 
 | VM Stage                | Previous Mean |  New Mean |     Delta |
 | ----------------------- | ------------: | --------: | --------: |
-| total                   |     250.411ms | 243.955ms |  -6.456ms |
-| input fetch/materialize |       0.353ms |   0.321ms |  -0.032ms |
-| execute                 |     247.156ms | 240.745ms |  -6.411ms |
-| output upload/collect   |       2.901ms |   2.888ms |  -0.013ms |
+| total                   |     231.941ms | 190.514ms | -41.427ms |
+| input fetch/materialize |       0.300ms |   0.290ms |  -0.010ms |
+| execute                 |     230.521ms | 189.311ms | -41.210ms |
+| output upload/collect   |       1.119ms |   0.912ms |  -0.207ms |
 
 ## VM Stage Timing
 
@@ -69,10 +72,10 @@ All values are milliseconds.
 
 | Stage                   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |      Max |
 | ----------------------- | ----: | -----: | -----: | -----: | -------: | ------: | -------: |
-| total                   | 5.671 | 16.957 | 22.115 | 36.263 | 1476.474 | 243.955 | 8123.355 |
-| input fetch/materialize | 0.113 |  0.189 |  0.211 |  0.371 |    0.665 |   0.321 |   13.442 |
-| execute                 | 3.194 | 15.957 | 21.063 | 35.019 | 1465.645 | 240.745 | 8085.824 |
-| output upload/collect   | 0.211 |  0.431 |  0.538 |  1.215 |   12.711 |   2.888 |  625.043 |
+| total                   | 3.494 | 15.565 | 19.844 | 31.844 | 1077.847 | 190.514 | 6231.866 |
+| input fetch/materialize | 0.092 |  0.134 |  0.191 |  0.308 |    0.532 |   0.290 |   33.406 |
+| execute                 | 2.942 | 14.888 | 19.197 | 30.750 | 1075.575 | 189.311 | 6227.906 |
+| output upload/collect   | 0.122 |  0.223 |  0.277 |  0.597 |    2.467 |   0.912 |  346.293 |
 
 ## Runner Timing
 
@@ -81,12 +84,12 @@ filesystem reads issued by the action through the mounted actiondfs tree.
 
 | Runner Stage   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |      Max |
 | -------------- | ----: | -----: | -----: | -----: | -------: | ------: | -------: |
-| parent prepare | 0.070 |  0.102 |  0.119 |  0.166 |    0.369 |   0.167 |    3.285 |
-| fork           | 0.172 |  0.399 |  0.469 |  1.018 |    4.515 |   1.105 |   19.531 |
-| child setup    | 0.002 |  0.219 |  0.604 |  2.207 |    5.120 |   1.531 |   63.136 |
-| process/io     | 1.397 | 13.476 | 18.397 | 31.592 | 1463.508 | 237.829 | 8084.272 |
-| wait           | 0.000 |  0.000 |  0.000 |  0.007 |    0.017 |   0.008 |    3.389 |
-| stdio digest   | 0.001 |  0.003 |  0.003 |  0.004 |    0.007 |   0.005 |    0.465 |
+| parent prepare | 0.057 |  0.082 |  0.103 |  0.203 |    0.338 |   0.169 |    7.530 |
+| fork           | 0.189 |  0.370 |  0.450 |  1.253 |    4.529 |   1.123 |   14.288 |
+| child setup    | 0.002 |  0.197 |  0.431 |  1.575 |    4.802 |   1.266 |   51.295 |
+| process/io     | 0.020 | 12.635 | 16.846 | 27.921 | 1073.156 | 186.682 | 6225.742 |
+| wait           | 0.000 |  0.000 |  0.000 |  0.006 |    0.016 |   0.005 |    1.131 |
+| stdio digest   | 0.000 |  0.001 |  0.001 |  0.001 |    0.001 |   0.001 |    1.008 |
 
 ## VM Bridge Timing
 
@@ -94,19 +97,19 @@ These counters measure the raw TCP-to-vsock pump in `darwin-actiond serve-vm`.
 The elapsed column is connection lifetime, not CPU time.
 
 - Bridge connections logged: `2`
-- Total client to guest bytes: `28.20 MiB`
+- Total client to guest bytes: `28.27 MiB`
 - Total guest to client bytes: `37.76 MiB`
 - Pump errors: read=`0`, write=`0`
 
 | Bridge Metric          |       Min |       p25 |       p50 |       p75 |       p95 |      Mean |       Max |
 | ---------------------- | --------: | --------: | --------: | --------: | --------: | --------: | --------: |
-| connection elapsed     | 77897.888 | 78399.125 | 78900.361 | 79401.598 | 79802.587 | 78900.361 | 79902.834 |
-| client to guest KiB    |   10713.5 |   12574.7 |   14436.0 |   16297.2 |   17786.2 |   14436.0 |   18158.4 |
-| guest to client KiB    |   16692.2 |   18013.8 |   19335.5 |   20657.1 |   21714.5 |   19335.5 |   21978.8 |
-| client to guest reads  |      8297 |      8448 |      8598 |      8749 |      8870 |    8598.5 |      8900 |
-| client to guest writes |      8296 |      8447 |      8598 |      8748 |      8869 |    8597.5 |      8899 |
-| guest to client reads  |     19728 |     20500 |     21272 |     22043 |     22661 |   21271.5 |     22815 |
-| guest to client writes |     19727 |     20499 |     21270 |     22042 |     22660 |   21270.5 |     22814 |
+| connection elapsed     | 46370.233 | 50291.404 | 54212.574 | 58133.745 | 61270.681 | 54212.574 | 62054.916 |
+| client to guest KiB    |    9288.3 |   11882.4 |   14476.6 |   17070.7 |   19146.0 |   14476.6 |   19664.8 |
+| guest to client KiB    |   18376.7 |   18854.4 |   19332.1 |   19809.8 |   20192.0 |   19332.1 |   20287.5 |
+| client to guest reads  |      5553 |      6806 |      8058 |      9311 |     10313 |    8058.5 |     10564 |
+| client to guest writes |      5552 |      6805 |      8058 |      9310 |     10312 |    8057.5 |     10563 |
+| guest to client reads  |     14956 |     18964 |     22972 |     26980 |     30186 |   22972.0 |     30988 |
+| guest to client writes |     14955 |     18963 |     22971 |     26979 |     30185 |   22971.0 |     30987 |
 
 ## actiondfs Counters
 
@@ -114,30 +117,98 @@ These counters are from `/proc/actiondfs_stats` at the end of the VM run.
 
 | Counter                   |        Value |
 | ------------------------- | -----------: |
-| mounts                    |         8246 |
-| root directory parses     |         8246 |
-| cached directory hits     |       173842 |
-| cached directory misses   |         5219 |
-| lookups                   |      1396390 |
-| lookup hits               |       843455 |
-| lookup negative           |       552935 |
-| blob open attempts        |       457481 |
+| mounts                    |         4123 |
+| root directory parses     |         4123 |
+| cached directory hits     |       155481 |
+| cached directory misses   |         5213 |
+| lookups                   |      1407093 |
+| lookup hits               |       842187 |
+| lookup negative           |       564906 |
+| blob open attempts        |       453352 |
 | blob path cache hits      |       437047 |
 | blob path cache misses    |         6969 |
 | blob path cache inserts   |         6969 |
 | blob path cache evictions |            0 |
 | blob path cache races     |            0 |
-| node blob cache hits      |        28917 |
-| node blob cache misses    |       444016 |
-| backing reads             |       419542 |
-| backing read bytes        |   1329451317 |
-| splice reads              |          148 |
-| splice read bytes         |      6084014 |
+| node blob cache hits      |        28555 |
+| node blob cache misses    |       440188 |
+| backing reads             |       415500 |
+| backing read bytes        |   1303976522 |
+| splice reads              |            0 |
+| splice read bytes         |            0 |
 | mmap calls                |        53243 |
-| mmap bytes                | 1901688147968 |
+| mmap bytes                | 1901688811520 |
 | mmap failures             |            0 |
-| directory blob reads      |        13462 |
-| directory blob bytes      |      3861312 |
+| directory blob reads      |         9335 |
+| directory blob bytes      |      3181793 |
+
+## actiondfs Staged Counters
+
+| Counter                         |      Value |
+| ------------------------------- | ---------: |
+| stage parent path lookups       |       7852 |
+| stage parent path errors        |          0 |
+| stage child lookups             |        214 |
+| stage child lookup hits         |         16 |
+| stage child lookup negative     |        198 |
+| stage child lookup errors       |          0 |
+| stage ensure dir calls          |      12182 |
+| stage ensure dir components     |     103548 |
+| stage ensure dir existing       |     103548 |
+| stage ensure dir created        |          0 |
+| stage ensure dir errors         |          0 |
+| stage inode lookups             |    1407093 |
+| stage inode lookup hits         |      35540 |
+| stage inode lookup negative     |    1371553 |
+| stage inode lookup errors       |          0 |
+| stage inode input dir merges    |      18403 |
+| stage backing open attempts     |      41054 |
+| stage backing open failures     |          0 |
+| stage read calls                |          0 |
+| stage read bytes                |          0 |
+| stage write calls               |      37194 |
+| stage write bytes               |  106358935 |
+| stage splice read calls         |          0 |
+| stage splice read bytes         |          0 |
+| stage mmap calls                |         32 |
+| stage mmap bytes                |    7905280 |
+| stage mmap failures             |          0 |
+| stage create calls              |      11984 |
+| stage create success            |      11984 |
+| stage create failures           |          0 |
+| stage mkdir calls               |        198 |
+| stage mkdir success             |        198 |
+| stage mkdir failures            |          0 |
+| stage unlink calls              |         16 |
+| stage unlink success            |         16 |
+| stage unlink failures           |          0 |
+| stage rmdir calls               |          0 |
+| stage rename calls              |       3819 |
+| stage rename success            |       3819 |
+| stage rename failures           |          0 |
+| stage setattr size calls        |       3876 |
+| stage setattr size success      |       3876 |
+| stage setattr size failures     |          0 |
+| stage readdir calls             |          0 |
+| stage copy_file_range attempts  |       3828 |
+| stage copy_file_range success   |       3828 |
+| stage copy_file_range bytes     |   31630764 |
+| stage copy_file_range fallbacks |          0 |
+
+## Staged Output Analysis
+
+| Derived Metric                                |     Value |
+| --------------------------------------------- | --------: |
+| staged write bytes                            | 101.43MiB |
+| copy_file_range bytes                         |  30.17MiB |
+| average bytes per staged write call           |   2859.6 |
+| staged writes per created file                |     3.10 |
+| average bytes per copy_file_range success     |   8263.0 |
+| copy_file_range fallback rate                 |    0.00% |
+| backing opens beyond staged write calls       |     3860 |
+| stage ensure dir components per ensure call   |     8.50 |
+| staged inode lookup hit rate                  |    2.53% |
+| staged inode lookup negative rate             |   97.47% |
 
 ## Notes
 
@@ -146,18 +217,41 @@ filesystem metadata and mapped-file access happen while the child process is
 running, so that time appears in `execute`, primarily in `process/io`, rather
 than in `input fetch/materialize`.
 
-This run makes the bounded digest-to-CAS-path cache use an RCU hit path. The
-cache still avoids repeating CAS pathname resolution across per-action mounts,
-and it still opens a per-action backing file to preserve the correct visible
-actiondfs path for `mmap`, `read_iter`, and `/proc`. The measured build used an
-8 GiB temporary ext4 CAS image because this machine was low on free disk during
-the run; action counts stayed the same as the previous checked-in smoke.
+This run validates the actiondfs `copy_file_range` path under the concurrent
+`copy_to_directory` workload used by the LLVM smoke. It used the existing
+bounded digest-to-CAS-path cache and the default temporary VM CAS image
+settings.
+
+Go's `io.Copy` attempted `copy_file_range` `3828` times. The actiondfs hook
+handled all `3828` attempts and copied `30.17MiB` with zero fallbacks. A lower
+`vfs_copy_file_range` pass had fallen back for every attempt because the CAS
+input root and staged output root are separate filesystems, so this path uses a
+bounded in-kernel buffered copy for actiondfs input-or-staged source files into
+staged output files.
+
+The staged counters show that `copy_file_range` moved part of the
+`copy_to_directory` traffic out of userspace read/write loops. Staged write
+callbacks dropped from `41548` to `37194`, and staged write bytes dropped from
+`131.60MiB` to `101.43MiB`; the remaining `30.17MiB` was accounted by
+`stage_copy_file_range_bytes`. The `3860` backing opens beyond staged write
+calls are the `3828` copy-file-range output opens plus `32` staged mmap opens.
+
+Directory pre-creation is doing its job: `stage_ensure_dir_created=0`, while
+`stage_ensure_dir_existing=103548`. The remaining cost is repeated validation
+and walking of already-existing parent paths.
+
+Staged lookup is mostly negative: `35540` hits versus `1371553` misses. That is
+expected for overlay-style lookup, but it makes negative-stage lookup caching or
+directory-level "has staged children" filtering worth measuring. The hot
+negative counter itself is also expensive instrumentation; if these stats stay
+long term, prefer derived values or per-CPU counters on this path.
 
 The raw VM bridge moved about 66 MiB across two long-lived measured
 connections, so the dumb TCP-to-vsock pump is not the visible bottleneck in
 this run. Most time remains in `process/io`, which includes compiler runtime
 plus lazy actiondfs filesystem work issued by the compiler itself.
 
-The mac-host baseline was skipped for this specific actiondfs cache check.
+The mac-host baseline was skipped for this VM-focused actiondfs copy-file-range
+check.
 The previous checked-in full comparison had matching measured action counts:
 `2310` total processes and `2106` action executions for both VM and mac-host.

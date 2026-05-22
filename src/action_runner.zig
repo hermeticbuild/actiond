@@ -47,7 +47,7 @@ pub const RunOptions = struct {
     chroot_cwd: []const u8 = "/",
     exec_path_override: ?[]const u8 = null,
     bind_mounts: []const BindMount = &.{},
-    actiondfs_mounts: []const ActiondfsOverlayMount = &.{},
+    actiondfs_mounts: []const ActiondfsMount = &.{},
     cgroup_limits: CgroupLimits = .{},
     sandbox_uid: u32 = 65534,
     sandbox_gid: u32 = 65534,
@@ -56,6 +56,18 @@ pub const RunOptions = struct {
 pub const BindMount = struct {
     source: [:0]u8,
     target: [:0]u8,
+};
+
+pub const ActiondfsMount = union(enum) {
+    strict: ActiondfsStrictMount,
+    overlay: ActiondfsOverlayMount,
+};
+
+pub const ActiondfsStrictMount = struct {
+    fstype: [:0]const u8,
+    target: [:0]u8,
+    stage_dir: [:0]u8,
+    actiondfs_data: [:0]u8,
 };
 
 pub const ActiondfsOverlayMount = struct {
@@ -333,7 +345,10 @@ fn runCommandChroot(
     defer cgroup.deinit(io, allocator);
     try prepareChrootWritableDirs(io, allocator, chroot_dir, options.sandbox_uid, options.sandbox_gid);
     for (options.actiondfs_mounts) |mount| {
-        try prepareChrootWritableDirs(io, allocator, mount.upperdir, options.sandbox_uid, options.sandbox_gid);
+        switch (mount) {
+            .strict => |strict| try prepareChrootWritableDirs(io, allocator, strict.stage_dir, options.sandbox_uid, options.sandbox_gid),
+            .overlay => |overlay| try prepareChrootWritableDirs(io, allocator, overlay.upperdir, options.sandbox_uid, options.sandbox_gid),
+        }
     }
 
     const exec_path = if (options.exec_path_override) |path|
@@ -465,7 +480,7 @@ const ForkAction = struct {
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
     bind_mounts: []const BindMount,
-    actiondfs_mounts: []const ActiondfsOverlayMount,
+    actiondfs_mounts: []const ActiondfsMount,
     cgroup_procs_path: ?[*:0]const u8,
     sandbox_uid: u32,
     sandbox_gid: u32,
@@ -506,7 +521,10 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.unshare(actionNamespaceFlags()), "unshare_namespaces");
     childBringUpLoopback();
     childSyscallName(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0), "mount_private");
-    for (action.actiondfs_mounts) |mount| childMountActiondfsOverlay(mount);
+    for (action.actiondfs_mounts) |mount| switch (mount) {
+        .strict => |strict| childMountActiondfsStrict(strict),
+        .overlay => |overlay| childMountActiondfsOverlay(overlay),
+    };
     for (action.bind_mounts) |mount| childBindMountReadOnly(mount);
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
@@ -517,6 +535,17 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childWriteBytes(@tagName(std.posix.errno(execve_rc)));
     childWriteLiteral("\n");
     linux.exit(127);
+}
+
+fn childMountActiondfsStrict(mount: ActiondfsStrictMount) void {
+    const linux = std.os.linux;
+    childSyscallName(linux.mount(
+        mount.fstype.ptr,
+        mount.target.ptr,
+        mount.fstype.ptr,
+        linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME,
+        @intFromPtr(mount.actiondfs_data.ptr),
+    ), "mount_actiondfs_strict");
 }
 
 fn childMountActiondfsOverlay(mount: ActiondfsOverlayMount) void {
