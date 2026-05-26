@@ -115,6 +115,7 @@ struct actiondfs_node {
 	struct file *blob_file;
 	struct mutex blob_lock;
 	bool loaded;
+	bool stage_children_known_empty;
 	struct actiondfs_node *parent;
 	struct actiondfs_cached_dir *cached_dir;
 	struct actiondfs_materialized_child *materialized_children;
@@ -205,6 +206,7 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_STAGE_ENSURE_DIR_CREATED,
 	ACTIONDFS_STAT_STAGE_ENSURE_DIR_ERRORS,
 	ACTIONDFS_STAT_STAGE_INODE_LOOKUPS,
+	ACTIONDFS_STAT_STAGE_INODE_LOOKUP_SKIPPED_EMPTY_DIR,
 	ACTIONDFS_STAT_STAGE_INODE_LOOKUP_HITS,
 	ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE,
 	ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS,
@@ -325,6 +327,7 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_STAGE_ENSURE_DIR_CREATED] = "stage_ensure_dir_created",
 	[ACTIONDFS_STAT_STAGE_ENSURE_DIR_ERRORS] = "stage_ensure_dir_errors",
 	[ACTIONDFS_STAT_STAGE_INODE_LOOKUPS] = "stage_inode_lookups",
+	[ACTIONDFS_STAT_STAGE_INODE_LOOKUP_SKIPPED_EMPTY_DIR] = "stage_inode_lookup_skipped_empty_dir",
 	[ACTIONDFS_STAT_STAGE_INODE_LOOKUP_HITS] = "stage_inode_lookup_hits",
 	[ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE] = "stage_inode_lookup_negative",
 	[ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS] = "stage_inode_lookup_errors",
@@ -534,6 +537,7 @@ static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info 
 	node->ino = atomic64_inc_return(&sbi->next_ino);
 	node->mode = mode;
 	node->loaded = true;
+	node->stage_children_known_empty = true;
 	mutex_init(&node->blob_lock);
 	return node;
 }
@@ -557,6 +561,7 @@ actiondfs_alloc_node_borrowed_name(struct actiondfs_sb_info *sbi,
 	node->ino = atomic64_inc_return(&sbi->next_ino);
 	node->mode = mode;
 	node->loaded = true;
+	node->stage_children_known_empty = true;
 	mutex_init(&node->blob_lock);
 	return node;
 }
@@ -584,6 +589,16 @@ actiondfs_alloc_staged_node(struct actiondfs_sb_info *sbi,
 	node->stage_rel = stage_rel;
 	node->size = size;
 	return node;
+}
+
+static bool actiondfs_stage_children_known_empty(const struct actiondfs_node *node)
+{
+	return READ_ONCE(node->stage_children_known_empty);
+}
+
+static void actiondfs_mark_stage_children_maybe_present(struct actiondfs_node *node)
+{
+	WRITE_ONCE(node->stage_children_known_empty, false);
 }
 
 static char *actiondfs_node_rel_path(struct actiondfs_node *node)
@@ -3049,6 +3064,10 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 
 	if (!sbi->staged_writes)
 		return NULL;
+	if (actiondfs_stage_children_known_empty(parent)) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_SKIPPED_EMPTY_DIR);
+		return NULL;
+	}
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUPS);
 	rel = actiondfs_child_rel_path(parent, dentry->d_name.name,
@@ -3118,11 +3137,15 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 	if (!IS_ERR(inode) && S_ISDIR(mode) && input_cached) {
 		node = inode->i_private;
+		actiondfs_mark_stage_children_maybe_present(node);
 		memcpy(node->hash, input_child->hash, 64);
 		node->hash[64] = '\0';
 		node->cached_dir = input_cached;
 		node->loaded = true;
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES);
+	} else if (!IS_ERR(inode) && S_ISDIR(mode)) {
+		node = inode->i_private;
+		actiondfs_mark_stage_children_maybe_present(node);
 	}
 	return inode;
 }
@@ -3254,6 +3277,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 		goto out_drop_write;
 	}
 	d_instantiate(dentry, inode);
+	actiondfs_mark_stage_children_maybe_present(parent);
 	rel = NULL;
 	err = 0;
 
@@ -3365,6 +3389,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 	}
 	inc_nlink(dir);
 	d_instantiate(dentry, inode);
+	actiondfs_mark_stage_children_maybe_present(parent);
 	rel = NULL;
 
 out_drop_write:
@@ -3570,6 +3595,7 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		kfree(old_node->stage_rel);
 		old_node->stage_rel = new_rel;
 		old_node->parent = new_parent;
+		actiondfs_mark_stage_children_maybe_present(new_parent);
 		new_rel = NULL;
 	}
 
@@ -3973,6 +3999,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 			goto fail;
 		sbi->stage_path_valid = true;
 		sbi->staged_writes = true;
+		actiondfs_mark_stage_children_maybe_present(sbi->root);
 	} else {
 		sb->s_flags |= SB_RDONLY;
 	}
