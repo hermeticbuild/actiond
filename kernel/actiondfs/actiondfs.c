@@ -20,6 +20,7 @@
 #include <linux/hashtable.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/list.h>
 #include <linux/magic.h>
 #include <linux/mm.h>
@@ -127,6 +128,10 @@ struct actiondfs_node {
 	size_t dir_capacity;
 };
 
+struct actiondfs_file_ctx {
+	struct file *staged_file;
+};
+
 struct actiondfs_sb_info {
 	char *cas_root;
 	char *root_hash;
@@ -206,15 +211,33 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_HITS,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_MISSES,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_READ_CALLS,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_WRITE_CALLS,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_SPLICE_READ_CALLS,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_MMAP_CALLS,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS,
+	ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
+	ACTIONDFS_STAT_STAGE_REAL_OPEN_ATTEMPTS,
+	ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES,
+	ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_IN_CALLS,
+	ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_OUT_CALLS,
+	ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
 	ACTIONDFS_STAT_STAGE_READ_CALLS,
 	ACTIONDFS_STAT_STAGE_READ_BYTES,
+	ACTIONDFS_STAT_STAGE_READ_TOTAL_NS,
 	ACTIONDFS_STAT_STAGE_WRITE_CALLS,
 	ACTIONDFS_STAT_STAGE_WRITE_BYTES,
+	ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
 	ACTIONDFS_STAT_STAGE_SPLICE_READ_CALLS,
 	ACTIONDFS_STAT_STAGE_SPLICE_READ_BYTES,
+	ACTIONDFS_STAT_STAGE_SPLICE_READ_TOTAL_NS,
 	ACTIONDFS_STAT_STAGE_MMAP_CALLS,
 	ACTIONDFS_STAT_STAGE_MMAP_BYTES,
 	ACTIONDFS_STAT_STAGE_MMAP_FAILURES,
+	ACTIONDFS_STAT_STAGE_MMAP_TOTAL_NS,
 	ACTIONDFS_STAT_STAGE_CREATE_CALLS,
 	ACTIONDFS_STAT_STAGE_CREATE_SUCCESS,
 	ACTIONDFS_STAT_STAGE_CREATE_FAILURES,
@@ -241,6 +264,7 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS,
 	ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_BYTES,
 	ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS,
+	ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
 	ACTIONDFS_STAT_COUNT,
 };
 
@@ -307,15 +331,33 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES] = "stage_inode_lookup_input_dir_merges",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS] = "stage_backing_open_attempts",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES] = "stage_backing_open_failures",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_HITS] = "stage_backing_open_cached_hits",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_MISSES] = "stage_backing_open_cached_misses",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_READ_CALLS] = "stage_backing_open_read_calls",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_WRITE_CALLS] = "stage_backing_open_write_calls",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_SPLICE_READ_CALLS] = "stage_backing_open_splice_read_calls",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_MMAP_CALLS] = "stage_backing_open_mmap_calls",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS] = "stage_backing_open_total_ns",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS] = "stage_backing_open_lookup_ns",
+	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS] = "stage_backing_open_file_ns",
+	[ACTIONDFS_STAT_STAGE_REAL_OPEN_ATTEMPTS] = "stage_real_open_attempts",
+	[ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES] = "stage_real_open_failures",
+	[ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_IN_CALLS] = "stage_real_open_copy_in_calls",
+	[ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_OUT_CALLS] = "stage_real_open_copy_out_calls",
+	[ACTIONDFS_STAT_STAGE_REAL_OPEN_NS] = "stage_real_open_ns",
 	[ACTIONDFS_STAT_STAGE_READ_CALLS] = "stage_read_calls",
 	[ACTIONDFS_STAT_STAGE_READ_BYTES] = "stage_read_bytes",
+	[ACTIONDFS_STAT_STAGE_READ_TOTAL_NS] = "stage_read_total_ns",
 	[ACTIONDFS_STAT_STAGE_WRITE_CALLS] = "stage_write_calls",
 	[ACTIONDFS_STAT_STAGE_WRITE_BYTES] = "stage_write_bytes",
+	[ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS] = "stage_write_total_ns",
 	[ACTIONDFS_STAT_STAGE_SPLICE_READ_CALLS] = "stage_splice_read_calls",
 	[ACTIONDFS_STAT_STAGE_SPLICE_READ_BYTES] = "stage_splice_read_bytes",
+	[ACTIONDFS_STAT_STAGE_SPLICE_READ_TOTAL_NS] = "stage_splice_read_total_ns",
 	[ACTIONDFS_STAT_STAGE_MMAP_CALLS] = "stage_mmap_calls",
 	[ACTIONDFS_STAT_STAGE_MMAP_BYTES] = "stage_mmap_bytes",
 	[ACTIONDFS_STAT_STAGE_MMAP_FAILURES] = "stage_mmap_failures",
+	[ACTIONDFS_STAT_STAGE_MMAP_TOTAL_NS] = "stage_mmap_total_ns",
 	[ACTIONDFS_STAT_STAGE_CREATE_CALLS] = "stage_create_calls",
 	[ACTIONDFS_STAT_STAGE_CREATE_SUCCESS] = "stage_create_success",
 	[ACTIONDFS_STAT_STAGE_CREATE_FAILURES] = "stage_create_failures",
@@ -342,6 +384,7 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS] = "stage_copy_file_range_success",
 	[ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_BYTES] = "stage_copy_file_range_bytes",
 	[ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS] = "stage_copy_file_range_fallbacks",
+	[ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS] = "stage_copy_file_range_total_ns",
 };
 
 static atomic64_t actiondfs_stats[ACTIONDFS_STAT_COUNT];
@@ -355,9 +398,23 @@ static void actiondfs_stat_add(enum actiondfs_stat stat, u64 value)
 {
 	atomic64_add(value, &actiondfs_stats[stat]);
 }
+
+static u64 actiondfs_stat_time_start(void)
+{
+	return ktime_get_ns();
+}
+
+static void actiondfs_stat_add_elapsed(enum actiondfs_stat stat, u64 start)
+{
+	actiondfs_stat_add(stat, ktime_get_ns() - start);
+}
 #else
 #define actiondfs_stat_inc(stat) do { } while (0)
-#define actiondfs_stat_add(stat, value) do { } while (0)
+#define actiondfs_stat_add(stat, value) \
+	do { (void)(value); } while (0)
+#define actiondfs_stat_time_start() 0ULL
+#define actiondfs_stat_add_elapsed(stat, start) \
+	do { (void)(start); } while (0)
 #endif
 
 /*
@@ -1520,26 +1577,40 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 {
 	struct path real_path;
 	struct file *file;
+	u64 total_start = actiondfs_stat_time_start();
+	u64 phase_start;
 	int err;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS);
 	if (!sbi->stage_path_valid || !node->stage_rel) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
+					   total_start);
 		return ERR_PTR(-EROFS);
 	}
 
+	phase_start = actiondfs_stat_time_start();
 	err = vfs_path_lookup(sbi->stage_path.dentry, sbi->stage_path.mnt,
 			      node->stage_rel, LOOKUP_FOLLOW, &real_path);
+	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS,
+				   phase_start);
 	if (err) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
+					   total_start);
 		return ERR_PTR(err);
 	}
 
+	phase_start = actiondfs_stat_time_start();
 	file = backing_file_open(file_user_path(actiondfs_file), flags,
 				 &real_path, current_cred());
+	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
+				   phase_start);
 	path_put(&real_path);
 	if (IS_ERR(file))
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
+	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
+				   total_start);
 	return file;
 }
 
@@ -1548,18 +1619,77 @@ static struct file *actiondfs_open_real_staged(struct actiondfs_sb_info *sbi,
 					       int flags)
 {
 	struct file *file;
+	u64 total_start = actiondfs_stat_time_start();
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS);
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_ATTEMPTS);
 	if (!sbi->stage_path_valid || !node->stage_rel) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
+					   total_start);
 		return ERR_PTR(-EROFS);
 	}
 
 	file = file_open_root(&sbi->stage_path, node->stage_rel,
 			      flags | O_LARGEFILE, 0);
-	if (IS_ERR(file))
+	if (IS_ERR(file)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES);
+	}
+	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
+				   total_start);
 	return file;
+}
+
+static int actiondfs_staged_backing_flags(const struct file *file)
+{
+	if ((file->f_mode & FMODE_READ) && (file->f_mode & FMODE_WRITE))
+		return O_RDWR;
+	if (file->f_mode & FMODE_WRITE)
+		return O_WRONLY;
+	return O_RDONLY;
+}
+
+static bool actiondfs_staged_backing_supports(const struct file *file, int flags)
+{
+	switch (flags & O_ACCMODE) {
+	case O_RDONLY:
+		return file->f_mode & FMODE_READ;
+	case O_WRONLY:
+		return file->f_mode & FMODE_WRITE;
+	case O_RDWR:
+		return (file->f_mode & FMODE_READ) &&
+		       (file->f_mode & FMODE_WRITE);
+	default:
+		return false;
+	}
+}
+
+static struct file *
+actiondfs_get_staged_backing(struct actiondfs_sb_info *sbi,
+			     struct actiondfs_node *node,
+			     struct file *actiondfs_file,
+			     int flags, bool *need_fput)
+{
+	struct actiondfs_file_ctx *ctx = actiondfs_file->private_data;
+
+	*need_fput = true;
+	if (ctx && ctx->staged_file &&
+	    actiondfs_staged_backing_supports(ctx->staged_file, flags)) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_HITS);
+		*need_fput = false;
+		return ctx->staged_file;
+	}
+
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_MISSES);
+	return actiondfs_open_staged_backing(sbi, node, actiondfs_file, flags);
+}
+
+static void actiondfs_put_staged_backing(struct file *file, bool need_fput)
+{
+	if (need_fput)
+		fput(file);
 }
 
 static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
@@ -1578,19 +1708,29 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	};
 
 	if (node->origin == ACTIONDFS_NODE_STAGED) {
+		u64 total_start;
+		bool need_fput;
+
 		if (!requested)
 			return 0;
+		total_start = actiondfs_stat_time_start();
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_READ_CALLS);
-		file = actiondfs_open_staged_backing(sbi, node, iocb->ki_filp,
-						     O_RDONLY);
-		if (IS_ERR(file))
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_READ_CALLS);
+		file = actiondfs_get_staged_backing(sbi, node, iocb->ki_filp,
+						    O_RDONLY, &need_fput);
+		if (IS_ERR(file)) {
+			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_READ_TOTAL_NS,
+						   total_start);
 			return PTR_ERR(file);
+		}
 		nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
 					       &ctx);
-		fput(file);
+		actiondfs_put_staged_backing(file, need_fput);
 		if (nread > 0)
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_READ_BYTES,
 					   (u64)nread);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_READ_TOTAL_NS,
+					   total_start);
 		return nread;
 	}
 
@@ -1636,24 +1776,35 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (node->origin != ACTIONDFS_NODE_STAGED)
 		return -EROFS;
 
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_WRITE_CALLS);
-	file = actiondfs_open_staged_backing(sbi, node, iocb->ki_filp,
-					     O_WRONLY);
-	if (IS_ERR(file))
-		return PTR_ERR(file);
-	nwritten = backing_file_write_iter(file, from, iocb, iocb->ki_flags,
-					   &ctx);
-	if (nwritten > 0) {
-		loff_t end = iocb->ki_pos;
+	{
+		u64 total_start = actiondfs_stat_time_start();
+		bool need_fput;
 
-		if (end > node->size) {
-			node->size = end;
-			i_size_write(inode, end);
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_WRITE_CALLS);
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_WRITE_CALLS);
+		file = actiondfs_get_staged_backing(sbi, node, iocb->ki_filp,
+						    O_WRONLY, &need_fput);
+		if (IS_ERR(file)) {
+			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
+						   total_start);
+			return PTR_ERR(file);
 		}
-		actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES,
-				   (u64)nwritten);
+		nwritten = backing_file_write_iter(file, from, iocb,
+						   iocb->ki_flags, &ctx);
+		if (nwritten > 0) {
+			loff_t end = iocb->ki_pos;
+
+			if (end > node->size) {
+				node->size = end;
+				i_size_write(inode, end);
+			}
+			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES,
+					   (u64)nwritten);
+		}
+		actiondfs_put_staged_backing(file, need_fput);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
+					   total_start);
 	}
-	fput(file);
 	return nwritten;
 }
 
@@ -1686,31 +1837,42 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode_in->i_sb);
 	struct file *real_in;
 	struct file *real_out;
+	u64 total_start = actiondfs_stat_time_start();
 	ssize_t copied;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_ATTEMPTS);
 	if (!len) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return 0;
 	}
 	if (flags || file_out->f_op != &actiondfs_file_fops ||
 	    inode_out->i_sb != inode_in->i_sb) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return -EOPNOTSUPP;
 	}
 	if (pos_in < 0 || pos_out < 0) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return -EINVAL;
 	}
 
 	node_out = inode_out->i_private;
 	if (node_out->origin != ACTIONDFS_NODE_STAGED || node_in == node_out) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return -EOPNOTSUPP;
 	}
 	if (node_in->origin == ACTIONDFS_NODE_INPUT) {
 		if (pos_in >= node_in->size) {
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS);
+			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+						   total_start);
 			return 0;
 		}
 		len = min_t(u64, (u64)len, node_in->size - pos_in);
@@ -1718,23 +1880,33 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	} else if (node_in->origin == ACTIONDFS_NODE_STAGED) {
 		if (pos_in >= node_in->size) {
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS);
+			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+						   total_start);
 			return 0;
 		}
 		len = min_t(u64, (u64)len, node_in->size - pos_in);
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_IN_CALLS);
 		real_in = actiondfs_open_real_staged(sbi, node_in, O_RDONLY);
 	} else {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return -EOPNOTSUPP;
 	}
 	if (IS_ERR(real_in)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return PTR_ERR(real_in);
 	}
 
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_OUT_CALLS);
 	real_out = actiondfs_open_real_staged(sbi, node_out, O_WRONLY);
 	if (IS_ERR(real_out)) {
 		fput(real_in);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return PTR_ERR(real_out);
 	}
 
@@ -1752,15 +1924,21 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		}
 		actiondfs_stat_add(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_BYTES,
 				   (u64)copied);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return copied;
 	}
 
 	if (copied == 0) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+					   total_start);
 		return 0;
 	}
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
+	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
+				   total_start);
 	return copied;
 }
 
@@ -1783,12 +1961,18 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 
 	if (node->origin == ACTIONDFS_NODE_STAGED) {
 		struct kiocb backing_iocb;
+		u64 total_start = actiondfs_stat_time_start();
+		bool need_fput;
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SPLICE_READ_CALLS);
-		file = actiondfs_open_staged_backing(sbi, node, actiondfs_file,
-						     O_RDONLY);
-		if (IS_ERR(file))
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_SPLICE_READ_CALLS);
+		file = actiondfs_get_staged_backing(sbi, node, actiondfs_file,
+						    O_RDONLY, &need_fput);
+		if (IS_ERR(file)) {
+			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_SPLICE_READ_TOTAL_NS,
+						   total_start);
 			return PTR_ERR(file);
+		}
 		init_sync_kiocb(&backing_iocb, actiondfs_file);
 		backing_iocb.ki_pos = pos;
 		nread = backing_file_splice_read(file, &backing_iocb, pipe,
@@ -1798,7 +1982,9 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_SPLICE_READ_BYTES,
 					   (u64)nread);
 		}
-		fput(file);
+		actiondfs_put_staged_backing(file, need_fput);
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_SPLICE_READ_TOTAL_NS,
+					   total_start);
 		return nread;
 	}
 
@@ -1851,20 +2037,29 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 	};
 
 	if (node->origin == ACTIONDFS_NODE_STAGED) {
+		u64 total_start = actiondfs_stat_time_start();
+		bool need_fput;
+
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_CALLS);
-		file = actiondfs_open_staged_backing(sbi, node, actiondfs_file,
-						     actiondfs_file->f_flags);
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_MMAP_CALLS);
+		file = actiondfs_get_staged_backing(
+			sbi, node, actiondfs_file,
+			actiondfs_staged_backing_flags(actiondfs_file), &need_fput);
 		if (IS_ERR(file)) {
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_FAILURES);
+			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_MMAP_TOTAL_NS,
+						   total_start);
 			return PTR_ERR(file);
 		}
 		err = backing_file_mmap(file, vma, &ctx);
-		fput(file);
+		actiondfs_put_staged_backing(file, need_fput);
 		if (err)
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_FAILURES);
 		else
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_MMAP_BYTES,
 					   (u64)(vma->vm_end - vma->vm_start));
+		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_MMAP_TOTAL_NS,
+					   total_start);
 		return err;
 	}
 
@@ -3402,10 +3597,41 @@ out_free_rel:
 static int actiondfs_open(struct inode *inode, struct file *file)
 {
 	struct actiondfs_node *node = inode->i_private;
+	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
+	struct actiondfs_file_ctx *ctx;
+	struct file *staged_file;
 
 	if (node->origin != ACTIONDFS_NODE_STAGED &&
 	    (file->f_mode & FMODE_WRITE))
 		return -EROFS;
+	if (node->origin != ACTIONDFS_NODE_STAGED)
+		return 0;
+
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+
+	staged_file = actiondfs_open_staged_backing(
+		sbi, node, file, actiondfs_staged_backing_flags(file));
+	if (IS_ERR(staged_file)) {
+		kfree(ctx);
+		return PTR_ERR(staged_file);
+	}
+	ctx->staged_file = staged_file;
+	file->private_data = ctx;
+	return 0;
+}
+
+static int actiondfs_release(struct inode *inode, struct file *file)
+{
+	struct actiondfs_file_ctx *ctx = file->private_data;
+
+	if (!ctx)
+		return 0;
+	if (ctx->staged_file)
+		fput(ctx->staged_file);
+	kfree(ctx);
+	file->private_data = NULL;
 	return 0;
 }
 
@@ -3640,6 +3866,7 @@ static const struct inode_operations actiondfs_file_iops = {
 
 static const struct file_operations actiondfs_file_fops = {
 	.open = actiondfs_open,
+	.release = actiondfs_release,
 	.llseek = generic_file_llseek,
 	.read_iter = actiondfs_read_iter,
 	.write_iter = actiondfs_write_iter,
