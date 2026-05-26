@@ -209,10 +209,12 @@ and `mmap` are delegated through the kernel backing-file helpers, so compiler
 mmap traffic goes directly through the native CAS filesystem page cache instead
 of being copied through actiondfs folios.
 
-The kernel exposes VM-lifetime actiondfs counters at `/proc/actiondfs_stats`.
-Those counters track cache hits/misses, directory parses, lookup and readdir
-activity, CAS blob opens, backing reads, splice reads, mmap calls, and
-stale-handle retries.
+The normal `actiondfs` filesystem has instrumentation compiled out. Profiling
+runs can boot with `--actiondfs-stats`, which makes the guest mount the sibling
+`actiondfs_instrumented` filesystem and exposes VM-lifetime counters at
+`/proc/actiondfs_stats`. Those counters track cache hits/misses, directory
+parses, lookup and readdir activity, CAS blob opens, backing reads, splice
+reads, mmap calls, and stale-handle retries.
 
 The Linux host path always keeps the non-actiondfs materialization strategy,
 which lets Docker e2e run on ordinary host kernels:

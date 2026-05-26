@@ -1,6 +1,7 @@
 config ACTIONDFS_FS
-	bool "actiond manifest filesystem"
+	bool "actiond manifest filesystems"
 	help
-	  Read-only action input manifest filesystem used by actiond VM workers.
-	  It maps manifest paths to immutable CAS blobs and is intended to be
-	  mounted as a stock overlayfs lowerdir.
+	  Action input manifest filesystems used by actiond VM workers. The
+	  normal actiondfs filesystem maps manifest paths to immutable CAS blobs
+	  with stats compiled out. The actiondfs_instrumented sibling builds the
+	  same implementation with profiling counters enabled.

@@ -261,38 +261,35 @@ Executor tests:
 
 ## Next Performance Phase
 
-### Runtime-Controlled Counters
+### Compile-Time Instrumented Counters
 
 Goal: keep the rich actiondfs counters for profiling runs, but make the common
-path pay essentially nothing when profiling is disabled.
+path pay nothing when profiling is disabled.
 
 Plan:
 
-- Add an actiondfs mount option:
-
-```text
-stats=0|1
-```
-
-- Default `stats=0`.
-- Store the per-mount setting on `struct actiondfs_sb_info`.
-- Add a global static key plus enabled-mount refcount:
-  - no stats-enabled mounts: counter call sites are patched to the disabled path
-  - at least one stats-enabled mount: call sites branch into counter collection
-- Replace global atomic counters with per-CPU counters for the enabled path.
-- Keep `/proc/actiondfs_stats`, but make reads aggregate per-CPU values.
+- Build the same source twice:
+  - `actiondfs`: default filesystem with `ACTIONDFS_ENABLE_STATS=0`; counter
+    call sites compile to no-ops.
+  - `actiondfs_instrumented`: wrapper translation unit with
+    `ACTIONDFS_ENABLE_STATS=1` and filesystem name `actiondfs_instrumented`.
+- Keep `/proc/actiondfs_stats` only in the instrumented build.
+- Make `--actiondfs-stats` select `actiondfs_instrumented` for guest mounts.
+- Consider replacing instrumented global atomic counters with per-CPU counters
+  if profiling runs show contention inside the instrumented filesystem.
 - Keep derived expensive values in userspace parsers where possible rather than
   incrementing extra hot counters.
 
-Expected result: with `stats=0`, lookup/read/write hot paths should avoid global
-atomic increments. With `stats=1`, profiling remains available with lower
-contention than the current global `atomic64_t` counters.
+Expected result: normal `actiondfs` lookup/read/write hot paths have no counter
+branches or atomic increments. `actiondfs_instrumented` keeps profiling
+available with the cost isolated to explicit stats runs.
 
 Validation:
 
-- Add kernel counters proving the static key enables/disables as mounts appear.
-- Run VM e2e once with stats disabled and once with stats enabled.
-- Run LLVM smoke with stats disabled for canonical performance numbers.
+- Build the VM kernel and standalone VM worker.
+- Run VM e2e once with stats enabled to prove `/proc/actiondfs_stats` is wired.
+- Run LLVM smoke with stats disabled for canonical performance numbers, and run
+  paired instrumented smoke when measuring the cost of counters.
 - Keep stats-enabled LLVM runs only for analysis snapshots.
 
 ### Staged Open/Write Fast Path

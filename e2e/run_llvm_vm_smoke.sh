@@ -24,10 +24,12 @@ if [[ -n "${jobs}" ]]; then
   jobs_flags=(--jobs="${jobs}")
 fi
 output_root="${ACTIOND_LLVM_VM_SMOKE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-llvm-vm-smoke.XXXXXX")}"
+llvm_output_base="${ACTIOND_LLVM_SMOKE_OUTPUT_BASE:-${output_root}/llvm-bazel-output-base}"
 cas_image="${ACTIOND_VM_CAS_IMAGE:-${output_root}/server/cas.ext4}"
 cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
 run_vm="${ACTIOND_LLVM_SMOKE_VM:-1}"
 run_mac_host="${ACTIOND_LLVM_SMOKE_MAC_HOST:-1}"
+actiondfs_stats="${ACTIOND_LLVM_SMOKE_ACTIONDFS_STATS:-0}"
 server_target="${ACTIOND_LLVM_SMOKE_SERVER_TARGET:-//cmd/darwin_actiond:darwin-actiond-standalone_pkg}"
 server_script_path="${ACTIOND_LLVM_SMOKE_SERVER_SCRIPT_PATH:-/tmp/darwin-actiond-standalone}"
 build_mode_flags=(
@@ -107,6 +109,7 @@ prepare_server() {
     bazel run --config=remote \
       --script_path="${server_script_path}" \
       "${build_mode_flags[@]}" \
+      --bes_backend= \
       ${bazel_build_flags[@]+"${bazel_build_flags[@]}"} \
       "${server_target}"
   ) >&2
@@ -126,19 +129,27 @@ run_smoke() {
   server="$(prepare_server)"
   server_log="${output_root}/darwin-actiond-vm.log"
 
-  "${server}" serve-vm \
-    --listen="${endpoint}" \
-    --root="${output_root}/server" \
-    --cas-image="${cas_image}" \
-    --cas-image-size-mib="${cas_image_size_mib}" \
-    --memory-mib="${memory_mib}" \
-    --cpus="${cpus}" \
-    --actiondfs-stats-path="${output_root}/actiondfs_stats.txt" \
-    >"${server_log}" 2>&1 &
+  local server_args=(
+    --listen="${endpoint}"
+    --root="${output_root}/server"
+    --cas-image="${cas_image}"
+    --cas-image-size-mib="${cas_image_size_mib}"
+    --memory-mib="${memory_mib}"
+    --cpus="${cpus}"
+  )
+  if [[ "${actiondfs_stats}" == "1" ]]; then
+    server_args+=(
+      --actiondfs-stats
+      --actiondfs-stats-path="${output_root}/actiondfs_stats.txt"
+    )
+  fi
+  "${server}" serve-vm "${server_args[@]}" >"${server_log}" 2>&1 &
   server_pid="$!"
 
   wait_for_port 90
-  wait_for_guest_ready "${output_root}/actiondfs_stats.txt" 120
+  if [[ "${actiondfs_stats}" == "1" ]]; then
+    wait_for_guest_ready "${output_root}/actiondfs_stats.txt" 120
+  fi
 
   if ! ACTIOND_LLVM_SMOKE_EXECUTOR="grpc://${endpoint}" \
     ACTIOND_LLVM_SMOKE_CACHE="grpc://${endpoint}" \
@@ -151,6 +162,7 @@ run_smoke() {
     ACTIOND_LLVM_SMOKE_SERVER_LOG="${server_log}" \
     ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG="${measured_server_log}" \
     ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG="${remote_grpc_log}" \
+    ACTIOND_LLVM_SMOKE_OUTPUT_BASE="${llvm_output_base}" \
     ACTIOND_LLVM_SMOKE_SKIP_CLEAN=0 \
     "${repo_root}/e2e/llvm_tblgen_smoke.sh" >"${build_log}" 2>&1; then
     echo "LLVM smoke failed; build log: ${build_log}" >&2
@@ -176,7 +188,9 @@ run_smoke() {
 
   cleanup_server 0
   echo "timing summary: ${timings}" >&2
-  echo "actiondfs stats: ${output_root}/actiondfs_stats.txt" >&2
+  if [[ "${actiondfs_stats}" == "1" ]]; then
+    echo "actiondfs stats: ${output_root}/actiondfs_stats.txt" >&2
+  fi
 }
 
 run_mac_host_smoke() {
@@ -184,6 +198,11 @@ run_mac_host_smoke() {
   local build_log="${output_root}/llvm_tblgen_mac_host.log"
   local timings="${output_root}/mac_host_timings.md"
   local elapsed
+  local startup_flags=()
+  if [[ -n "${llvm_output_base}" ]]; then
+    mkdir -p "${llvm_output_base}"
+    startup_flags=(--output_base="${llvm_output_base}")
+  fi
 
   if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "mac-host LLVM smoke must run on macOS" >&2
@@ -192,14 +211,15 @@ run_mac_host_smoke() {
 
   (
     cd "${workspace}"
-    bazel clean --expunge
+    bazel "${startup_flags[@]}" clean --expunge
   ) >"${build_log}.clean" 2>&1
 
   if [[ -n "${warmup_target}" ]]; then
     if ! (
       cd "${workspace}"
-      bazel build "${warmup_target}" \
+      bazel "${startup_flags[@]}" build "${warmup_target}" \
         "${build_mode_flags[@]}" \
+        --bes_backend= \
         --platforms="${target_platform}" \
         --remote_executor= \
         --remote_cache= \
@@ -219,8 +239,9 @@ run_mac_host_smoke() {
 
   if ! (
     cd "${workspace}"
-    bazel build "${smoke_target}" \
+    bazel "${startup_flags[@]}" build "${smoke_target}" \
       "${build_mode_flags[@]}" \
+      --bes_backend= \
       --platforms="${target_platform}" \
       --remote_executor= \
       --remote_cache= \

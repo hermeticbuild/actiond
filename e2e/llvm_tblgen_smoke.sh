@@ -18,6 +18,12 @@ fi
 server_log="${ACTIOND_LLVM_SMOKE_SERVER_LOG:-}"
 measured_server_log="${ACTIOND_LLVM_SMOKE_MEASURED_SERVER_LOG:-}"
 remote_grpc_log="${ACTIOND_LLVM_SMOKE_REMOTE_GRPC_LOG:-}"
+output_base="${ACTIOND_LLVM_SMOKE_OUTPUT_BASE:-}"
+startup_flags=()
+if [[ -n "${output_base}" ]]; then
+  mkdir -p "${output_base}"
+  startup_flags=(--output_base="${output_base}")
+fi
 build_mode_flags=(
   -c opt
   --strip=always
@@ -33,6 +39,7 @@ build_remote() {
   local bazel_args=(
     build "${label}"
     "${build_mode_flags[@]}"
+    --bes_backend=
     --platforms="${target_platform}"
     --host_platform="${host_platform}"
     --extra_execution_platforms=//e2e:actiond_linux_arm64_musl_exec
@@ -49,7 +56,7 @@ build_remote() {
   if [[ -n "${remote_grpc_log}" ]]; then
     bazel_args+=(--remote_grpc_log="${remote_grpc_log}")
   fi
-  bazel "${bazel_args[@]}" \
+  bazel "${startup_flags[@]}" "${bazel_args[@]}" \
     --remote_local_fallback=false \
     --remote_upload_local_results=false \
     --disk_cache= \
@@ -59,7 +66,7 @@ build_remote() {
 }
 
 if [[ "${ACTIOND_LLVM_SMOKE_SKIP_CLEAN:-0}" != "1" ]]; then
-  bazel clean --expunge
+  bazel "${startup_flags[@]}" clean --expunge
 fi
 
 if [[ -n "${warmup_target}" ]]; then

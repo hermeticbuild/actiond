@@ -73,6 +73,7 @@ pub const ExecuteOptions = struct {
     cas_blob_root_path: ?[]const u8 = null,
     input_cas_blob_root_path: ?[]const u8 = null,
     actiondfs_stage_root_path: ?[]const u8 = null,
+    actiondfs_stats: bool = false,
     staged_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_index: ?*staged_cas_index.Index = null,
     runtime_mount_cache: ?RuntimeMountCache = null,
@@ -421,6 +422,7 @@ pub fn executeActionWithOptions(
             exec_root_path,
             input_root_digest,
             input_mode,
+            options.actiondfs_stats,
         );
         actiondfs_stage_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.?.stagePath(), .{ .iterate = true });
         exec_root_dir = actiondfs_stage_dir.?;
@@ -844,6 +846,7 @@ const ActiondfsWorkspace = struct {
     mode: ActionInputMode,
     lower_target: ?[:0]u8 = null,
     overlay_target: ?[:0]u8 = null,
+    fstype: [:0]const u8,
     stage_dir: [:0]u8,
     actiondfs_data: [:0]u8,
     overlay_data: ?[:0]u8 = null,
@@ -859,6 +862,7 @@ const ActiondfsWorkspace = struct {
         workspace_path: []const u8,
         input_root_digest: cas.Digest,
         mode: ActionInputMode,
+        actiondfs_stats: bool,
     ) !ActiondfsWorkspace {
         const base_path = try createActiondfsBasePath(io, allocator, stage_root_path, work_root_path);
         errdefer allocator.free(base_path);
@@ -873,6 +877,7 @@ const ActiondfsWorkspace = struct {
         var root_hash: [64]u8 = undefined;
 
         const root_hex = input_root_digest.formatHex(&root_hash);
+        const fstype: [:0]const u8 = if (actiondfs_stats) "actiondfs_instrumented" else "actiondfs";
         const actiondfs_data = if (mode == .actiondfs_strict)
             try std.fmt.allocPrintSentinel(
                 allocator,
@@ -895,10 +900,11 @@ const ActiondfsWorkspace = struct {
             return .{
                 .base_path = base_path,
                 .mode = mode,
+                .fstype = fstype,
                 .stage_dir = stage_path,
                 .actiondfs_data = actiondfs_data,
                 .mounts = .{.{ .strict = .{
-                    .fstype = "actiondfs",
+                    .fstype = fstype,
                     .target = target,
                     .stage_dir = stage_path,
                     .actiondfs_data = actiondfs_data,
@@ -926,13 +932,14 @@ const ActiondfsWorkspace = struct {
         return .{
             .base_path = base_path,
             .mode = mode,
+            .fstype = fstype,
             .lower_target = lower_path,
             .overlay_target = overlay_target,
             .stage_dir = stage_path,
             .actiondfs_data = actiondfs_data,
             .overlay_data = overlay_data,
             .mounts = .{.{ .overlay = .{
-                .fstype = "actiondfs",
+                .fstype = fstype,
                 .lower_target = lower_path,
                 .overlay_target = overlay_target,
                 .upperdir = stage_path,
@@ -949,9 +956,9 @@ const ActiondfsWorkspace = struct {
 
         const linux = std.os.linux;
         const actiondfs_rc = linux.mount(
-            "actiondfs",
+            self.fstype.ptr,
             self.lower_target.?.ptr,
-            "actiondfs",
+            self.fstype.ptr,
             linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME,
             @intFromPtr(self.actiondfs_data.ptr),
         );
@@ -2228,6 +2235,38 @@ test "prepareExecuteOptions places actiondfs stage beside CAS" {
 
     try std.testing.expect(prepared.options.actiondfs_stage_root_path != null);
     try std.testing.expect(std.mem.endsWith(u8, prepared.options.actiondfs_stage_root_path.?, "/cas/actiondfs-stage"));
+}
+
+test "actiondfs stats option selects instrumented filesystem without mount option noise" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root_path = root_buffer[0..root_len];
+    const work_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/work", .{root_path});
+    defer std.testing.allocator.free(work_path);
+    try tmp.dir.createDir(std.testing.io, "work", .default_dir);
+
+    var workspace = try ActiondfsWorkspace.init(
+        std.testing.io,
+        std.testing.allocator,
+        "/cas/blobs/sha256",
+        null,
+        work_path,
+        "/workspace",
+        cas.Digest.empty(),
+        .actiondfs_strict,
+        true,
+    );
+    defer workspace.deinit(std.testing.io, std.testing.allocator);
+
+    try std.testing.expectEqualStrings("actiondfs_instrumented", workspace.fstype);
+    try std.testing.expect(std.mem.indexOf(u8, workspace.actiondfs_data, "stats=") == null);
+    switch (workspace.mounts[0]) {
+        .strict => |mount| try std.testing.expectEqualStrings("actiondfs_instrumented", mount.fstype),
+        .overlay => return error.UnexpectedMountMode,
+    }
 }
 
 test "collectInputs materializes bindable tree directories" {

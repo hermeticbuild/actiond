@@ -40,6 +40,14 @@
 #include <linux/uio.h>
 #include <linux/vmalloc.h>
 
+#ifndef ACTIONDFS_ENABLE_STATS
+#define ACTIONDFS_ENABLE_STATS 0
+#endif
+
+#ifndef ACTIONDFS_FS_NAME
+#define ACTIONDFS_FS_NAME "actiondfs"
+#endif
+
 #define ACTIONDFS_MAGIC 0x41444653
 #define ACTIONDFS_MAX_DIRECTORY_PROTO_SIZE (64U * 1024U * 1024U)
 #define ACTIONDFS_DIR_MODE 0777
@@ -134,6 +142,7 @@ struct actiondfs_sb_info {
 	struct mutex load_lock;
 };
 
+#if ACTIONDFS_ENABLE_STATS
 enum actiondfs_stat {
 	ACTIONDFS_STAT_MOUNTS,
 	ACTIONDFS_STAT_DIR_LOADS,
@@ -346,6 +355,10 @@ static void actiondfs_stat_add(enum actiondfs_stat stat, u64 value)
 {
 	atomic64_add(value, &actiondfs_stats[stat]);
 }
+#else
+#define actiondfs_stat_inc(stat) do { } while (0)
+#define actiondfs_stat_add(stat, value) do { } while (0)
+#endif
 
 /*
  * Directory protos are content-addressed and immutable. Keep a VM-lifetime
@@ -1742,8 +1755,13 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		return copied;
 	}
 
+	if (copied == 0) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS);
+		return 0;
+	}
+
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
-	return -EREMOTEIO;
+	return copied;
 }
 
 static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
@@ -3808,7 +3826,7 @@ static int actiondfs_init_fs_context(struct fs_context *fc)
 
 static struct file_system_type actiondfs_fs_type = {
 	.owner = THIS_MODULE,
-	.name = "actiondfs",
+	.name = ACTIONDFS_FS_NAME,
 	.init_fs_context = actiondfs_init_fs_context,
 	.kill_sb = kill_anon_super,
 };
@@ -3817,6 +3835,7 @@ static struct file_system_type *actiondfs_fs_types[] = {
 	&actiondfs_fs_type,
 };
 
+#if ACTIONDFS_ENABLE_STATS
 static int actiondfs_stats_show(struct seq_file *m, void *v)
 {
 	size_t i;
@@ -3826,6 +3845,7 @@ static int actiondfs_stats_show(struct seq_file *m, void *v)
 			   atomic64_read(&actiondfs_stats[i]));
 	return 0;
 }
+#endif
 
 static int __init actiondfs_init(void)
 {
@@ -3837,11 +3857,13 @@ static int __init actiondfs_init(void)
 		if (err)
 			goto fail;
 	}
+#if ACTIONDFS_ENABLE_STATS
 	if (!proc_create_single(ACTIONDFS_PROC_STATS, 0444, NULL,
 				actiondfs_stats_show)) {
 		err = -ENOMEM;
 		goto fail;
 	}
+#endif
 	return 0;
 
 fail:
@@ -3854,7 +3876,9 @@ static void __exit actiondfs_exit(void)
 {
 	size_t i;
 
+#if ACTIONDFS_ENABLE_STATS
 	remove_proc_entry(ACTIONDFS_PROC_STATS, NULL);
+#endif
 	for (i = ARRAY_SIZE(actiondfs_fs_types); i > 0; i--)
 		unregister_filesystem(actiondfs_fs_types[i - 1]);
 	actiondfs_destroy_blob_path_cache();

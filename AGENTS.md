@@ -86,10 +86,14 @@ actiond log survives:
 ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
 ```
 
-When investigating actiondfs behavior inside a running guest, read
-`/proc/actiondfs_stats`. It reports VM-lifetime counters for directory cache
-hits/misses, parses, lookups, readdir, CAS blob opens, backing reads, splice
-reads, mmap calls, and stale retry events.
+When investigating actiondfs behavior inside a running guest, enable stats
+before reading `/proc/actiondfs_stats`. The normal `actiondfs` filesystem has
+stats compiled out; `--actiondfs-stats` makes the guest mount
+`actiondfs_instrumented` instead. For VM e2e, setting
+`ACTIOND_E2E_ACTIONDFS_STATS_PATH=/path/to/stats.txt` passes that flag to
+`serve-vm` and writes snapshots. The proc file reports VM-lifetime counters for
+directory cache hits/misses, parses, lookups, readdir, CAS blob opens, backing
+reads, splice reads, mmap calls, and stale retry events.
 
 Then update the timing summary next to the stress workspace:
 
@@ -161,6 +165,9 @@ parsed timing summaries under the printed output directory, and records the
 latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`.
 The parser also includes raw TCP-to-vsock bridge byte/read/write counts when
 `darwin-actiond serve-vm` logs `vm bridge timing` lines.
+The runner leaves actiondfs stats and stats snapshots disabled by default to
+reduce benchmark noise; set `ACTIOND_LLVM_SMOKE_ACTIONDFS_STATS=1` to mount
+`actiondfs_instrumented` and collect `/proc/actiondfs_stats` snapshots.
 
 For actiondfs performance work, this LLVM smoke is the canonical before/after
 measurement. Keep `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing

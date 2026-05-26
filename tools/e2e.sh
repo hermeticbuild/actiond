@@ -269,7 +269,10 @@ run_vm_e2e() {
     )
   fi
   if [[ -n "${ACTIOND_E2E_ACTIONDFS_STATS_PATH:-}" ]]; then
-    server_args+=(--actiondfs-stats-path="${ACTIOND_E2E_ACTIONDFS_STATS_PATH}")
+    server_args+=(
+      --actiondfs-stats
+      --actiondfs-stats-path="${ACTIOND_E2E_ACTIONDFS_STATS_PATH}"
+    )
   fi
 
   "${server}" serve-vm "${server_args[@]}" >"${log}" 2>&1 &
