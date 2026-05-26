@@ -33,8 +33,18 @@ var put_file_promote_attempts = std.atomic.Value(u64).init(0);
 var put_file_promote_success = std.atomic.Value(u64).init(0);
 var put_file_promote_existing = std.atomic.Value(u64).init(0);
 var put_file_promote_bytes = std.atomic.Value(u64).init(0);
+var put_file_promote_digest_bytes = std.atomic.Value(u64).init(0);
+var put_file_promote_preexisting_hits = std.atomic.Value(u64).init(0);
 var put_file_promote_cross_device_fallbacks = std.atomic.Value(u64).init(0);
 var put_file_promote_permission_fallbacks = std.atomic.Value(u64).init(0);
+var put_file_promote_open_ns = std.atomic.Value(u64).init(0);
+var put_file_promote_stat_ns = std.atomic.Value(u64).init(0);
+var put_file_promote_digest_ns = std.atomic.Value(u64).init(0);
+var put_file_promote_preexisting_check_ns = std.atomic.Value(u64).init(0);
+var put_file_promote_mkdir_ns = std.atomic.Value(u64).init(0);
+var put_file_promote_chmod_ns = std.atomic.Value(u64).init(0);
+var put_file_promote_rename_ns = std.atomic.Value(u64).init(0);
+var put_file_promote_existing_ns = std.atomic.Value(u64).init(0);
 var put_file_copy_calls = std.atomic.Value(u64).init(0);
 var put_file_copy_bytes = std.atomic.Value(u64).init(0);
 
@@ -44,8 +54,18 @@ pub const PutFileStats = struct {
     promote_success: u64,
     promote_existing: u64,
     promote_bytes: u64,
+    promote_digest_bytes: u64,
+    promote_preexisting_hits: u64,
     promote_cross_device_fallbacks: u64,
     promote_permission_fallbacks: u64,
+    promote_open_ns: u64,
+    promote_stat_ns: u64,
+    promote_digest_ns: u64,
+    promote_preexisting_check_ns: u64,
+    promote_mkdir_ns: u64,
+    promote_chmod_ns: u64,
+    promote_rename_ns: u64,
+    promote_existing_ns: u64,
     copy_calls: u64,
     copy_bytes: u64,
 };
@@ -301,45 +321,79 @@ pub const Store = struct {
         if (comptime builtin.os.tag != .linux) unreachable;
         _ = put_file_promote_attempts.fetchAdd(1, .monotonic);
 
+        const open_start = std.Io.Clock.awake.now(io);
         var src = try src_dir.openFile(io, src_path, .{});
+        addElapsedNs(&put_file_promote_open_ns, open_start, io);
         var src_open = true;
         defer if (src_open) src.close(io);
-        const original_mode = (try src_dir.statFile(io, src_path, .{})).permissions.toMode();
 
+        const stat_start = std.Io.Clock.awake.now(io);
+        const original_mode = (try src.stat(io)).permissions.toMode();
+        addElapsedNs(&put_file_promote_stat_ns, stat_start, io);
+
+        const digest_start = std.Io.Clock.awake.now(io);
         const digest = try digestFile(src);
+        addElapsedNs(&put_file_promote_digest_ns, digest_start, io);
+        _ = put_file_promote_digest_bytes.fetchAdd(digest.size_bytes, .monotonic);
+
         var final_path_buffer: [blob_path_len]u8 = undefined;
         const final_path = blobPath(digest, &final_path_buffer);
-        try self.root.createDirPath(io, digestParentPath(final_path));
 
+        const preexisting_start = std.Io.Clock.awake.now(io);
+        if (self.root.statFile(io, final_path, .{})) |_| {
+            addElapsedNs(&put_file_promote_preexisting_check_ns, preexisting_start, io);
+            _ = put_file_promote_preexisting_hits.fetchAdd(1, .monotonic);
+            _ = put_file_promote_existing.fetchAdd(1, .monotonic);
+            return digest;
+        } else |err| switch (err) {
+            error.FileNotFound => addElapsedNs(&put_file_promote_preexisting_check_ns, preexisting_start, io),
+            else => return err,
+        }
+
+        const mkdir_start = std.Io.Clock.awake.now(io);
+        try self.root.createDirPath(io, digestParentPath(final_path));
+        addElapsedNs(&put_file_promote_mkdir_ns, mkdir_start, io);
+
+        const chmod_start = std.Io.Clock.awake.now(io);
         setFdMode(src.handle, cas_blob_mode) catch |err| switch (err) {
             error.PermissionDenied, error.AccessDenied => {
+                addElapsedNs(&put_file_promote_chmod_ns, chmod_start, io);
                 _ = put_file_promote_permission_fallbacks.fetchAdd(1, .monotonic);
                 return self.putFileCopy(io, src_dir, src_path);
             },
             else => |e| return e,
         };
+        addElapsedNs(&put_file_promote_chmod_ns, chmod_start, io);
 
+        const rename_start = std.Io.Clock.awake.now(io);
         src_dir.renamePreserve(src_path, self.root, final_path, io) catch |err| switch (err) {
             error.PathAlreadyExists => {
+                const rename_ns = elapsedNsSince(rename_start, io);
+                _ = put_file_promote_rename_ns.fetchAdd(rename_ns, .monotonic);
+                _ = put_file_promote_existing_ns.fetchAdd(rename_ns, .monotonic);
                 setFdMode(src.handle, original_mode) catch {};
                 _ = put_file_promote_existing.fetchAdd(1, .monotonic);
                 return digest;
             },
             error.CrossDevice => {
+                _ = put_file_promote_rename_ns.fetchAdd(elapsedNsSince(rename_start, io), .monotonic);
                 setFdMode(src.handle, original_mode) catch {};
                 _ = put_file_promote_cross_device_fallbacks.fetchAdd(1, .monotonic);
                 return error.CrossDevice;
             },
             error.PermissionDenied, error.AccessDenied => {
+                _ = put_file_promote_rename_ns.fetchAdd(elapsedNsSince(rename_start, io), .monotonic);
                 setFdMode(src.handle, original_mode) catch {};
                 _ = put_file_promote_permission_fallbacks.fetchAdd(1, .monotonic);
                 return err;
             },
             else => |e| {
+                _ = put_file_promote_rename_ns.fetchAdd(elapsedNsSince(rename_start, io), .monotonic);
                 setFdMode(src.handle, original_mode) catch {};
                 return e;
             },
         };
+        addElapsedNs(&put_file_promote_rename_ns, rename_start, io);
         src.close(io);
         src_open = false;
         _ = put_file_promote_success.fetchAdd(1, .monotonic);
@@ -480,8 +534,18 @@ pub fn snapshotPutFileStats() PutFileStats {
         .promote_success = put_file_promote_success.load(.monotonic),
         .promote_existing = put_file_promote_existing.load(.monotonic),
         .promote_bytes = put_file_promote_bytes.load(.monotonic),
+        .promote_digest_bytes = put_file_promote_digest_bytes.load(.monotonic),
+        .promote_preexisting_hits = put_file_promote_preexisting_hits.load(.monotonic),
         .promote_cross_device_fallbacks = put_file_promote_cross_device_fallbacks.load(.monotonic),
         .promote_permission_fallbacks = put_file_promote_permission_fallbacks.load(.monotonic),
+        .promote_open_ns = put_file_promote_open_ns.load(.monotonic),
+        .promote_stat_ns = put_file_promote_stat_ns.load(.monotonic),
+        .promote_digest_ns = put_file_promote_digest_ns.load(.monotonic),
+        .promote_preexisting_check_ns = put_file_promote_preexisting_check_ns.load(.monotonic),
+        .promote_mkdir_ns = put_file_promote_mkdir_ns.load(.monotonic),
+        .promote_chmod_ns = put_file_promote_chmod_ns.load(.monotonic),
+        .promote_rename_ns = put_file_promote_rename_ns.load(.monotonic),
+        .promote_existing_ns = put_file_promote_existing_ns.load(.monotonic),
         .copy_calls = put_file_copy_calls.load(.monotonic),
         .copy_bytes = put_file_copy_bytes.load(.monotonic),
     };
@@ -495,8 +559,18 @@ pub fn appendPutFileStats(allocator: std.mem.Allocator, out: *std.ArrayListUnman
         \\cas_put_file_promote_success {d}
         \\cas_put_file_promote_existing {d}
         \\cas_put_file_promote_bytes {d}
+        \\cas_put_file_promote_digest_bytes {d}
+        \\cas_put_file_promote_preexisting_hits {d}
         \\cas_put_file_promote_cross_device_fallbacks {d}
         \\cas_put_file_promote_permission_fallbacks {d}
+        \\cas_put_file_promote_open_ns {d}
+        \\cas_put_file_promote_stat_ns {d}
+        \\cas_put_file_promote_digest_ns {d}
+        \\cas_put_file_promote_preexisting_check_ns {d}
+        \\cas_put_file_promote_mkdir_ns {d}
+        \\cas_put_file_promote_chmod_ns {d}
+        \\cas_put_file_promote_rename_ns {d}
+        \\cas_put_file_promote_existing_ns {d}
         \\cas_put_file_copy_calls {d}
         \\cas_put_file_copy_bytes {d}
         \\
@@ -506,8 +580,18 @@ pub fn appendPutFileStats(allocator: std.mem.Allocator, out: *std.ArrayListUnman
         stats.promote_success,
         stats.promote_existing,
         stats.promote_bytes,
+        stats.promote_digest_bytes,
+        stats.promote_preexisting_hits,
         stats.promote_cross_device_fallbacks,
         stats.promote_permission_fallbacks,
+        stats.promote_open_ns,
+        stats.promote_stat_ns,
+        stats.promote_digest_ns,
+        stats.promote_preexisting_check_ns,
+        stats.promote_mkdir_ns,
+        stats.promote_chmod_ns,
+        stats.promote_rename_ns,
+        stats.promote_existing_ns,
         stats.copy_calls,
         stats.copy_bytes,
     });
@@ -811,6 +895,14 @@ fn digestFile(file: std.Io.File) !Digest {
         .hash = hash,
         .size_bytes = size_bytes,
     };
+}
+
+fn elapsedNsSince(start: std.Io.Timestamp, io: std.Io) u64 {
+    return @intCast(start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
+}
+
+fn addElapsedNs(counter: *std.atomic.Value(u64), start: std.Io.Timestamp, io: std.Io) void {
+    _ = counter.fetchAdd(elapsedNsSince(start, io), .monotonic);
 }
 
 fn setFdMode(fd: std.Io.File.Handle, mode: std.posix.mode_t) !void {
