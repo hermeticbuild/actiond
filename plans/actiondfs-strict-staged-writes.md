@@ -259,6 +259,166 @@ Executor tests:
 - declared output overlapping input fails in strict mode
 - same overlap uses overlay when `mutates_inputs` is present
 
+## Next Performance Phase
+
+### Runtime-Controlled Counters
+
+Goal: keep the rich actiondfs counters for profiling runs, but make the common
+path pay essentially nothing when profiling is disabled.
+
+Plan:
+
+- Add an actiondfs mount option:
+
+```text
+stats=0|1
+```
+
+- Default `stats=0`.
+- Store the per-mount setting on `struct actiondfs_sb_info`.
+- Add a global static key plus enabled-mount refcount:
+  - no stats-enabled mounts: counter call sites are patched to the disabled path
+  - at least one stats-enabled mount: call sites branch into counter collection
+- Replace global atomic counters with per-CPU counters for the enabled path.
+- Keep `/proc/actiondfs_stats`, but make reads aggregate per-CPU values.
+- Keep derived expensive values in userspace parsers where possible rather than
+  incrementing extra hot counters.
+
+Expected result: with `stats=0`, lookup/read/write hot paths should avoid global
+atomic increments. With `stats=1`, profiling remains available with lower
+contention than the current global `atomic64_t` counters.
+
+Validation:
+
+- Add kernel counters proving the static key enables/disables as mounts appear.
+- Run VM e2e once with stats disabled and once with stats enabled.
+- Run LLVM smoke with stats disabled for canonical performance numbers.
+- Keep stats-enabled LLVM runs only for analysis snapshots.
+
+### Staged Open/Write Fast Path
+
+Goal: reduce action-time staged-write overhead before optimizing output
+collection, because LLVM timing shows `execute/process_io` dominates while
+`output_upload/collect` is already much smaller.
+
+Current shape:
+
+- `kernel/actiondfs/actiondfs.c:2960` creates the real staged file, but does
+  not keep it open.
+- `kernel/actiondfs/actiondfs.c:3384` mostly validates writable input behavior.
+- `kernel/actiondfs/actiondfs.c:1612` reopens the real staged backing file for
+  each write, then closes it.
+
+Plan:
+
+1. Add a per-open `file->private_data` context for staged files.
+   - On open, resolve/open the real staged backing file once.
+   - On `write_iter`, reuse that backing file.
+   - On release, `fput()` it.
+   - Also reuse it for staged `read_iter`, `mmap`, `splice_read`, and
+     `copy_file_range` where possible.
+2. Add `atomic_open` after the per-open context is solid.
+   - This combines lookup/create/open for `open(O_CREAT|...)`.
+   - This is what can help the single-write case.
+   - Per-open backing reuse mostly helps multi-write files; `atomic_open` helps
+     avoid the create-then-open path walk even when the file gets only one
+     write.
+3. Add `stage_dir_ready` or equivalent on actiondfs directory nodes.
+   - Counters show `stage_ensure_dir_created=0` but
+     `stage_ensure_dir_existing=103548`.
+   - That means we are repeatedly walking already-existing parent dirs.
+   - Once a parent's stage directory exists, mark it and skip future ensure
+     walks for that parent.
+4. Add staged-negative lookup filtering.
+   - Latest stats showed about 1.37M staged inode lookup negatives.
+   - Track whether an actiondfs directory has any staged children.
+   - If it definitely has none, skip the underlying staged lookup and go
+     straight to input lookup.
+   - Mark/update this on create, mkdir, rename, unlink, and rmdir.
+
+Validation:
+
+- Add counters for staged opens per staged write, atomic-open hits, skipped
+  ensure-dir calls, and skipped staged-negative lookups.
+- Run 3x LLVM smoke before/after and compare `execute/process_io`, staged
+  backing opens, ensure-dir components, and lookup negative rates.
+
+### Digest Hints and Promotion
+
+Goal: avoid post-action output hashing only when actiondfs can prove a digest
+exactly. Avoid magic path semantics such as `rename(file, "/cas/FINALIZE")`.
+That couples actiondfs to a magic CAS path, has awkward return semantics for
+the digest, and creates strange races/security boundaries. If kernel-assisted
+finalization is worth doing, make it explicit with ioctl or xattr, not magic
+rename.
+
+Current userspace path in `src/cas.zig:295`:
+
+1. Open staged file.
+2. Read file to SHA-256 it.
+3. Chmod to CAS mode.
+4. Rename into final CAS path if same filesystem.
+
+That already avoids a second copy. The unavoidable part is hashing unless we
+know the digest from how the output was produced.
+
+Plan:
+
+1. First do cheap userspace cleanup.
+   - Use `fstat` from the already-open fd instead of a separate path stat.
+   - Check whether the final CAS blob exists before chmod/rename for the common
+     duplicate case.
+   - Cache created CAS shard dirs.
+   - Split timing counters for `digest_ns`, `mkdir_ns`, `chmod_ns`,
+     `rename_ns`, and `existing_ns`.
+2. Add an optional kernel digest hint, not finalization.
+   - actiondfs tracks `node->known_digest` only when exact.
+   - Invalidate on arbitrary write, truncate, mmap-write risk, rename
+     replacement, and similar mutations.
+   - Expose via ioctl/xattr: "digest known?" plus digest/size.
+   - Userspace collection uses the hint, otherwise falls back to current
+     hashing.
+3. Start with the cleanest known-digest case.
+   - `copy_file_range` from a CAS input file, full source, offset 0 to empty
+     output.
+   - Then the output digest is exactly the input digest.
+   - This probably matches `copy_to_directory`-style copies and avoids hashing
+     duplicated outputs.
+4. Only consider kernel "promote to CAS" after digest hints prove useful.
+   - An ioctl like `ACTIONDFS_IOC_PROMOTE_TO_CAS` is cleaner than magic rename.
+   - But if it still has to read and hash in kernel, it mainly avoids userspace
+     copies, not the hash work.
+
+Implementation notes:
+
+- Use an explicit trusted metadata channel, likely a `trusted.actiondfs.sha256`
+  xattr on the real staged file, for exact digest hints.
+- Start with exact digest propagation for full-file `copy_file_range`:
+  - source is a CAS-backed input
+  - copy starts at source offset `0`
+  - destination is empty or overwritten from offset `0`
+  - copied byte count equals the CAS blob size
+- Invalidate the digest xattr on arbitrary writes, truncates, partial copies,
+  writable mmap risks, and overwrite/rename cases.
+- Teach CAS output collection to trust validated actiondfs digest hints:
+  - stat size must match hinted size
+  - final CAS path must exist or the staged file can be chmodded and renamed
+    directly to that path
+  - fallback remains the current userspace `digestFile` path
+- Only prototype a general `digest=write` mode after measuring xattr hit rate.
+  Hashing arbitrary writes correctly means hashing the exact bytes written; a
+  naive iov hash before `backing_file_write_iter` is not enough because user
+  memory can change between the hash copy and the backing write copy.
+
+Validation:
+
+- Add CAS collection counters for digest-hint hits, misses, invalidations, and
+  bytes skipped.
+- Run LLVM smoke and inspect whether `copy_to_directory` outputs produce enough
+  exact digest hints to matter.
+- Do not add kernel-side CAS finalization unless digest hints show real value
+  and userspace rename/chmod still appears in timing.
+
 End-to-end smoke:
 
 - LLVM build in default strict mode
