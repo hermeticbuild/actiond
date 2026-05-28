@@ -83,7 +83,7 @@ When collecting executor timing data, keep the e2e temp directory so the
 actiond log survives:
 
 ```bash
-ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm
+ACTIOND_E2E_KEEP_TMP=1 ACTIOND_REPO_BAZEL_FLAGS="--config=remote --config=executor_timing_logs" tools/e2e.sh vm
 ```
 
 When investigating actiondfs behavior inside a running guest, enable stats
@@ -100,7 +100,7 @@ Then update the timing summary next to the stress workspace:
 ```bash
 test/parse_timings.py /path/to/actiond.log \
   --mode vm \
-  --command 'ACTIOND_E2E_KEEP_TMP=1 tools/e2e.sh vm' \
+  --command 'ACTIOND_E2E_KEEP_TMP=1 ACTIOND_REPO_BAZEL_FLAGS="--config=remote --config=executor_timing_logs" tools/e2e.sh vm' \
   --output test/STRESS_TIMINGS.md
 ```
 
@@ -168,6 +168,10 @@ The parser also includes raw TCP-to-vsock bridge byte/read/write counts when
 The runner leaves actiondfs stats and stats snapshots disabled by default to
 reduce benchmark noise; set `ACTIOND_LLVM_SMOKE_ACTIONDFS_STATS=1` to mount
 `actiondfs_instrumented` and collect `/proc/actiondfs_stats` snapshots.
+Executor timing logs are compiled out by default with
+`--//:executor_timing_logs=false`; this runner enables them by default for
+parsed timing summaries. Set `ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS=0` to
+build the no-log server path, in which case the VM timing markdown is skipped.
 
 For actiondfs performance work, this LLVM smoke is the canonical before/after
 measurement. Keep `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing

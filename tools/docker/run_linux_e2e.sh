@@ -15,7 +15,8 @@ for name in \
   ACTIOND_E2E_STANDALONE \
   ACTIOND_E2E_BARE_COUNT \
   ACTIOND_E2E_SOURCE_DIRS \
-  ACTIOND_E2E_SOURCE_FILES_PER_DIR; do
+  ACTIOND_E2E_SOURCE_FILES_PER_DIR \
+  ACTIOND_REPO_BAZEL_FLAGS; do
   if [[ -n "${!name:-}" ]]; then
     env_args+=(-e "${name}=${!name}")
   fi

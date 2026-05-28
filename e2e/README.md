@@ -60,6 +60,10 @@ The standalone stress workspace is still useful for focused synthetic coverage,
 but LLVM timing is the repo's canonical actiondfs before/after signal.
 When `darwin-actiond serve-vm` logs `vm bridge timing` lines, the parser also
 includes raw TCP-to-vsock byte and read/write counts in the VM summary.
+Executor timing logs are controlled by the Bazel build setting
+`--//:executor_timing_logs` and are compiled out by default. The fresh LLVM VM
+runner enables them by default; set `ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS=0`
+to build the no-log server path and skip the parsed VM timing markdown.
 
 Both VM and mac-host runs set the target platform to
 `@llvm//platforms:linux_arm64_musl`. The VM run also sets the host platform to

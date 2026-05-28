@@ -30,6 +30,7 @@ cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
 run_vm="${ACTIOND_LLVM_SMOKE_VM:-1}"
 run_mac_host="${ACTIOND_LLVM_SMOKE_MAC_HOST:-1}"
 actiondfs_stats="${ACTIOND_LLVM_SMOKE_ACTIONDFS_STATS:-0}"
+executor_timing_logs="${ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS:-1}"
 server_target="${ACTIOND_LLVM_SMOKE_SERVER_TARGET:-//cmd/darwin_actiond:darwin-actiond-standalone_pkg}"
 server_script_path="${ACTIOND_LLVM_SMOKE_SERVER_SCRIPT_PATH:-/tmp/darwin-actiond-standalone}"
 build_mode_flags=(
@@ -41,6 +42,20 @@ bazel_build_flags=()
 if [[ -n "${ACTIOND_BAZEL_BUILD_FLAGS:-}" ]]; then
   read -r -a bazel_build_flags <<<"${ACTIOND_BAZEL_BUILD_FLAGS}"
 fi
+case "${executor_timing_logs}" in
+  1|true|TRUE|yes|YES)
+    executor_timing_logs=1
+    bazel_build_flags+=(--//:executor_timing_logs=true)
+    ;;
+  0|false|FALSE|no|NO)
+    executor_timing_logs=0
+    bazel_build_flags+=(--//:executor_timing_logs=false)
+    ;;
+  *)
+    echo "ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
 
 server_pid=""
 server_log=""
@@ -174,20 +189,26 @@ run_smoke() {
   fi
 
   elapsed="$(sed -n 's/.*Elapsed time: \([0-9.]*s\).*/\1/p' "${build_log}" | tail -n 1)"
-  if [[ ! -s "${measured_server_log}" ]]; then
+  if [[ "${executor_timing_logs}" == "1" && ! -s "${measured_server_log}" ]]; then
     echo "measured VM log slice is empty; source log: ${server_log}" >&2
     return 1
   fi
 
-  "${repo_root}/test/parse_timings.py" "${measured_server_log}" \
-    --mode "llvm-vm" \
-    --command "e2e/run_llvm_vm_smoke.sh" \
-    --bazel-elapsed "${elapsed:-unknown}" \
-    --workload "${smoke_target}, warmup=${warmup_target:-none}, jobs=${jobs_label}" \
-    --output "${timings}"
+  if [[ "${executor_timing_logs}" == "1" ]]; then
+    "${repo_root}/test/parse_timings.py" "${measured_server_log}" \
+      --mode "llvm-vm" \
+      --command "e2e/run_llvm_vm_smoke.sh" \
+      --bazel-elapsed "${elapsed:-unknown}" \
+      --workload "${smoke_target}, warmup=${warmup_target:-none}, jobs=${jobs_label}" \
+      --output "${timings}"
+  fi
 
   cleanup_server 0
-  echo "timing summary: ${timings}" >&2
+  if [[ "${executor_timing_logs}" == "1" ]]; then
+    echo "timing summary: ${timings}" >&2
+  else
+    echo "timing summary: skipped; executor timing logs are compiled out" >&2
+  fi
   if [[ "${actiondfs_stats}" == "1" ]]; then
     echo "actiondfs stats: ${output_root}/actiondfs_stats.txt" >&2
   fi

@@ -1,4 +1,17 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("//tools:build_options.bzl", "zig_build_options")
+
+zig_build_options(
+    name = "actiond_build_options_zig",
+    executor_timing_logs = "//:executor_timing_logs",
+    out = "actiond_build_options.zig",
+)
+
+zig_library(
+    name = "build_options",
+    import_name = "actiond_build_options",
+    main = ":actiond_build_options_zig",
+)
 
 zig_library(
     name = "actiond",
@@ -40,7 +53,10 @@ zig_library(
         "vsock.zig",
     ],
     import_name = "actiond",
-    deps = ["@zstd"],
+    deps = [
+        ":build_options",
+        "@zstd",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -83,5 +99,8 @@ zig_test(
         "version.zig",
         "vsock.zig",
     ],
-    deps = ["@zstd"],
+    deps = [
+        ":build_options",
+        "@zstd",
+    ],
 )

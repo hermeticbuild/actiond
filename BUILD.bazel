@@ -1,1 +1,8 @@
+load("//tools:build_options.bzl", "bool_flag")
+
 package(default_visibility = ["//visibility:public"])
+
+bool_flag(
+    name = "executor_timing_logs",
+    build_setting_default = False,
+)

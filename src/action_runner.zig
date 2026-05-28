@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const build_options = @import("actiond_build_options");
 const cas = @import("cas.zig");
 const reapi = @import("reapi.zig");
 
@@ -11,6 +12,13 @@ pub const Error = error{
 const max_stream_bytes = 16 * 1024 * 1024;
 const cgroup_period_us: u64 = 100_000;
 const child_poll_timeout_ms = 100;
+
+inline fn runnerTimingNow(io: std.Io) std.Io.Timestamp {
+    return if (comptime build_options.executor_timing_logs)
+        std.Io.Clock.awake.now(io)
+    else
+        undefined;
+}
 
 fn actionNamespaceFlags() usize {
     const linux = std.os.linux;
@@ -338,7 +346,7 @@ fn runCommandChroot(
     options: RunOptions,
 ) !Outcome {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
-    const runner_start = std.Io.Clock.awake.now(io);
+    const runner_start = runnerTimingNow(io);
     const chroot_dir = options.chroot_dir;
 
     var cgroup = try Cgroup.create(io, allocator, options.cgroup_limits);
@@ -400,7 +408,7 @@ fn runCommandChroot(
     const setup_pipe = try linuxPipe();
     errdefer closePipe(setup_pipe);
 
-    const fork_start = std.Io.Clock.awake.now(io);
+    const fork_start = runnerTimingNow(io);
     const pid = try forkAction(.{
         .stdin_pipe = stdin_pipe,
         .stdout_pipe = stdout_pipe,
@@ -417,7 +425,7 @@ fn runCommandChroot(
         .sandbox_uid = options.sandbox_uid,
         .sandbox_gid = options.sandbox_gid,
     });
-    const fork_completed = std.Io.Clock.awake.now(io);
+    const fork_completed = runnerTimingNow(io);
     var child_waited = false;
     errdefer if (!child_waited) terminateChild(io, allocator, pid, cgroup);
 
@@ -434,7 +442,7 @@ fn runCommandChroot(
 
     const setup_signaled = try readSetupSignal(setup_pipe[0]);
     closeFd(setup_pipe[0]);
-    const setup_completed = std.Io.Clock.awake.now(io);
+    const setup_completed = runnerTimingNow(io);
 
     const child_result = try collectChildResult(io, allocator, stdout_pipe[0], stderr_pipe[0], pid, cgroup);
     const streams_completed = child_result.streams_completed;
@@ -448,14 +456,14 @@ fn runCommandChroot(
     const digest_start = wait_completed;
     const stdout_digest = try digestIfNonEmpty(io, store, child_result.stdout);
     const stderr_digest = try digestIfNonEmpty(io, store, child_result.stderr);
-    const digest_completed = std.Io.Clock.awake.now(io);
+    const digest_completed = runnerTimingNow(io);
     return .{
         .status = child_result.status,
         .stdout = child_result.stdout,
         .stderr = child_result.stderr,
         .stdout_digest = stdout_digest,
         .stderr_digest = stderr_digest,
-        .runner_timing = .{
+        .runner_timing = if (comptime build_options.executor_timing_logs) .{
             .parent_prepare_ns = elapsedNs(runner_start, fork_start),
             .fork_ns = elapsedNs(fork_start, fork_completed),
             .child_setup_ns = elapsedNs(fork_completed, setup_completed),
@@ -465,7 +473,7 @@ fn runCommandChroot(
             .bind_mounts = options.bind_mounts.len,
             .actiondfs_mounts = options.actiondfs_mounts.len,
             .setup_signaled = setup_signaled,
-        },
+        } else null,
     };
 }
 
@@ -792,12 +800,12 @@ fn collectChildResult(
         }
     }
 
-    const streams_completed = std.Io.Clock.awake.now(io);
+    const streams_completed = runnerTimingNow(io);
     const final_status = status orelse try waitForPid(pid);
     const wait_completed = if (waited_while_streams_open)
         streams_completed
     else
-        std.Io.Clock.awake.now(io);
+        runnerTimingNow(io);
 
     return .{
         .stdout = try stdout.toOwnedSlice(allocator),

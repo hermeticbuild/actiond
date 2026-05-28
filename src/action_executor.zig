@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const action_runner = @import("action_runner.zig");
+const build_options = @import("actiond_build_options");
 const cas = @import("cas.zig");
 const execroot = @import("execroot.zig");
 const protobuf = @import("protobuf_wire.zig");
@@ -29,6 +30,13 @@ const chroot_execroot_prefix = "/workspace/";
 const worker_name = "actiond";
 const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
 var next_actiondfs_workspace_id = std.atomic.Value(u64).init(0);
+
+inline fn executorTimingNow(io: std.Io) std.Io.Timestamp {
+    return if (comptime build_options.executor_timing_logs)
+        std.Io.Clock.awake.now(io)
+    else
+        undefined;
+}
 
 pub const RuntimeMountSources = struct {
     lib: ?[:0]const u8 = null,
@@ -315,7 +323,7 @@ pub fn executeActionWithOptions(
 ) !action_runner.Outcome {
     const worker_start_wall = timestampNow(io);
     const input_fetch_start_wall = worker_start_wall;
-    const total_start = std.Io.Clock.awake.now(io);
+    const total_start = executorTimingNow(io);
     const input_fetch_start = total_start;
 
     const read_roots = casReadRoots(options);
@@ -512,9 +520,9 @@ pub fn executeActionWithOptions(
     }
 
     const input_fetch_completed_wall = timestampNow(io);
-    const input_fetch_completed = std.Io.Clock.awake.now(io);
+    const input_fetch_completed = executorTimingNow(io);
     const execution_start_wall = timestampNow(io);
-    const execution_start = std.Io.Clock.awake.now(io);
+    const execution_start = executorTimingNow(io);
     var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, .{
         .chroot_dir = work_root_path,
         .chroot_cwd = chroot_cwd,
@@ -525,9 +533,9 @@ pub fn executeActionWithOptions(
     });
     errdefer outcome.deinit(allocator);
     const execution_completed_wall = timestampNow(io);
-    const execution_completed = std.Io.Clock.awake.now(io);
+    const execution_completed = executorTimingNow(io);
     const output_upload_start_wall = timestampNow(io);
-    const output_upload_start = std.Io.Clock.awake.now(io);
+    const output_upload_start = executorTimingNow(io);
     if (options.staged_cas_index) |index| {
         if (outcome.stdout_digest) |digest| try index.add(io, allocator, digest);
         if (outcome.stderr_digest) |digest| try index.add(io, allocator, digest);
@@ -541,7 +549,7 @@ pub fn executeActionWithOptions(
         try collectOutputFiles(io, allocator, store, options.staged_cas_index, exec_root_dir, command, &outcome);
     }
     const output_upload_completed_wall = timestampNow(io);
-    const output_upload_completed = std.Io.Clock.awake.now(io);
+    const output_upload_completed = executorTimingNow(io);
 
     outcome.execution_metadata = .{
         .worker = worker_name,
@@ -555,26 +563,28 @@ pub fn executeActionWithOptions(
         .output_upload_start_timestamp = output_upload_start_wall,
         .output_upload_completed_timestamp = output_upload_completed_wall,
     };
-    logActionTiming(
-        action_digest,
-        total_start,
-        input_fetch_start,
-        input_fetch_completed,
-        execution_start,
-        execution_completed,
-        output_upload_start,
-        output_upload_completed,
-        inputs.items.len,
-        directory_inputs.items.len,
-        bind_mounts.items.len,
-        if (actiondfs_workspace != null) @as(usize, 1) else 0,
-        outcome.output_files.len,
-        outcome.output_directories.len,
-        stressCaseFromCommand(command),
-        input_mode,
-    );
-    if (outcome.runner_timing) |timing| {
-        logRunnerTiming(action_digest, timing);
+    if (comptime build_options.executor_timing_logs) {
+        logActionTiming(
+            action_digest,
+            total_start,
+            input_fetch_start,
+            input_fetch_completed,
+            execution_start,
+            execution_completed,
+            output_upload_start,
+            output_upload_completed,
+            inputs.items.len,
+            directory_inputs.items.len,
+            bind_mounts.items.len,
+            if (actiondfs_workspace != null) @as(usize, 1) else 0,
+            outcome.output_files.len,
+            outcome.output_directories.len,
+            stressCaseFromCommand(command),
+            input_mode,
+        );
+        if (outcome.runner_timing) |timing| {
+            logRunnerTiming(action_digest, timing);
+        }
     }
     return outcome;
 }
