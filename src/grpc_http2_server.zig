@@ -279,11 +279,6 @@ const MethodKind = enum {
 const IncomingFrame = struct {
     header: http2_frame.Header,
     payload: []u8,
-
-    fn deinit(self: *IncomingFrame, allocator: std.mem.Allocator) void {
-        allocator.free(self.payload);
-        self.* = undefined;
-    }
 };
 
 const StreamState = struct {
@@ -609,6 +604,7 @@ pub fn serveDispatcher(
             sleepMilliseconds(10);
             continue;
         };
+        setTcpNoDelay(stream) catch {};
         const thread = std.Thread.spawn(.{}, connectionThread, .{
             io,
             allocator,
@@ -710,6 +706,8 @@ pub fn handleConnectionStreams(
 
     var hpack_decoder = http2_hpack.Decoder.init(allocator);
     defer hpack_decoder.deinit();
+    var frame_payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer frame_payload.deinit(allocator);
 
     var streams: std.ArrayListUnmanaged(StreamState) = .empty;
     defer {
@@ -719,11 +717,10 @@ pub fn handleConnectionStreams(
 
     var continuation_stream: ?u31 = null;
     while (true) {
-        var incoming = readFrame(allocator, reader) catch |err| switch (err) {
+        const incoming = readFrame(allocator, reader, &frame_payload) catch |err| switch (err) {
             error.EndOfStream => return,
             else => |e| return e,
         };
-        defer incoming.deinit(allocator);
 
         if (continuation_stream != null and incoming.header.type != .continuation) {
             return error.UnexpectedContinuation;
@@ -819,19 +816,23 @@ fn writeServerSettings(writer: *std.Io.Writer) !void {
     try writer.flush();
 }
 
-fn readFrame(allocator: std.mem.Allocator, reader: *std.Io.Reader) !IncomingFrame {
+fn readFrame(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    payload_buffer: *std.ArrayListUnmanaged(u8),
+) !IncomingFrame {
     var header_bytes: [http2_frame.header_len]u8 = undefined;
     try reader.readSliceAll(&header_bytes);
     const header = http2_frame.decodeHeader(&header_bytes);
     if (header.length > max_frame_payload_len) return error.FrameTooLarge;
 
-    const payload = try allocator.alloc(u8, header.length);
-    errdefer allocator.free(payload);
-    try reader.readSliceAll(payload);
+    try payload_buffer.ensureTotalCapacity(allocator, header.length);
+    payload_buffer.items.len = header.length;
+    try reader.readSliceAll(payload_buffer.items);
 
     return .{
         .header = header,
-        .payload = payload,
+        .payload = payload_buffer.items,
     };
 }
 
@@ -1101,6 +1102,16 @@ fn ignoreSigpipe() void {
     std.posix.sigaction(.PIPE, &act, null);
 }
 
+fn setTcpNoDelay(stream: std.Io.net.Stream) !void {
+    var enabled: i32 = 1;
+    try std.posix.setsockopt(
+        stream.socket.handle,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        std.mem.asBytes(&enabled),
+    );
+}
+
 fn dispatchGrpc(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1186,8 +1197,17 @@ fn writeHeaders(
     end_stream: bool,
     headers: []const http2_hpack.HeaderView,
 ) !void {
-    const encoded = try http2_hpack.encodeHeaderBlockAlloc(std.heap.smp_allocator, headers);
-    defer std.heap.smp_allocator.free(encoded);
+    const encoded_len = http2_hpack.encodedHeaderBlockLen(headers);
+    var stack_buffer: [512]u8 = undefined;
+    var heap_allocated = false;
+    const encoded = if (encoded_len <= stack_buffer.len)
+        try http2_hpack.encodeHeaderBlockInto(stack_buffer[0..encoded_len], headers)
+    else encoded: {
+        const heap_encoded = try http2_hpack.encodeHeaderBlockAlloc(std.heap.smp_allocator, headers);
+        heap_allocated = true;
+        break :encoded heap_encoded;
+    };
+    defer if (heap_allocated) std.heap.smp_allocator.free(encoded);
 
     const flags = http2_frame.flag_end_headers |
         if (end_stream) http2_frame.flag_end_stream else @as(u8, 0);
@@ -1338,13 +1358,14 @@ test "HTTP/2 connection dispatches a capabilities unary request" {
     var saw_success_trailer = false;
     var decoder = http2_hpack.Decoder.init(std.testing.allocator);
     defer decoder.deinit();
+    var frame_payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer frame_payload.deinit(std.testing.allocator);
 
     while (true) {
-        var frame = readFrame(std.testing.allocator, &response_reader) catch |err| switch (err) {
+        const frame = readFrame(std.testing.allocator, &response_reader, &frame_payload) catch |err| switch (err) {
             error.EndOfStream => break,
             else => |e| return e,
         };
-        defer frame.deinit(std.testing.allocator);
         frame_count += 1;
 
         if (frame.header.type == .data and frame.header.stream_id == 1) {
@@ -1500,12 +1521,13 @@ test "HTTP/2 connection responds to completed streams concurrently" {
     var response_reader = std.Io.Reader.fixed(output.writer.buffered());
     var saw_first = false;
     var saw_second = false;
+    var frame_payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer frame_payload.deinit(std.testing.allocator);
     while (true) {
-        var frame = readFrame(std.testing.allocator, &response_reader) catch |err| switch (err) {
+        const frame = readFrame(std.testing.allocator, &response_reader, &frame_payload) catch |err| switch (err) {
             error.EndOfStream => break,
             else => |e| return e,
         };
-        defer frame.deinit(std.testing.allocator);
         if (frame.header.type == .data and frame.header.stream_id == 1) {
             try std.testing.expectEqualStrings("first", frame.payload);
             saw_first = true;
@@ -1694,12 +1716,13 @@ test "HTTP/2 client streaming dispatches DATA frames without buffered handler" {
 
     var response_reader = std.Io.Reader.fixed(output.writer.buffered());
     var saw_streamed_response = false;
+    var frame_payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer frame_payload.deinit(std.testing.allocator);
     while (true) {
-        var frame = readFrame(std.testing.allocator, &response_reader) catch |err| switch (err) {
+        const frame = readFrame(std.testing.allocator, &response_reader, &frame_payload) catch |err| switch (err) {
             error.EndOfStream => break,
             else => |e| return e,
         };
-        defer frame.deinit(std.testing.allocator);
         if (frame.header.type == .data and frame.header.stream_id == 1) {
             try std.testing.expectEqualStrings("streamed", frame.payload);
             saw_streamed_response = true;
