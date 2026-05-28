@@ -4,6 +4,7 @@ const bytestream = @import("bytestream.zig");
 const cas = @import("cas.zig");
 const grpc_record = @import("grpc_record.zig");
 const protobuf = @import("protobuf_wire.zig");
+const staged_cas_index = @import("staged_cas_index.zig");
 
 pub const Error = error{
     DigestMismatch,
@@ -170,14 +171,25 @@ pub fn writeGrpcRecords(
     store: cas.Store,
     request_records: []const u8,
 ) !bytestream.WriteResponse {
-    var stream = WriteGrpcStream.init(store);
+    return try writeGrpcRecordsWithIndex(io, allocator, store, null, request_records);
+}
+
+pub fn writeGrpcRecordsWithIndex(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    presence_index: ?*staged_cas_index.Index,
+    request_records: []const u8,
+) !bytestream.WriteResponse {
+    var stream = WriteGrpcStream.initWithIndex(store, presence_index);
     defer stream.deinit(io, allocator);
     try stream.append(io, allocator, request_records);
-    return try stream.finish(io);
+    return try stream.finish(io, allocator);
 }
 
 pub const WriteGrpcStream = struct {
     store: cas.Store,
+    presence_index: ?*staged_cas_index.Index = null,
     pending: std.ArrayListUnmanaged(u8) = .empty,
     resource_name: ?[]u8 = null,
     expected_digest: ?cas.Digest = null,
@@ -189,6 +201,10 @@ pub const WriteGrpcStream = struct {
 
     pub fn init(store: cas.Store) WriteGrpcStream {
         return .{ .store = store };
+    }
+
+    pub fn initWithIndex(store: cas.Store, presence_index: ?*staged_cas_index.Index) WriteGrpcStream {
+        return .{ .store = store, .presence_index = presence_index };
     }
 
     pub fn deinit(self: *WriteGrpcStream, io: std.Io, allocator: std.mem.Allocator) void {
@@ -204,8 +220,32 @@ pub const WriteGrpcStream = struct {
         allocator: std.mem.Allocator,
         bytes: []const u8,
     ) !void {
-        try self.pending.appendSlice(allocator, bytes);
+        if (self.pending.items.len == 0) {
+            var offset: usize = 0;
+            while (bytes.len - offset >= grpc_record.header_len) {
+                const header = bytes[offset..][0..grpc_record.header_len];
+                const compressed = switch (header[0]) {
+                    0 => false,
+                    1 => true,
+                    else => return error.InvalidCompressionFlag,
+                };
+                if (compressed) return error.UnsupportedCompression;
 
+                const payload_len = std.mem.readInt(u32, header[1..grpc_record.header_len], .big);
+                const record_len = try grpc_record.encodedLen(payload_len);
+                if (bytes.len - offset < record_len) break;
+
+                const payload_start = offset + grpc_record.header_len;
+                try self.appendPayload(io, allocator, bytes[payload_start..][0..payload_len]);
+                offset += record_len;
+            }
+
+            if (offset == bytes.len) return;
+            try self.pending.appendSlice(allocator, bytes[offset..]);
+            return;
+        }
+
+        try self.pending.appendSlice(allocator, bytes);
         var offset: usize = 0;
         while (self.pending.items.len - offset >= grpc_record.header_len) {
             const header = self.pending.items[offset..][0..grpc_record.header_len];
@@ -238,12 +278,13 @@ pub const WriteGrpcStream = struct {
         }
     }
 
-    pub fn finish(self: *WriteGrpcStream, io: std.Io) !bytestream.WriteResponse {
+    pub fn finish(self: *WriteGrpcStream, io: std.Io, allocator: std.mem.Allocator) !bytestream.WriteResponse {
         if (self.pending.items.len != 0) return error.UnexpectedEof;
         if (self.resource_name == null) return error.EmptyWrite;
         if (!self.finished) return error.IncompleteWrite;
 
-        _ = try self.writer.?.finish(io, self.expected_digest.?);
+        const digest = try self.writer.?.finish(io, self.expected_digest.?);
+        if (self.presence_index) |index| try index.add(io, allocator, digest);
         const elapsed_ns = elapsedNs(self.start.?, std.Io.Clock.awake.now(io));
         if (shouldLogCasUpload(self.record_count, self.committed_size, elapsed_ns)) {
             std.log.info(
@@ -429,7 +470,7 @@ test "WriteGrpcStream accepts records split across appends" {
     try stream.append(std.testing.io, std.testing.allocator, records[0..3]);
     try stream.append(std.testing.io, std.testing.allocator, records[3..11]);
     try stream.append(std.testing.io, std.testing.allocator, records[11..]);
-    const response = try stream.finish(std.testing.io);
+    const response = try stream.finish(std.testing.io, std.testing.allocator);
 
     try std.testing.expectEqual(@as(i64, 12), response.committed_size);
     try std.testing.expect(try store.has(std.testing.io, digest));

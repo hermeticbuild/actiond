@@ -161,7 +161,10 @@ pub const Dispatcher = struct {
         if (std.mem.eql(u8, method, reapi_dispatch.bytestream_write)) {
             const stream = try allocator.create(ByteStreamWriteClientStream);
             stream.* = .{
-                .stream = bytestream_service.WriteGrpcStream.init(server.store),
+                .stream = bytestream_service.WriteGrpcStream.initWithIndex(
+                    server.store,
+                    server.cas_presence_index,
+                ),
             };
             return .{
                 .ctx = stream,
@@ -204,7 +207,7 @@ const ByteStreamWriteClientStream = struct {
         allocator: std.mem.Allocator,
     ) ![]u8 {
         const self: *ByteStreamWriteClientStream = @ptrCast(@alignCast(ctx));
-        const response = try self.stream.finish(io);
+        const response = try self.stream.finish(io, allocator);
         return try encodeGrpcRequest(allocator, response);
     }
 

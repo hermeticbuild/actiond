@@ -1,6 +1,7 @@
 const std = @import("std");
 const cas = @import("cas.zig");
 const reapi = @import("reapi.zig");
+const staged_cas_index = @import("staged_cas_index.zig");
 
 pub fn findMissingBlobs(
     io: std.Io,
@@ -8,13 +9,28 @@ pub fn findMissingBlobs(
     store: cas.Store,
     request: reapi.FindMissingBlobsRequest,
 ) !reapi.FindMissingBlobsResponse {
+    return try findMissingBlobsWithIndex(io, allocator, store, null, request);
+}
+
+pub fn findMissingBlobsWithIndex(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    presence_index: ?*staged_cas_index.Index,
+    request: reapi.FindMissingBlobsRequest,
+) !reapi.FindMissingBlobsResponse {
     var missing: std.ArrayListUnmanaged(reapi.Digest) = .empty;
     errdefer missing.deinit(allocator);
 
     for (request.blob_digests) |digest| {
         const local = try cas.Digest.fromReapi(digest);
+        if (presence_index) |index| {
+            if (index.contains(io, local)) continue;
+        }
         if (!try store.has(io, local)) {
             try missing.append(allocator, digest);
+        } else if (presence_index) |index| {
+            try index.add(io, allocator, local);
         }
     }
 
@@ -76,6 +92,16 @@ pub fn batchUpdateBlobs(
     store: cas.Store,
     request: reapi.BatchUpdateBlobsRequest,
 ) !reapi.BatchUpdateBlobsResponse {
+    return try batchUpdateBlobsWithIndex(io, allocator, store, null, request);
+}
+
+pub fn batchUpdateBlobsWithIndex(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    presence_index: ?*staged_cas_index.Index,
+    request: reapi.BatchUpdateBlobsRequest,
+) !reapi.BatchUpdateBlobsResponse {
     const start = std.Io.Clock.awake.now(io);
     var responses: std.ArrayListUnmanaged(reapi.BatchUpdateBlobsResponse.Item) = .empty;
     errdefer responses.deinit(allocator);
@@ -104,6 +130,7 @@ pub fn batchUpdateBlobs(
             },
             else => |e| return e,
         };
+        if (presence_index) |index| try index.add(io, allocator, expected);
         ok_count += 1;
         try responses.append(allocator, .{
             .digest = item.digest,

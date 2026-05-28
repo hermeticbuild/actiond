@@ -39,6 +39,7 @@ pub const Server = struct {
     cleanup_store: ?cas.Store = null,
     cleanup_visible_store: ?cas.Store = null,
     cleanup_staged_index: ?*staged_cas_index.Index = null,
+    cas_presence_index: ?*staged_cas_index.Index = null,
     work_root: ?std.Io.Dir = null,
     execution_options: action_executor.ExecuteOptions = .{},
 
@@ -65,7 +66,13 @@ pub const Server = struct {
             var reader = protobuf.Reader.init(payload);
             var request = try reapi.FindMissingBlobsRequest.decodeOwned(allocator, &reader);
             defer request.deinit(allocator);
-            var response = try cache_service.findMissingBlobs(io, allocator, self.store, request);
+            var response = try cache_service.findMissingBlobsWithIndex(
+                io,
+                allocator,
+                self.store,
+                self.cas_presence_index,
+                request,
+            );
             defer response.deinit(allocator);
             return try encodeResponse(allocator, response);
         }
@@ -74,7 +81,13 @@ pub const Server = struct {
             var reader = protobuf.Reader.init(payload);
             var request = try reapi.BatchUpdateBlobsRequest.decodeOwned(allocator, &reader);
             defer request.deinit(allocator);
-            var response = try cache_service.batchUpdateBlobs(io, allocator, self.store, request);
+            var response = try cache_service.batchUpdateBlobsWithIndex(
+                io,
+                allocator,
+                self.store,
+                self.cas_presence_index,
+                request,
+            );
             defer response.deinit(allocator);
             return try encodeResponse(allocator, response);
         }
@@ -203,7 +216,13 @@ pub const Server = struct {
         request_records: []const u8,
     ) ![]u8 {
         if (std.mem.eql(u8, method, bytestream_write)) {
-            const response = try bytestream_service.writeGrpcRecords(io, allocator, self.store, request_records);
+            const response = try bytestream_service.writeGrpcRecordsWithIndex(
+                io,
+                allocator,
+                self.store,
+                self.cas_presence_index,
+                request_records,
+            );
             return try encodeResponse(allocator, response);
         }
 

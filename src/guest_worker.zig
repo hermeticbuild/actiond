@@ -6,6 +6,7 @@ const cas = @import("cas.zig");
 const control_protocol = @import("control_protocol.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
+const staged_cas_index = @import("staged_cas_index.zig");
 const vsock = @import("vsock.zig");
 
 pub const Error = error{
@@ -34,6 +35,8 @@ pub fn run(io: std.Io) !void {
     var ac_dir = try cas_dir.createDirPathOpen(io, "ac", .{});
     defer ac_dir.close(io);
     try action_cache.Store.init(ac_dir).ensureLayout(io);
+    var cas_presence_index = staged_cas_index.Index{};
+    defer cas_presence_index.deinit(io, allocator);
 
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
@@ -41,12 +44,14 @@ pub fn run(io: std.Io) !void {
         .cas_blob_root_path = guest_cas_blob_root_path,
         .input_cas_blob_root_path = guest_cas_blob_root_path,
         .actiondfs_stage_root_path = guest_actiondfs_stage_root_path,
+        .staged_cas_index = &cas_presence_index,
         .actiondfs_stats = guestActiondfsStatsEnabled(io, allocator),
     });
 
     const server: reapi_dispatch.Server = .{
         .store = cas.Store.initReady(cas_dir),
         .action_cache_store = action_cache.Store.initReady(ac_dir),
+        .cas_presence_index = &cas_presence_index,
         .work_root = action_work_dir,
         .execution_options = execution_options.options,
     };
