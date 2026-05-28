@@ -45,7 +45,6 @@ pub fn run(io: std.Io) !void {
         .input_cas_blob_root_path = guest_cas_blob_root_path,
         .actiondfs_stage_root_path = guest_actiondfs_stage_root_path,
         .staged_cas_index = &cas_presence_index,
-        .actiondfs_stats = guestActiondfsStatsEnabled(io, allocator),
     });
 
     const server: reapi_dispatch.Server = .{
@@ -230,38 +229,6 @@ fn readActiondfsStats(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     return try out.toOwnedSlice(allocator);
 }
 
-fn guestActiondfsStatsEnabled(io: std.Io, allocator: std.mem.Allocator) bool {
-    const cmdline = readKernelCmdline(io, allocator) catch return false;
-    defer allocator.free(cmdline);
-    return kernelCmdlineEnablesActiondfsStats(cmdline);
-}
-
-fn readKernelCmdline(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
-    var file = try std.Io.Dir.cwd().openFile(io, "/proc/cmdline", .{});
-    defer file.close(io);
-
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    var buffer: [512]u8 = undefined;
-    while (true) {
-        const n = try readFd(file.handle, &buffer);
-        if (n == 0) break;
-        try out.appendSlice(allocator, buffer[0..n]);
-        if (out.items.len > 16 * 1024) return error.MessageTooLarge;
-    }
-    return try out.toOwnedSlice(allocator);
-}
-
-fn kernelCmdlineEnablesActiondfsStats(cmdline: []const u8) bool {
-    var tokens = std.mem.tokenizeAny(u8, cmdline, " \n\t");
-    while (tokens.next()) |token| {
-        if (std.mem.eql(u8, token, "actiond.actiondfs_stats=1")) return true;
-        if (std.mem.eql(u8, token, "actiond.actiondfs_stats=true")) return true;
-    }
-    return false;
-}
-
 fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
     while (true) {
         const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
@@ -289,12 +256,6 @@ test "guest worker is Linux-only" {
 test "guest worker uses guest-native CAS for actiondfs reads" {
     try std.testing.expectEqualStrings("/cas/blobs/sha256", guest_cas_blob_root_path);
     try std.testing.expectEqualStrings("/cas/actiondfs-stage", guest_actiondfs_stage_root_path);
-}
-
-test "guest worker recognizes actiondfs stats kernel command line flag" {
-    try std.testing.expect(kernelCmdlineEnablesActiondfsStats("console=hvc0 actiond.actiondfs_stats=1 quiet"));
-    try std.testing.expect(kernelCmdlineEnablesActiondfsStats("console=hvc0\nactiond.actiondfs_stats=true"));
-    try std.testing.expect(!kernelCmdlineEnablesActiondfsStats("console=hvc0 actiond.actiondfs_stats=0 quiet"));
 }
 
 test "guest worker rejects malformed actiondfs stats requests before touching proc" {

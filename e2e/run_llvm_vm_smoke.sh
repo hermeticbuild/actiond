@@ -29,7 +29,6 @@ cas_image="${ACTIOND_VM_CAS_IMAGE:-${output_root}/server/cas.ext4}"
 cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
 run_vm="${ACTIOND_LLVM_SMOKE_VM:-1}"
 run_mac_host="${ACTIOND_LLVM_SMOKE_MAC_HOST:-1}"
-actiondfs_stats="${ACTIOND_LLVM_SMOKE_ACTIONDFS_STATS:-0}"
 executor_timing_logs="${ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS:-1}"
 server_target="${ACTIOND_LLVM_SMOKE_SERVER_TARGET:-//cmd/darwin_actiond:darwin-actiond-standalone_pkg}"
 server_script_path="${ACTIOND_LLVM_SMOKE_SERVER_SCRIPT_PATH:-/tmp/darwin-actiond-standalone}"
@@ -152,9 +151,8 @@ run_smoke() {
     --memory-mib="${memory_mib}"
     --cpus="${cpus}"
   )
-  if [[ "${actiondfs_stats}" == "1" ]]; then
+  if [[ "${executor_timing_logs}" == "1" ]]; then
     server_args+=(
-      --actiondfs-stats
       --actiondfs-stats-path="${output_root}/actiondfs_stats.txt"
     )
   fi
@@ -162,7 +160,7 @@ run_smoke() {
   server_pid="$!"
 
   wait_for_port 90
-  if [[ "${actiondfs_stats}" == "1" ]]; then
+  if [[ "${executor_timing_logs}" == "1" ]]; then
     wait_for_guest_ready "${output_root}/actiondfs_stats.txt" 120
   fi
 
@@ -209,7 +207,7 @@ run_smoke() {
   else
     echo "timing summary: skipped; executor timing logs are compiled out" >&2
   fi
-  if [[ "${actiondfs_stats}" == "1" ]]; then
+  if [[ "${executor_timing_logs}" == "1" ]]; then
     echo "actiondfs stats: ${output_root}/actiondfs_stats.txt" >&2
   fi
 }

@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print(
         \\darwin-actiond zig={s} bazel={s}
         \\usage:
-        \\  darwin-actiond serve-vm [--kernel=/path/Image[.zst]] [--initramfs=/path/initramfs.cpio[.zst]] [--runtime-image=/path/runtimes.sqfs] [--cas-image=/path/cas.ext4] [--listen=127.0.0.1:8980] [--root=/tmp/actiond-vm] [--actiondfs-stats]
+        \\  darwin-actiond serve-vm [--kernel=/path/Image[.zst]] [--initramfs=/path/initramfs.cpio[.zst]] [--runtime-image=/path/runtimes.sqfs] [--cas-image=/path/cas.ext4] [--listen=127.0.0.1:8980] [--root=/tmp/actiond-vm] [--actiondfs-stats-path=/path/stats.txt]
         \\
     , .{
         actiond.version.zig,

@@ -274,7 +274,9 @@ Plan:
   - `actiondfs_instrumented`: wrapper translation unit with
     `ACTIONDFS_ENABLE_STATS=1` and filesystem name `actiondfs_instrumented`.
 - Keep `/proc/actiondfs_stats` only in the instrumented build.
-- Make `--actiondfs-stats` select `actiondfs_instrumented` for guest mounts.
+- Make the Bazel `--//:executor_timing_logs` build setting generate the
+  actiondfs filesystem name used by guest mounts, so timing builds mount
+  `actiondfs_instrumented` and no-log builds mount `actiondfs`.
 - Consider replacing instrumented global atomic counters with per-CPU counters
   if profiling runs show contention inside the instrumented filesystem.
 - Keep derived expensive values in userspace parsers where possible rather than
@@ -287,10 +289,11 @@ available with the cost isolated to explicit stats runs.
 Validation:
 
 - Build the VM kernel and standalone VM worker.
-- Run VM e2e once with stats enabled to prove `/proc/actiondfs_stats` is wired.
-- Run LLVM smoke with stats disabled for canonical performance numbers, and run
-  paired instrumented smoke when measuring the cost of counters.
-- Keep stats-enabled LLVM runs only for analysis snapshots.
+- Run VM e2e once with `--config=executor_timing_logs` and stats snapshots to
+  prove `/proc/actiondfs_stats` is wired.
+- Run LLVM smoke with `ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS=0` for canonical
+  no-counter performance numbers, and use the default timing build when
+  measuring counters or collecting analysis snapshots.
 
 ### Staged Open/Write Fast Path
 

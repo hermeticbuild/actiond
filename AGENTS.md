@@ -86,12 +86,12 @@ actiond log survives:
 ACTIOND_E2E_KEEP_TMP=1 ACTIOND_REPO_BAZEL_FLAGS="--config=remote --config=executor_timing_logs" tools/e2e.sh vm
 ```
 
-When investigating actiondfs behavior inside a running guest, enable stats
-before reading `/proc/actiondfs_stats`. The normal `actiondfs` filesystem has
-stats compiled out; `--actiondfs-stats` makes the guest mount
-`actiondfs_instrumented` instead. For VM e2e, setting
-`ACTIOND_E2E_ACTIONDFS_STATS_PATH=/path/to/stats.txt` passes that flag to
-`serve-vm` and writes snapshots. The proc file reports VM-lifetime counters for
+When investigating actiondfs behavior inside a running guest, build with
+`--config=executor_timing_logs` before reading `/proc/actiondfs_stats`. That
+build setting makes the generated Zig options mount `actiondfs_instrumented`
+instead of the normal `actiondfs` filesystem where stats are compiled out. For
+VM e2e, setting `ACTIOND_E2E_ACTIONDFS_STATS_PATH=/path/to/stats.txt` writes
+snapshots from the guest. The proc file reports VM-lifetime counters for
 directory cache hits/misses, parses, lookups, readdir, CAS blob opens, backing
 reads, splice reads, mmap calls, and stale retry events.
 
@@ -165,13 +165,13 @@ parsed timing summaries under the printed output directory, and records the
 latest output root in `/tmp/actiond-last-llvm-vm-smoke-path`.
 The parser also includes raw TCP-to-vsock bridge byte/read/write counts when
 `darwin-actiond serve-vm` logs `vm bridge timing` lines.
-The runner leaves actiondfs stats and stats snapshots disabled by default to
-reduce benchmark noise; set `ACTIOND_LLVM_SMOKE_ACTIONDFS_STATS=1` to mount
-`actiondfs_instrumented` and collect `/proc/actiondfs_stats` snapshots.
 Executor timing logs are compiled out by default with
-`--//:executor_timing_logs=false`; this runner enables them by default for
-parsed timing summaries. Set `ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS=0` to
-build the no-log server path, in which case the VM timing markdown is skipped.
+`--//:executor_timing_logs=false`; the generated Zig build options use the same
+flag to select `actiondfs` or `actiondfs_instrumented`. This runner enables the
+flag by default for parsed timing summaries and `/proc/actiondfs_stats`
+snapshots. Set `ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS=0` to build the no-log
+server path, in which case the VM timing markdown and actiondfs stats snapshots
+are skipped.
 
 For actiondfs performance work, this LLVM smoke is the canonical before/after
 measurement. Keep `e2e/LLVM_VM_SMOKE_TIMINGS.md` current when changing

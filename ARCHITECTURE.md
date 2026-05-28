@@ -210,9 +210,10 @@ mmap traffic goes directly through the native CAS filesystem page cache instead
 of being copied through actiondfs folios.
 
 The normal `actiondfs` filesystem has instrumentation compiled out. Profiling
-runs can boot with `--actiondfs-stats`, which makes the guest mount the sibling
-`actiondfs_instrumented` filesystem and exposes VM-lifetime counters at
-`/proc/actiondfs_stats`. Those counters track cache hits/misses, directory
+builds set `--//:executor_timing_logs=true`, which makes the generated Zig
+build options mount the sibling `actiondfs_instrumented` filesystem and exposes
+VM-lifetime counters at `/proc/actiondfs_stats`. Those counters track
+cache hits/misses, directory
 parses, lookup and readdir activity, CAS blob opens, backing reads, splice
 reads, mmap calls, and stale-handle retries.
 

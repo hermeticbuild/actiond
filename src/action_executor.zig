@@ -81,7 +81,6 @@ pub const ExecuteOptions = struct {
     cas_blob_root_path: ?[]const u8 = null,
     input_cas_blob_root_path: ?[]const u8 = null,
     actiondfs_stage_root_path: ?[]const u8 = null,
-    actiondfs_stats: bool = false,
     staged_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_index: ?*staged_cas_index.Index = null,
     runtime_mount_cache: ?RuntimeMountCache = null,
@@ -430,7 +429,6 @@ pub fn executeActionWithOptions(
             exec_root_path,
             input_root_digest,
             input_mode,
-            options.actiondfs_stats,
         );
         actiondfs_stage_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.?.stagePath(), .{ .iterate = true });
         exec_root_dir = actiondfs_stage_dir.?;
@@ -872,7 +870,6 @@ const ActiondfsWorkspace = struct {
         workspace_path: []const u8,
         input_root_digest: cas.Digest,
         mode: ActionInputMode,
-        actiondfs_stats: bool,
     ) !ActiondfsWorkspace {
         const base_path = try createActiondfsBasePath(io, allocator, stage_root_path, work_root_path);
         errdefer allocator.free(base_path);
@@ -887,7 +884,7 @@ const ActiondfsWorkspace = struct {
         var root_hash: [64]u8 = undefined;
 
         const root_hex = input_root_digest.formatHex(&root_hash);
-        const fstype: [:0]const u8 = if (actiondfs_stats) "actiondfs_instrumented" else "actiondfs";
+        const fstype: [:0]const u8 = build_options.actiondfs_fstype;
         const actiondfs_data = if (mode == .actiondfs_strict)
             try std.fmt.allocPrintSentinel(
                 allocator,
@@ -2247,7 +2244,7 @@ test "prepareExecuteOptions places actiondfs stage beside CAS" {
     try std.testing.expect(std.mem.endsWith(u8, prepared.options.actiondfs_stage_root_path.?, "/cas/actiondfs-stage"));
 }
 
-test "actiondfs stats option selects instrumented filesystem without mount option noise" {
+test "actiondfs workspace uses build-time filesystem name without mount option noise" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -2267,14 +2264,13 @@ test "actiondfs stats option selects instrumented filesystem without mount optio
         "/workspace",
         cas.Digest.empty(),
         .actiondfs_strict,
-        true,
     );
     defer workspace.deinit(std.testing.io, std.testing.allocator);
 
-    try std.testing.expectEqualStrings("actiondfs_instrumented", workspace.fstype);
+    try std.testing.expectEqualStrings(build_options.actiondfs_fstype, workspace.fstype);
     try std.testing.expect(std.mem.indexOf(u8, workspace.actiondfs_data, "stats=") == null);
     switch (workspace.mounts[0]) {
-        .strict => |mount| try std.testing.expectEqualStrings("actiondfs_instrumented", mount.fstype),
+        .strict => |mount| try std.testing.expectEqualStrings(build_options.actiondfs_fstype, mount.fstype),
         .overlay => return error.UnexpectedMountMode,
     }
 }

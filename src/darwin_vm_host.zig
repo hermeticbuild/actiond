@@ -33,7 +33,6 @@ pub const ServeVmOptions = struct {
     cpus: u32 = 2,
     start_timeout_ms: u32 = 30_000,
     connect_timeout_ms: u32 = 60_000,
-    actiondfs_stats: bool = false,
     actiondfs_stats_path: ?[]const u8 = null,
 };
 
@@ -108,8 +107,6 @@ pub fn parseServeVmArgs(args: []const []const u8) !ServeVmOptions {
             options.connect_timeout_ms = try parseU32(args[i]);
         } else if (std.mem.startsWith(u8, arg, "--connect-timeout-ms=")) {
             options.connect_timeout_ms = try parseU32(arg["--connect-timeout-ms=".len..]);
-        } else if (std.mem.eql(u8, arg, "--actiondfs-stats")) {
-            options.actiondfs_stats = true;
         } else if (std.mem.eql(u8, arg, "--actiondfs-stats-path")) {
             i += 1;
             if (i >= args.len) return error.MissingServeArgumentValue;
@@ -185,7 +182,6 @@ pub fn serve(
         .cas_image_path = cas_image_path,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
-        .actiondfs_stats = options.actiondfs_stats,
         .start_timeout_ms = options.start_timeout_ms,
         .connect_timeout_ms = options.connect_timeout_ms,
     });
@@ -421,7 +417,6 @@ test "parseServeVmArgs accepts VM flags" {
         "--start-timeout-ms=1234",
         "--connect-timeout-ms",
         "5678",
-        "--actiondfs-stats",
         "--actiondfs-stats-path=/tmp/actiondfs_stats.txt",
     });
 
@@ -436,7 +431,6 @@ test "parseServeVmArgs accepts VM flags" {
     try std.testing.expectEqual(@as(u32, 3), options.cpus);
     try std.testing.expectEqual(@as(u32, 1234), options.start_timeout_ms);
     try std.testing.expectEqual(@as(u32, 5678), options.connect_timeout_ms);
-    try std.testing.expect(options.actiondfs_stats);
     try std.testing.expectEqualStrings("/tmp/actiondfs_stats.txt", options.actiondfs_stats_path.?);
 }
 
