@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
 const action_executor = @import("action_executor.zig");
+const bytestream_service = @import("bytestream_service.zig");
 const cas = @import("cas.zig");
 const control_protocol = @import("control_protocol.zig");
 const grpc_http2_server = @import("grpc_http2_server.zig");
@@ -228,6 +229,7 @@ fn readActiondfsStats(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
         if (out.items.len > 1024 * 1024) return error.MessageTooLarge;
     }
     try cas.appendPutFileStats(allocator, &out);
+    try bytestream_service.appendStats(allocator, &out);
     try grpc_http2_server.appendStats(allocator, &out);
     return try out.toOwnedSlice(allocator);
 }

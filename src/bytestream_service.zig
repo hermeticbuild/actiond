@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("actiond_build_options");
 const body_sink = @import("body_sink.zig");
 const bytestream = @import("bytestream.zig");
 const cas = @import("cas.zig");
@@ -15,6 +16,13 @@ pub const Error = error{
 };
 
 pub const max_read_response_data_bytes = 1024 * 1024;
+
+var read_records = std.atomic.Value(u64).init(0);
+var read_bytes = std.atomic.Value(u64).init(0);
+var read_file_records = std.atomic.Value(u64).init(0);
+var read_file_bytes = std.atomic.Value(u64).init(0);
+var read_buffer_records = std.atomic.Value(u64).init(0);
+var read_buffer_bytes = std.atomic.Value(u64).init(0);
 
 pub const ReadResult = struct {
     response: bytestream.ReadResponse,
@@ -90,15 +98,37 @@ pub fn writeReadGrpcRecords(
 
     if (limit == 0) {
         try appendReadResponseRecord(allocator, &record, "");
+        addReadStats(0, .buffer);
         try writer.writeAll(io, allocator, record.items);
     } else {
         var blob_file = try store.openBlob(io, resource.digest);
         defer blob_file.close(io);
-        if (offset != 0) try seekFd(blob_file.handle, @intCast(offset));
 
+        if (writer.canWriteFileWithPrefix()) {
+            var remaining = limit;
+            var file_offset = offset;
+            while (remaining != 0) {
+                const chunk_len = @min(remaining, max_read_response_data_bytes);
+                record.clearRetainingCapacity();
+                try appendReadResponsePrefix(allocator, &record, chunk_len);
+                addReadStats(chunk_len, .file);
+                try writer.writeFileWithPrefix(
+                    io,
+                    allocator,
+                    record.items,
+                    blob_file.handle,
+                    @intCast(file_offset),
+                    chunk_len,
+                );
+                file_offset += chunk_len;
+                remaining -= chunk_len;
+            }
+            return;
+        }
+
+        if (offset != 0) try seekFd(blob_file.handle, @intCast(offset));
         const buffer = try allocator.alloc(u8, max_read_response_data_bytes);
         defer allocator.free(buffer);
-
         var remaining = limit;
         while (remaining != 0) {
             const read_len = @min(remaining, buffer.len);
@@ -106,6 +136,7 @@ pub fn writeReadGrpcRecords(
             if (n == 0) return error.UnexpectedEof;
             record.clearRetainingCapacity();
             try appendReadResponseRecord(allocator, &record, buffer[0..n]);
+            addReadStats(n, .buffer);
             try writer.writeAll(io, allocator, record.items);
             remaining -= n;
         }
@@ -117,17 +148,70 @@ fn appendReadResponseRecord(
     out: *std.ArrayListUnmanaged(u8),
     data: []const u8,
 ) !void {
-    const payload_len = if (data.len == 0) 0 else protobuf.bytesFieldLen(10, data.len);
+    try appendReadResponsePrefix(allocator, out, data.len);
+    out.appendSliceAssumeCapacity(data);
+}
+
+fn appendReadResponsePrefix(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    data_len: usize,
+) !void {
+    const payload_len = if (data_len == 0) 0 else protobuf.bytesFieldLen(10, data_len);
     const record_len = try grpc_record.encodedLen(payload_len);
     try out.ensureUnusedCapacity(allocator, record_len);
     out.appendAssumeCapacity(0);
     var len_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_bytes, @intCast(payload_len), .big);
     out.appendSliceAssumeCapacity(&len_bytes);
-    if (data.len != 0) {
+    if (data_len != 0) {
         appendVarintAssumeCapacity(out, (@as(u64, 10) << 3) | @intFromEnum(protobuf.WireType.length_delimited));
-        appendVarintAssumeCapacity(out, data.len);
-        out.appendSliceAssumeCapacity(data);
+        appendVarintAssumeCapacity(out, data_len);
+    }
+}
+
+const ReadPath = enum {
+    file,
+    buffer,
+};
+
+fn addReadStats(bytes: usize, path: ReadPath) void {
+    if (comptime build_options.executor_timing_logs) {
+        _ = read_records.fetchAdd(1, .monotonic);
+        _ = read_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        switch (path) {
+            .file => {
+                _ = read_file_records.fetchAdd(1, .monotonic);
+                _ = read_file_bytes.fetchAdd(@intCast(bytes), .monotonic);
+            },
+            .buffer => {
+                _ = read_buffer_records.fetchAdd(1, .monotonic);
+                _ = read_buffer_bytes.fetchAdd(@intCast(bytes), .monotonic);
+            },
+        }
+    }
+}
+
+pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+    if (comptime build_options.executor_timing_logs) {
+        const text = try std.fmt.allocPrint(allocator,
+            \\bytestream_read_records {d}
+            \\bytestream_read_bytes {d}
+            \\bytestream_read_file_records {d}
+            \\bytestream_read_file_bytes {d}
+            \\bytestream_read_buffer_records {d}
+            \\bytestream_read_buffer_bytes {d}
+            \\
+        , .{
+            read_records.load(.monotonic),
+            read_bytes.load(.monotonic),
+            read_file_records.load(.monotonic),
+            read_file_bytes.load(.monotonic),
+            read_buffer_records.load(.monotonic),
+            read_buffer_bytes.load(.monotonic),
+        });
+        defer allocator.free(text);
+        try out.appendSlice(allocator, text);
     }
 }
 

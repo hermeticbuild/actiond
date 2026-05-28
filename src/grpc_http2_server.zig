@@ -7,6 +7,7 @@ const cas = @import("cas.zig");
 const http2_frame = @import("http2_frame.zig");
 const http2_hpack = @import("http2_hpack.zig");
 const grpc_record = @import("grpc_record.zig");
+const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
 const reapi_dispatch = @import("reapi_dispatch.zig");
 
@@ -276,6 +277,13 @@ var grpc_response_tasks_failed = std.atomic.Value(u64).init(0);
 var grpc_response_concurrency_waits = std.atomic.Value(u64).init(0);
 var grpc_data_frames = std.atomic.Value(u64).init(0);
 var grpc_data_bytes = std.atomic.Value(u64).init(0);
+var grpc_file_payload_frames = std.atomic.Value(u64).init(0);
+var grpc_file_payload_bytes = std.atomic.Value(u64).init(0);
+var grpc_sendfile_attempts = std.atomic.Value(u64).init(0);
+var grpc_sendfile_successes = std.atomic.Value(u64).init(0);
+var grpc_sendfile_bytes = std.atomic.Value(u64).init(0);
+var grpc_sendfile_fallbacks = std.atomic.Value(u64).init(0);
+var grpc_sendfile_fallback_bytes = std.atomic.Value(u64).init(0);
 
 fn addStat(counter: *std.atomic.Value(u64), value: usize) void {
     if (comptime build_options.executor_timing_logs) {
@@ -295,6 +303,13 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
             \\grpc_response_concurrency_waits {d}
             \\grpc_data_frames {d}
             \\grpc_data_bytes {d}
+            \\grpc_file_payload_frames {d}
+            \\grpc_file_payload_bytes {d}
+            \\grpc_sendfile_attempts {d}
+            \\grpc_sendfile_successes {d}
+            \\grpc_sendfile_bytes {d}
+            \\grpc_sendfile_fallbacks {d}
+            \\grpc_sendfile_fallback_bytes {d}
             \\
         , .{
             grpc_connections_started.load(.monotonic),
@@ -306,6 +321,13 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
             grpc_response_concurrency_waits.load(.monotonic),
             grpc_data_frames.load(.monotonic),
             grpc_data_bytes.load(.monotonic),
+            grpc_file_payload_frames.load(.monotonic),
+            grpc_file_payload_bytes.load(.monotonic),
+            grpc_sendfile_attempts.load(.monotonic),
+            grpc_sendfile_successes.load(.monotonic),
+            grpc_sendfile_bytes.load(.monotonic),
+            grpc_sendfile_fallbacks.load(.monotonic),
+            grpc_sendfile_fallback_bytes.load(.monotonic),
         });
         defer allocator.free(text);
         try out.appendSlice(allocator, text);
@@ -464,6 +486,91 @@ const SharedHttp2Writer = struct {
             addStat(&grpc_data_frames, 1);
             addStat(&grpc_data_bytes, chunk.len);
             remaining = remaining[chunk_len..];
+        }
+    }
+
+    fn sendDataWithFile(
+        self: *SharedHttp2Writer,
+        io: std.Io,
+        stream_id: u31,
+        prefix: []const u8,
+        file_handle: std.Io.File.Handle,
+        file_offset: u64,
+        file_len: usize,
+    ) !void {
+        var file: std.Io.File = .{
+            .handle = file_handle,
+            .flags = .{ .nonblocking = false },
+        };
+        var file_buffer: [64 * 1024]u8 = undefined;
+        var file_reader = file.reader(io, &file_buffer);
+        try file_reader.seekTo(file_offset);
+
+        var prefix_remaining = prefix;
+        var file_remaining = file_len;
+        while (prefix_remaining.len != 0 or file_remaining != 0) {
+            const requested = prefix_remaining.len + file_remaining;
+            const frame_payload_len = try self.flow.reserveData(io, stream_id, requested);
+            const prefix_len = @min(prefix_remaining.len, frame_payload_len);
+            const file_chunk_len = frame_payload_len - prefix_len;
+
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+            try writeFrameHeader(self.writer, .{
+                .length = frame_payload_len,
+                .type = .data,
+                .flags = 0,
+                .stream_id = stream_id,
+            });
+            if (prefix_len != 0) {
+                try self.writer.writeAll(prefix_remaining[0..prefix_len]);
+            }
+            try self.writer.flush();
+
+            if (file_chunk_len != 0) {
+                try self.writeFilePayload(io, &file_reader, file_chunk_len);
+            }
+            try self.writer.flush();
+
+            addStat(&grpc_data_frames, 1);
+            addStat(&grpc_data_bytes, frame_payload_len);
+            if (file_chunk_len != 0) {
+                addStat(&grpc_file_payload_frames, 1);
+                addStat(&grpc_file_payload_bytes, file_chunk_len);
+            }
+            prefix_remaining = prefix_remaining[prefix_len..];
+            file_remaining -= file_chunk_len;
+        }
+    }
+
+    fn writeFilePayload(
+        self: *SharedHttp2Writer,
+        io: std.Io,
+        file_reader: *std.Io.File.Reader,
+        len: usize,
+    ) !void {
+        _ = io;
+        var remaining = len;
+        while (remaining != 0) {
+            addStat(&grpc_sendfile_attempts, 1);
+            const sent = self.writer.sendFile(file_reader, .limited(remaining)) catch |err| switch (err) {
+                error.EndOfStream => return error.UnexpectedEof,
+                error.Unimplemented => 0,
+                else => |e| return e,
+            };
+            if (sent != 0) {
+                remaining -= sent;
+                addStat(&grpc_sendfile_successes, 1);
+                addStat(&grpc_sendfile_bytes, sent);
+                continue;
+            }
+
+            file_reader.mode = file_reader.mode.toSimple();
+            addStat(&grpc_sendfile_fallbacks, 1);
+            addStat(&grpc_sendfile_fallback_bytes, remaining);
+            const copied = try self.writer.sendFileReadingAll(file_reader, .limited(remaining));
+            if (copied != remaining) return error.UnexpectedEof;
+            remaining = 0;
         }
     }
 };
@@ -1095,6 +1202,7 @@ const Http2BodyWriter = struct {
         return .{
             .ctx = self,
             .write_all = writeAll,
+            .write_file_with_prefix = writeFileWithPrefix,
         };
     }
 
@@ -1107,6 +1215,20 @@ const Http2BodyWriter = struct {
         _ = allocator;
         const self: *Http2BodyWriter = @ptrCast(@alignCast(ctx));
         try self.writer.sendData(io, self.stream_id, bytes);
+    }
+
+    fn writeFileWithPrefix(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+        file_handle: std.Io.File.Handle,
+        offset: u64,
+        len: usize,
+    ) !void {
+        _ = allocator;
+        const self: *Http2BodyWriter = @ptrCast(@alignCast(ctx));
+        try self.writer.sendDataWithFile(io, self.stream_id, prefix, file_handle, offset, len);
     }
 };
 
@@ -1840,4 +1962,90 @@ test "ReAPI dispatcher streams ByteStream writes into CAS" {
     defer std.testing.allocator.free(response);
 
     try std.testing.expect(try store.has(std.testing.io, digest));
+}
+
+test "HTTP/2 ByteStream read streams file payload after gRPC framing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    var server = reapi_dispatch.Server.init(store);
+    const dispatcher = Dispatcher.fromReapiServer(&server);
+
+    const digest = try store.putBytes(std.testing.io, "abcdef");
+    var hash: [64]u8 = undefined;
+    const resource_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "blobs/{s}/{d}",
+        .{ digest.formatHex(&hash), digest.size_bytes },
+    );
+    defer std.testing.allocator.free(resource_name);
+
+    const request = try encodeGrpcRequest(std.testing.allocator, bytestream.ReadRequest{
+        .resource_name = resource_name,
+        .read_offset = 1,
+        .read_limit = 4,
+    });
+    defer std.testing.allocator.free(request);
+
+    var input: std.ArrayListUnmanaged(u8) = .empty;
+    defer input.deinit(std.testing.allocator);
+    try input.appendSlice(std.testing.allocator, http2_frame.client_connection_preface);
+    try appendFrame(std.testing.allocator, &input, .{
+        .length = 0,
+        .type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    try appendGrpcRequestFrames(std.testing.allocator, &input, 1, reapi_dispatch.bytestream_read, request);
+
+    var reader = std.Io.Reader.fixed(input.items);
+    var output: std.Io.Writer.Allocating = .init(std.heap.smp_allocator);
+    defer output.deinit();
+
+    try handleConnectionStreams(
+        std.testing.io,
+        std.heap.smp_allocator,
+        dispatcher,
+        &reader,
+        &output.writer,
+    );
+
+    var response_reader = std.Io.Reader.fixed(output.writer.buffered());
+    var response_records: std.ArrayListUnmanaged(u8) = .empty;
+    defer response_records.deinit(std.testing.allocator);
+    var saw_success_trailer = false;
+    var frame_payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer frame_payload.deinit(std.testing.allocator);
+    var decoder = http2_hpack.Decoder.init(std.testing.allocator);
+    defer decoder.deinit();
+    while (true) {
+        const frame = readFrame(std.testing.allocator, &response_reader, &frame_payload) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+        if (frame.header.type == .data and frame.header.stream_id == 1) {
+            try response_records.appendSlice(std.testing.allocator, frame.payload);
+        }
+        if (frame.header.type == .headers and frame.header.stream_id == 1 and
+            http2_frame.hasFlag(frame.header.flags, http2_frame.flag_end_stream))
+        {
+            var trailers = try decoder.decodeHeaderBlockAlloc(std.testing.allocator, frame.payload);
+            defer trailers.deinit(std.testing.allocator);
+            for (trailers.items) |field| {
+                if (std.mem.eql(u8, field.name, "grpc-status")) {
+                    try std.testing.expectEqualStrings("0", field.value);
+                    saw_success_trailer = true;
+                }
+            }
+        }
+    }
+
+    var it = grpc_record.Iterator.init(response_records.items);
+    const message = (try it.next()).?;
+    var proto_reader = protobuf.Reader.init(message.payload);
+    const response = try bytestream.ReadResponse.decode(&proto_reader);
+    try std.testing.expectEqualStrings("bcde", response.data);
+    try std.testing.expectEqual(@as(?grpc_record.Message, null), try it.next());
+    try std.testing.expect(saw_success_trailer);
 }
