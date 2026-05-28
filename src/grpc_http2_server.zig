@@ -267,6 +267,21 @@ pub const max_frame_payload_len = 16 * 1024 * 1024;
 const response_frame_payload_len = http2_frame.default_max_frame_size;
 const default_max_concurrent_streams = 128;
 const inbound_initial_window_size = 1024 * 1024 * 1024;
+const grpc_response_headers = [_]http2_hpack.HeaderView{
+    .{ .name = ":status", .value = "200" },
+    .{ .name = "content-type", .value = "application/grpc" },
+};
+const grpc_success_trailers = [_]http2_hpack.HeaderView{
+    .{ .name = "grpc-status", .value = "0" },
+};
+const grpc_response_headers_block = staticHeaderBlock(&grpc_response_headers);
+const grpc_success_trailers_block = staticHeaderBlock(&grpc_success_trailers);
+
+fn staticHeaderBlock(comptime headers: []const http2_hpack.HeaderView) [http2_hpack.encodedHeaderBlockLen(headers)]u8 {
+    var out: [http2_hpack.encodedHeaderBlockLen(headers)]u8 = undefined;
+    _ = http2_hpack.encodeHeaderBlockInto(&out, headers) catch unreachable;
+    return out;
+}
 
 var grpc_connections_started = std.atomic.Value(u64).init(0);
 var grpc_connections_completed = std.atomic.Value(u64).init(0);
@@ -275,6 +290,9 @@ var grpc_response_tasks_started = std.atomic.Value(u64).init(0);
 var grpc_response_tasks_completed = std.atomic.Value(u64).init(0);
 var grpc_response_tasks_failed = std.atomic.Value(u64).init(0);
 var grpc_response_concurrency_waits = std.atomic.Value(u64).init(0);
+var grpc_success_fast_paths = std.atomic.Value(u64).init(0);
+var grpc_success_fast_bytes = std.atomic.Value(u64).init(0);
+var grpc_success_fallbacks = std.atomic.Value(u64).init(0);
 var grpc_data_frames = std.atomic.Value(u64).init(0);
 var grpc_data_bytes = std.atomic.Value(u64).init(0);
 var grpc_file_payload_frames = std.atomic.Value(u64).init(0);
@@ -301,6 +319,9 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
             \\grpc_response_tasks_completed {d}
             \\grpc_response_tasks_failed {d}
             \\grpc_response_concurrency_waits {d}
+            \\grpc_success_fast_paths {d}
+            \\grpc_success_fast_bytes {d}
+            \\grpc_success_fallbacks {d}
             \\grpc_data_frames {d}
             \\grpc_data_bytes {d}
             \\grpc_file_payload_frames {d}
@@ -319,6 +340,9 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
             grpc_response_tasks_completed.load(.monotonic),
             grpc_response_tasks_failed.load(.monotonic),
             grpc_response_concurrency_waits.load(.monotonic),
+            grpc_success_fast_paths.load(.monotonic),
+            grpc_success_fast_bytes.load(.monotonic),
+            grpc_success_fallbacks.load(.monotonic),
             grpc_data_frames.load(.monotonic),
             grpc_data_bytes.load(.monotonic),
             grpc_file_payload_frames.load(.monotonic),
@@ -434,14 +458,31 @@ const SharedHttp2Writer = struct {
     }
 
     fn sendGrpcSuccess(self: *SharedHttp2Writer, io: std.Io, stream_id: u31, response_body: []const u8) !void {
-        try self.sendHeaders(io, stream_id, false, &.{
-            .{ .name = ":status", .value = "200" },
-            .{ .name = "content-type", .value = "application/grpc" },
-        });
+        if (self.flow.tryReserveDataExact(stream_id, response_body.len)) {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+            try writeStaticHeaders(self.writer, stream_id, false, &grpc_response_headers_block);
+            if (response_body.len != 0) {
+                try writeFrame(self.writer, .{
+                    .length = response_body.len,
+                    .type = .data,
+                    .flags = 0,
+                    .stream_id = stream_id,
+                }, response_body);
+                addStat(&grpc_data_frames, 1);
+                addStat(&grpc_data_bytes, response_body.len);
+            }
+            try writeStaticHeaders(self.writer, stream_id, true, &grpc_success_trailers_block);
+            try self.writer.flush();
+            addStat(&grpc_success_fast_paths, 1);
+            addStat(&grpc_success_fast_bytes, response_body.len);
+            return;
+        }
+
+        addStat(&grpc_success_fallbacks, 1);
+        try self.sendGrpcResponseHeaders(io, stream_id);
         try self.sendData(io, stream_id, response_body);
-        try self.sendHeaders(io, stream_id, true, &.{
-            .{ .name = "grpc-status", .value = "0" },
-        });
+        try self.sendGrpcSuccessTrailers(io, stream_id);
     }
 
     fn sendGrpcError(
@@ -466,6 +507,20 @@ const SharedHttp2Writer = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         try writeHeaders(self.writer, stream_id, end_stream, headers);
+        try self.writer.flush();
+    }
+
+    fn sendGrpcResponseHeaders(self: *SharedHttp2Writer, io: std.Io, stream_id: u31) !void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        try writeStaticHeaders(self.writer, stream_id, false, &grpc_response_headers_block);
+        try self.writer.flush();
+    }
+
+    fn sendGrpcSuccessTrailers(self: *SharedHttp2Writer, io: std.Io, stream_id: u31) !void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        try writeStaticHeaders(self.writer, stream_id, true, &grpc_success_trailers_block);
         try self.writer.flush();
     }
 
@@ -675,6 +730,23 @@ const FlowControl = struct {
             self.lock_state.unlock();
             return error.StreamClosed;
         }
+    }
+
+    fn tryReserveDataExact(self: *FlowControl, stream_id: u31, requested: usize) bool {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+
+        if (requested > self.max_frame_size) return false;
+        if (self.findStreamIndexLocked(stream_id)) |index| {
+            const requested_i64: i64 = @intCast(requested);
+            if (self.connection_window < requested_i64 or self.streams.items[index].window < requested_i64) {
+                return false;
+            }
+            self.connection_window -= requested_i64;
+            self.streams.items[index].window -= requested_i64;
+            return true;
+        }
+        return false;
     }
 
     fn findStreamIndexLocked(self: *FlowControl, stream_id: u31) ?usize {
@@ -1126,13 +1198,10 @@ fn respondAndRemove(
         errdefer owned_state.deinit(io, allocator);
         errdefer writer.unregisterStream(id);
 
-        const task = try allocator.create(ResponseTask);
-        errdefer allocator.destroy(task);
-
         try responses.begin(io);
         errdefer responses.finish();
 
-        task.* = .{
+        const task = ResponseTask{
             .io = io,
             .allocator = allocator,
             .dispatcher = dispatcher,
@@ -1155,12 +1224,12 @@ const ResponseTask = struct {
     responses: *ResponseTracker,
     state: StreamState,
 
-    fn run(self: *ResponseTask) void {
+    fn run(task: ResponseTask) void {
+        var self = task;
         const io = self.io;
         const allocator = self.allocator;
         const responses = self.responses;
         defer responses.finish();
-        defer allocator.destroy(self);
         defer self.state.deinit(io, allocator);
         defer self.writer.unregisterStream(self.state.id);
         defer addStat(&grpc_response_tasks_completed, 1);
@@ -1240,10 +1309,7 @@ fn respondServerStreaming(
     state: *StreamState,
     method: []const u8,
 ) !void {
-    try writer.sendHeaders(io, state.id, false, &.{
-        .{ .name = ":status", .value = "200" },
-        .{ .name = "content-type", .value = "application/grpc" },
-    });
+    try writer.sendGrpcResponseHeaders(io, state.id);
 
     var body_writer = Http2BodyWriter{
         .writer = writer,
@@ -1265,9 +1331,7 @@ fn respondServerStreaming(
         return;
     };
 
-    try writer.sendHeaders(io, state.id, true, &.{
-        .{ .name = "grpc-status", .value = "0" },
-    });
+    try writer.sendGrpcSuccessTrailers(io, state.id);
 }
 
 fn grpcStatusForError(err: anyerror) []const u8 {
@@ -1400,6 +1464,22 @@ fn writeHeaders(
     };
     defer if (heap_allocated) std.heap.smp_allocator.free(encoded);
 
+    const flags = http2_frame.flag_end_headers |
+        if (end_stream) http2_frame.flag_end_stream else @as(u8, 0);
+    try writeFrame(writer, .{
+        .length = encoded.len,
+        .type = .headers,
+        .flags = flags,
+        .stream_id = stream_id,
+    }, encoded);
+}
+
+fn writeStaticHeaders(
+    writer: *std.Io.Writer,
+    stream_id: u31,
+    end_stream: bool,
+    encoded: []const u8,
+) !void {
     const flags = http2_frame.flag_end_headers |
         if (end_stream) http2_frame.flag_end_stream else @as(u8, 0);
     try writeFrame(writer, .{
