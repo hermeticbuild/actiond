@@ -26,6 +26,19 @@ pub const Listener = struct {
         _ = linux.close(self.fd);
     }
 
+    pub fn ioServer(self: Listener) std.Io.net.Server {
+        return .{
+            .socket = .{
+                .handle = self.fd,
+                .address = .{ .ip4 = .loopback(0) },
+            },
+            .options = if (std.Io.net.Server.AcceptOptions != void) .{
+                .mode = .stream,
+                .protocol = null,
+            },
+        };
+    }
+
     pub fn accept(self: Listener) !Connection {
         if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("actiond_build_options");
 const body_sink = @import("body_sink.zig");
 const bytestream = @import("bytestream.zig");
 const bytestream_service = @import("bytestream_service.zig");
@@ -266,6 +267,51 @@ const response_frame_payload_len = http2_frame.default_max_frame_size;
 const default_max_concurrent_streams = 128;
 const inbound_initial_window_size = 1024 * 1024 * 1024;
 
+var grpc_connections_started = std.atomic.Value(u64).init(0);
+var grpc_connections_completed = std.atomic.Value(u64).init(0);
+var grpc_connections_failed = std.atomic.Value(u64).init(0);
+var grpc_response_tasks_started = std.atomic.Value(u64).init(0);
+var grpc_response_tasks_completed = std.atomic.Value(u64).init(0);
+var grpc_response_tasks_failed = std.atomic.Value(u64).init(0);
+var grpc_response_concurrency_waits = std.atomic.Value(u64).init(0);
+var grpc_data_frames = std.atomic.Value(u64).init(0);
+var grpc_data_bytes = std.atomic.Value(u64).init(0);
+
+fn addStat(counter: *std.atomic.Value(u64), value: usize) void {
+    if (comptime build_options.executor_timing_logs) {
+        _ = counter.fetchAdd(@intCast(value), .monotonic);
+    }
+}
+
+pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+    if (comptime build_options.executor_timing_logs) {
+        const text = try std.fmt.allocPrint(allocator,
+            \\grpc_connections_started {d}
+            \\grpc_connections_completed {d}
+            \\grpc_connections_failed {d}
+            \\grpc_response_tasks_started {d}
+            \\grpc_response_tasks_completed {d}
+            \\grpc_response_tasks_failed {d}
+            \\grpc_response_concurrency_waits {d}
+            \\grpc_data_frames {d}
+            \\grpc_data_bytes {d}
+            \\
+        , .{
+            grpc_connections_started.load(.monotonic),
+            grpc_connections_completed.load(.monotonic),
+            grpc_connections_failed.load(.monotonic),
+            grpc_response_tasks_started.load(.monotonic),
+            grpc_response_tasks_completed.load(.monotonic),
+            grpc_response_tasks_failed.load(.monotonic),
+            grpc_response_concurrency_waits.load(.monotonic),
+            grpc_data_frames.load(.monotonic),
+            grpc_data_bytes.load(.monotonic),
+        });
+        defer allocator.free(text);
+        try out.appendSlice(allocator, text);
+    }
+}
+
 pub const Config = struct {
     listen: []const u8 = "127.0.0.1:8980",
 };
@@ -404,7 +450,7 @@ const SharedHttp2Writer = struct {
     fn sendData(self: *SharedHttp2Writer, io: std.Io, stream_id: u31, body: []const u8) !void {
         var remaining = body;
         while (remaining.len != 0) {
-            const chunk_len = try self.flow.reserveData(stream_id, remaining.len);
+            const chunk_len = try self.flow.reserveData(io, stream_id, remaining.len);
             const chunk = remaining[0..chunk_len];
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
@@ -415,6 +461,8 @@ const SharedHttp2Writer = struct {
                 .stream_id = stream_id,
             }, chunk);
             try self.writer.flush();
+            addStat(&grpc_data_frames, 1);
+            addStat(&grpc_data_bytes, chunk.len);
             remaining = remaining[chunk_len..];
         }
     }
@@ -497,7 +545,7 @@ const FlowControl = struct {
         }
     }
 
-    fn reserveData(self: *FlowControl, stream_id: u31, requested: usize) !usize {
+    fn reserveData(self: *FlowControl, io: std.Io, stream_id: u31, requested: usize) !usize {
         while (true) {
             self.lock_state.lock();
             if (self.findStreamIndexLocked(stream_id)) |index| {
@@ -514,7 +562,7 @@ const FlowControl = struct {
                     return @intCast(chunk_len_i64);
                 }
                 self.lock_state.unlock();
-                sleepMilliseconds(1);
+                try sleepMilliseconds(io, 1);
                 continue;
             }
             self.lock_state.unlock();
@@ -547,11 +595,12 @@ const SpinLock = struct {
 const ResponseTracker = struct {
     active: std.atomic.Value(u32) = .init(0),
 
-    fn begin(self: *ResponseTracker) void {
+    fn begin(self: *ResponseTracker, io: std.Io) !void {
         while (true) {
             const current = self.active.load(.monotonic);
             if (current >= default_max_concurrent_streams) {
-                yieldThread();
+                addStat(&grpc_response_concurrency_waits, 1);
+                try sleepMilliseconds(io, 1);
                 continue;
             }
             if (self.active.cmpxchgWeak(current, current + 1, .monotonic, .monotonic) == null) return;
@@ -562,9 +611,9 @@ const ResponseTracker = struct {
         _ = self.active.fetchSub(1, .monotonic);
     }
 
-    fn wait(self: *ResponseTracker) void {
+    fn wait(self: *ResponseTracker, io: std.Io) !void {
         while (self.active.load(.monotonic) != 0) {
-            yieldThread();
+            try sleepMilliseconds(io, 1);
         }
     }
 };
@@ -597,15 +646,19 @@ pub fn serveDispatcher(
     try stderr.print("actiond gRPC listening on {s}\n", .{config.listen});
     try stderr.flush();
 
+    var connections: std.Io.Group = .init;
+    defer connections.cancel(io);
+
     while (true) {
         const stream = listener.accept(io) catch |err| {
+            if (err == error.Canceled) return err;
             try stderr.print("actiond gRPC accept failed: {s}\n", .{@errorName(err)});
             try stderr.flush();
-            sleepMilliseconds(10);
+            sleepMilliseconds(io, 10) catch {};
             continue;
         };
         setTcpNoDelay(stream) catch {};
-        const thread = std.Thread.spawn(.{}, connectionThread, .{
+        connections.concurrent(io, connectionTask, .{
             io,
             allocator,
             dispatcher,
@@ -613,16 +666,15 @@ pub fn serveDispatcher(
         }) catch |err| {
             var owned_stream = stream;
             owned_stream.close(io);
-            try stderr.print("actiond gRPC connection spawn failed: {s}\n", .{@errorName(err)});
+            try stderr.print("actiond gRPC connection task failed: {s}\n", .{@errorName(err)});
             try stderr.flush();
-            sleepMilliseconds(10);
+            sleepMilliseconds(io, 10) catch {};
             continue;
         };
-        thread.detach();
     }
 }
 
-fn connectionThread(
+fn connectionTask(
     io: std.Io,
     allocator: std.mem.Allocator,
     dispatcher: Dispatcher,
@@ -675,7 +727,7 @@ pub fn handleConnectionFd(
     var write_buffer: [64 * 1024]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
     var file_writer = file.writer(io, &write_buffer);
-    try handleConnectionStreams(
+    try handleConnectionStreamsTracked(
         io,
         allocator,
         dispatcher,
@@ -691,6 +743,26 @@ pub fn handleConnectionStreams(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
 ) !void {
+    try handleConnectionStreamsTracked(
+        io,
+        allocator,
+        dispatcher,
+        reader,
+        writer,
+    );
+}
+
+fn handleConnectionStreamsTracked(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dispatcher: Dispatcher,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+) !void {
+    addStat(&grpc_connections_started, 1);
+    errdefer addStat(&grpc_connections_failed, 1);
+    defer addStat(&grpc_connections_completed, 1);
+
     var preface: [http2_frame.client_connection_preface.len]u8 = undefined;
     try reader.readSliceAll(&preface);
     if (!std.mem.eql(u8, preface[0..], http2_frame.client_connection_preface)) {
@@ -700,7 +772,8 @@ pub fn handleConnectionStreams(
     var shared_writer = SharedHttp2Writer{ .writer = writer };
     defer shared_writer.deinit(allocator);
     var responses = ResponseTracker{};
-    defer responses.wait();
+    var response_tasks: std.Io.Group = .init;
+    defer response_tasks.cancel(io);
 
     try shared_writer.sendServerSettings(io);
 
@@ -718,7 +791,7 @@ pub fn handleConnectionStreams(
     var continuation_stream: ?u31 = null;
     while (true) {
         const incoming = readFrame(allocator, reader, &frame_payload) catch |err| switch (err) {
-            error.EndOfStream => return,
+            error.EndOfStream => break,
             else => |e| return e,
         };
 
@@ -755,7 +828,7 @@ pub fn handleConnectionStreams(
                 }
 
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_stream)) {
-                    try respondAndRemove(io, allocator, dispatcher, &shared_writer, &responses, &streams, incoming.header.stream_id);
+                    try respondAndRemove(io, allocator, dispatcher, &shared_writer, &responses, &response_tasks, &streams, incoming.header.stream_id);
                 }
             },
             .continuation => {
@@ -780,17 +853,19 @@ pub fn handleConnectionStreams(
                 }
                 try shared_writer.sendWindowUpdates(io, incoming.header.stream_id, data.len);
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_stream)) {
-                    try respondAndRemove(io, allocator, dispatcher, &shared_writer, &responses, &streams, incoming.header.stream_id);
+                    try respondAndRemove(io, allocator, dispatcher, &shared_writer, &responses, &response_tasks, &streams, incoming.header.stream_id);
                 }
             },
             .rst_stream => {
                 shared_writer.unregisterStream(incoming.header.stream_id);
                 removeStream(io, allocator, &streams, incoming.header.stream_id);
             },
-            .goaway => return,
+            .goaway => break,
             .priority, .push_promise => {},
         }
     }
+    try response_tasks.await(io);
+    try responses.wait(io);
 }
 
 fn writeServerSettings(writer: *std.Io.Writer) !void {
@@ -841,12 +916,16 @@ fn writeFrame(
     header: http2_frame.Header,
     payload: []const u8,
 ) !void {
-    var header_bytes: [http2_frame.header_len]u8 = undefined;
     var encoded_header = header;
     encoded_header.length = payload.len;
-    try http2_frame.encodeHeader(&header_bytes, encoded_header);
-    try writer.writeAll(&header_bytes);
+    try writeFrameHeader(writer, encoded_header);
     try writer.writeAll(payload);
+}
+
+fn writeFrameHeader(writer: *std.Io.Writer, header: http2_frame.Header) !void {
+    var header_bytes: [http2_frame.header_len]u8 = undefined;
+    try http2_frame.encodeHeader(&header_bytes, header);
+    try writer.writeAll(&header_bytes);
 }
 
 fn sendWindowUpdate(writer: *std.Io.Writer, stream_id: u31, len: usize) !void {
@@ -930,6 +1009,7 @@ fn respondAndRemove(
     dispatcher: Dispatcher,
     writer: *SharedHttp2Writer,
     responses: *ResponseTracker,
+    response_tasks: *std.Io.Group,
     streams: *std.ArrayListUnmanaged(StreamState),
     id: u31,
 ) !void {
@@ -942,7 +1022,7 @@ fn respondAndRemove(
         const task = try allocator.create(ResponseTask);
         errdefer allocator.destroy(task);
 
-        responses.begin();
+        try responses.begin(io);
         errdefer responses.finish();
 
         task.* = .{
@@ -954,8 +1034,8 @@ fn respondAndRemove(
             .state = owned_state,
         };
 
-        const thread = try std.Thread.spawn(.{}, ResponseTask.run, .{task});
-        thread.detach();
+        try response_tasks.concurrent(io, ResponseTask.run, .{task});
+        addStat(&grpc_response_tasks_started, 1);
         return;
     }
 }
@@ -976,8 +1056,10 @@ const ResponseTask = struct {
         defer allocator.destroy(self);
         defer self.state.deinit(io, allocator);
         defer self.writer.unregisterStream(self.state.id);
+        defer addStat(&grpc_response_tasks_completed, 1);
 
         respondStream(io, allocator, self.dispatcher, self.writer, &self.state) catch |err| {
+            addStat(&grpc_response_tasks_failed, 1);
             std.log.err("gRPC stream {d} response failed: {s}", .{ self.state.id, @errorName(err) });
         };
     }
@@ -1074,21 +1156,8 @@ fn grpcStatusForError(err: anyerror) []const u8 {
     };
 }
 
-fn yieldThread() void {
-    std.Thread.yield() catch std.atomic.spinLoopHint();
-}
-
-fn sleepMilliseconds(milliseconds: u32) void {
-    var request: std.posix.timespec = .{
-        .sec = @intCast(milliseconds / std.time.ms_per_s),
-        .nsec = @intCast((milliseconds % std.time.ms_per_s) * std.time.ns_per_ms),
-    };
-    while (true) {
-        switch (std.posix.errno(std.posix.system.nanosleep(&request, &request))) {
-            .INTR => continue,
-            else => return,
-        }
-    }
+fn sleepMilliseconds(io: std.Io, milliseconds: u32) !void {
+    try io.sleep(.fromMilliseconds(milliseconds), .awake);
 }
 
 fn ignoreSigpipe() void {
@@ -1422,20 +1491,17 @@ test "HTTP/2 connection responds to completed streams concurrently" {
                 self.first_started.store(1, .monotonic);
                 var waits: usize = 0;
                 while (self.second_started.load(.monotonic) == 0 and waits < 100_000) : (waits += 1) {
-                    yieldThread();
+                    try io.sleep(.fromMilliseconds(1), .awake);
                 }
                 if (self.second_started.load(.monotonic) != 0) {
                     self.first_observed_second.store(1, .monotonic);
                 }
-                _ = io;
                 return try allocator.dupe(u8, "first");
             }
             if (std.mem.eql(u8, method, reapi_dispatch.cas_find_missing_blobs)) {
                 self.second_started.store(1, .monotonic);
-                _ = io;
                 return try allocator.dupe(u8, "second");
             }
-            _ = io;
             return error.UnsupportedMethod;
         }
 

@@ -88,32 +88,34 @@ fn grpcListenerThread(
         logGuestError(io, "linux-actiond guest gRPC listen failed", err);
         return;
     };
-    defer listener.close();
+    var grpc_server = listener.ioServer();
+    defer grpc_server.deinit(io);
 
     logGuestInfo(io, "linux-actiond guest gRPC listening on vsock:{d}\n", .{vsock.grpc_port});
     var owned_server = server;
     const dispatcher = grpc_http2_server.Dispatcher.fromReapiServer(&owned_server);
+    var connections: std.Io.Group = .init;
+    defer connections.cancel(io);
     while (true) {
-        const connection = listener.accept() catch |err| {
+        const stream = grpc_server.accept(io) catch |err| {
             logGuestError(io, "linux-actiond guest gRPC accept failed", err);
             continue;
         };
-        const thread = std.Thread.spawn(.{}, grpcConnectionThread, .{ io, allocator, dispatcher, connection }) catch |err| {
-            connection.close();
-            logGuestError(io, "linux-actiond guest gRPC spawn failed", err);
+        connections.concurrent(io, grpcConnectionTask, .{ io, allocator, dispatcher, stream.socket.handle }) catch |err| {
+            stream.close(io);
+            logGuestError(io, "linux-actiond guest gRPC task failed", err);
             continue;
         };
-        thread.detach();
     }
 }
 
-fn grpcConnectionThread(
+fn grpcConnectionTask(
     io: std.Io,
     allocator: std.mem.Allocator,
     dispatcher: grpc_http2_server.Dispatcher,
-    connection: vsock.Connection,
+    fd: std.posix.fd_t,
 ) void {
-    grpc_http2_server.handleConnectionFd(io, allocator, dispatcher, connection.fd) catch |err| {
+    grpc_http2_server.handleConnectionFd(io, allocator, dispatcher, fd) catch |err| {
         if (err != error.EndOfStream) {
             logGuestError(io, "linux-actiond guest gRPC connection failed", err);
         }
@@ -226,6 +228,7 @@ fn readActiondfsStats(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
         if (out.items.len > 1024 * 1024) return error.MessageTooLarge;
     }
     try cas.appendPutFileStats(allocator, &out);
+    try grpc_http2_server.appendStats(allocator, &out);
     return try out.toOwnedSlice(allocator);
 }
 
