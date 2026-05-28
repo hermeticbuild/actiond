@@ -250,6 +250,10 @@ pub const Store = struct {
             });
         defer dest.close(io);
 
+        if (comptime builtin.os.tag == .linux) {
+            if (try copyFdToFdLinux(src.handle, dest.handle, digest.size_bytes)) return;
+        }
+
         var buffer: [copy_buffer_len]u8 = undefined;
         while (true) {
             const n = try readFd(src.handle, &buffer);
@@ -1031,6 +1035,32 @@ fn createFileLinuxRetry(
             else => return error.Unexpected,
         }
     }
+}
+
+fn copyFdToFdLinux(src: std.Io.File.Handle, dest: std.Io.File.Handle, size: u64) !bool {
+    var remaining = size;
+    var copied_any = false;
+    while (remaining != 0) {
+        const chunk: usize = @intCast(@min(remaining, 0x7ffff000));
+        const rc = std.os.linux.sendfile(dest, src, null, chunk);
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return if (copied_any) error.ReadFailed else false;
+                remaining -= n;
+                copied_any = true;
+            },
+            .INTR => continue,
+            .INVAL, .NOSYS, .OPNOTSUPP, .XDEV, .STALE => {
+                if (copied_any) return error.WriteFailed;
+                return false;
+            },
+            .NOSPC => return error.NoSpaceLeft,
+            .FBIG, .OVERFLOW => return error.FileTooBig,
+            else => return error.WriteFailed,
+        }
+    }
+    return true;
 }
 
 fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
