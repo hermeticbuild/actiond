@@ -38,6 +38,9 @@ pub fn serve(
             continue;
         };
         const client_fd = accepted.socket.handle;
+        setTcpNoDelay(client_fd) catch |err| {
+            std.log.debug("raw gRPC bridge TCP_NODELAY failed: {s}", .{@errorName(err)});
+        };
         const thread = std.Thread.spawn(.{}, connectionThread, .{ io, machine, client_fd }) catch |err| {
             accepted.close(io);
             std.log.err("raw gRPC bridge connection spawn failed: {s}", .{@errorName(err)});
@@ -149,6 +152,16 @@ fn closeFd(fd: std.posix.fd_t) void {
         .INTR => continue,
         else => return,
     };
+}
+
+fn setTcpNoDelay(fd: std.posix.fd_t) !void {
+    var enabled: i32 = 1;
+    try std.posix.setsockopt(
+        fd,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        std.mem.asBytes(&enabled),
+    );
 }
 
 fn parseListenAddress(listen: []const u8) !std.Io.net.IpAddress {
