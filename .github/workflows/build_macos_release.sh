@@ -3,6 +3,7 @@ set -euo pipefail
 
 artifact_dir="${1:-release}"
 target="//cmd/darwin-actiond"
+artifact_dir="$(mkdir -p "${artifact_dir}" && cd "${artifact_dir}" && pwd)"
 bazel_flags=(
   --config=remote
   --platforms=@llvm//platforms:macos_arm64
@@ -19,8 +20,7 @@ fi
 
 artifact="${artifact_dir}/darwin-actiond_macos_arm64"
 
-mkdir -p "${artifact_dir}"
-bazel run "${bazel_flags[@]}" -c opt --run_under=cp "${target}" -- "${artifact}"
+bazel run "${bazel_flags[@]}" -c opt --run_under="cp -f" "${target}" -- "${artifact}"
 
 cd "${artifact_dir}"
 shasum -a 256 darwin-actiond_macos_arm64 > SHA256.txt
