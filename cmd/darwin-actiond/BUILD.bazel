@@ -1,4 +1,4 @@
-load("@bazel_lib//lib:run_binary.bzl", "run_binary")
+load(":codesign.bzl", "darwin_codesign")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
@@ -45,23 +45,11 @@ cc_library(
     target_compatible_with = ["@platforms//os:macos"],
 )
 
-run_binary(
-    name = "darwin-actiond-signed",
-    srcs = [
-        ":darwin-actiond-bin",
-        "darwin-actiond.entitlements",
-    ],
-    outs = ["darwin-actiond"],
-    args = [
-        "sign",
-        "--entitlements-xml-file",
-        "$(location darwin-actiond.entitlements)",
-        "--binary-identifier",
-        "darwin-actiond",
-        "$(location :darwin-actiond-bin)",
-        "$@",
-    ],
-    mnemonic = "Codesign",
+darwin_codesign(
+    name = "darwin-actiond",
+    binary = ":darwin-actiond-bin",
+    binary_identifier = "darwin-actiond",
+    entitlements = "darwin-actiond.entitlements",
     target_compatible_with = ["@platforms//os:macos"],
     tool = "//third_party/apple_codesign:rcodesign",
     visibility = ["//visibility:public"],
