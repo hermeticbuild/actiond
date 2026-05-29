@@ -1,208 +1,111 @@
 # actiond
 
-`actiond` is a local Remote Execution API worker/cache for running Bazel
-actions in a Linux sandbox.
+`actiond` is a local Remote Execution API worker and cache for Bazel. On macOS
+it starts a small Linux VM and runs Bazel actions inside that VM, so a Mac can
+act like a local Linux remote-execution worker.
 
-It has two execution modes:
+The main user-facing binary is `darwin-actiond`. It includes the VM kernel,
+initramfs, and Linux runtime image, so you do not need to build this repository
+from source to use it.
 
-- `linux-actiond`: runs actions directly on a Linux host using chroot, private
-  mount/network namespaces, loopback-only TCP, read-only bind mounts, and
-  best-effort cgroups.
-- `darwin-actiond serve-vm`: runs on macOS and proxies execution into a tiny
-  Linux VM built with Apple's Virtualization.framework.
+## Why Use It?
 
-The macOS VM path is the main reason this project exists: it lets a Mac act
-like a local Linux remote-execution worker without giving actions normal macOS
-process access.
+- Perfect sandboxing! actions run inside an empty chroot inside the VM.
+  No nonhermetic dependencies can creep in.
+- Performance! the LLVM smoke build has measured about 20-30%
+  faster through actiond than the comparable mac-host Bazel build.
+- Save disk! No duplication of artifacts between CAS and output base(s)
+- Better resource management! Multiple Bazel servers can point at one `actiond`
+  worker/cache instead of each running too many local actions.
 
-For deeper implementation details, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For implementation details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## What It Builds
+## Install
 
-The repo is fully Bazelized:
-
-- Zig 0.16.0 binaries for macOS, Linux hosts, and the Linux VM guest.
-- A minimal arm64 Linux kernel from `http_archive`.
-- A compressed initramfs containing `linux-actiond-guest`.
-- Zstd-compressed SquashFS runtime images containing selected glibc versions.
-- Standalone binaries that embed their runtime artifacts.
-
-Important targets:
+Download the latest macOS arm64 release:
 
 ```bash
-bazel build //cmd/darwin-actiond
-bazel build //cmd/linux_actiond:linux-actiond-standalone \
-  --platforms=//platforms:linux_aarch64
-bazel build //cmd/linux_actiond:linux-actiond-standalone \
-  --platforms=//platforms:linux_x86_64
-bazel build //vm:linux_kernel_zst //vm:initramfs //runtimes:runtimes_squashfs
+curl -L \
+  https://github.com/hermeticbuild/actiond/releases/latest/download/darwin-actiond_macos_arm64 \
+  -o darwin-actiond_macos_arm64
+curl -L \
+  https://github.com/hermeticbuild/actiond/releases/latest/download/SHA256.txt \
+  -o SHA256.txt
+shasum -a 256 -c SHA256.txt
+chmod +x darwin-actiond_macos_arm64
 ```
 
-The Linux standalone target follows Bazel's target platform. Its embedded
-runtime image comes from `//runtimes:runtimes_squashfs`, which selects the
-matching runtime SquashFS for the target CPU.
+You can also download the binary from the
+[GitHub releases page](https://github.com/hermeticbuild/actiond/releases).
 
-The VM kernel is built by `linux.bzl` from the Linux archive declared in
-`MODULE.bazel`. The repository currently uses a `local_path_override` for
-`linux.bzl` until the needed ruleset changes are published.
+## Start The Worker
 
 ```bash
-bazel build //vm:linux_kernel_zst
-```
-
-For optimized artifacts:
-
-```bash
-bazel build -c opt //cmd/darwin-actiond
-bazel build -c opt //cmd/linux_actiond:linux-actiond-standalone_pkg \
-  --platforms=//platforms:linux_aarch64
-bazel build -c opt //cmd/linux_actiond:linux-actiond-standalone_pkg \
-  --platforms=//platforms:linux_x86_64
-```
-
-## Running
-
-### macOS VM Worker
-
-Build and run the standalone Darwin worker:
-
-```bash
-bazel build //cmd/darwin-actiond
-bazel-bin/cmd/darwin-actiond/darwin-actiond serve-vm \
+./darwin-actiond_macos_arm64 serve-vm \
   --listen=127.0.0.1:8980 \
-  --root=/tmp/actiond-vm
+  --root="$HOME/Library/Caches/actiond/vm"
 ```
 
-VM mode stores CAS and ActionCache state inside the guest on an ext4 disk image
-attached as virtio-blk. By default the image path is
-`/tmp/actiond-vm/cas.ext4`; pass `--cas-image=/path/cas.ext4` to reuse a
-specific preformatted image.
+`--root` stores the VM state, including the guest-owned CAS and ActionCache.
+Reusing the same root keeps the local cache warm across worker restarts.
 
-The standalone binary embeds:
+## Point Bazel At actiond
 
-- compressed Linux kernel `Image.zst`
-- compressed initramfs
-- runtime SquashFS
+Add a config like this to your workspace `.bazelrc`:
 
-At startup, `darwin-actiond` extracts those payloads, inflates the boot files
-that Virtualization.framework needs as raw files, starts the VM, and proxies
-REAPI calls into the guest over virtio-vsock.
+```bazelrc
+build:actiond --remote_executor=grpc://127.0.0.1:8980
+build:actiond --remote_cache=grpc://127.0.0.1:8980
+build:actiond --spawn_strategy=remote
+build:actiond --genrule_strategy=remote
+build:actiond --remote_local_fallback=false
+build:actiond --remote_upload_local_results=false
+build:actiond --noremote_cache_compression
+```
 
-### Linux Host Worker
-
-On Linux:
+Then build with:
 
 ```bash
-bazel build //cmd/linux_actiond:linux-actiond-standalone
-bazel-bin/cmd/linux_actiond/linux-actiond-standalone serve \
-  --listen=127.0.0.1:8980 \
-  --root=/tmp/actiond
+bazel build --config=actiond //...
 ```
 
-The Linux standalone binary embeds the runtime SquashFS in the ELF
-`.actiond.runtimes` section and extracts it under the worker root at startup
-when `--runtime-image` and `--runtime-root` are omitted.
+Your Bazel workspace still needs toolchains and platforms that can run in Linux.
+`actiond` executes the actions Bazel sends it; it does not turn a macOS toolchain
+into a Linux toolchain automatically.
 
-Linux execution requires the privileges needed for chroot, bind mounts, mount
-namespaces, and cgroups. The Docker e2e harness runs privileged for this reason.
+## Runtime Selection
 
-## Testing
-
-Normal checks:
-
-```bash
-bazel build //...
-bazel test //...
-```
-
-Linux e2e from macOS using Docker:
-
-```bash
-tools/docker/run_linux_e2e.sh
-```
-
-VM e2e on macOS:
-
-```bash
-tools/e2e.sh vm
-```
-
-Heavier LLVM smoke against an already-running VM worker:
-
-```bash
-e2e/llvm_tblgen_smoke.sh
-```
-
-Full LLVM smoke comparison, including VM startup and a mac-host baseline:
-
-```bash
-e2e/run_llvm_vm_smoke.sh
-```
-
-The VM smoke uses `--platforms=@llvm//platforms:linux_arm64_musl` and
-`--host_platform=@llvm//platforms:linux_arm64_musl` so generated exec tools run
-inside the Linux VM and do not depend on glibc inside actiond chroots.
-
-The fresh-VM runner defaults to `--jobs=8` for stable comparisons; override it
-with `ACTIOND_LLVM_SMOKE_JOBS`, or set that variable to an empty value to let
-Bazel choose its default. The latest checked-in timing summary lives in
-`e2e/LLVM_VM_SMOKE_TIMINGS.md`.
-
-Standalone artifact e2e:
-
-```bash
-ACTIOND_E2E_STANDALONE=1 tools/docker/run_linux_e2e.sh
-ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
-```
-
-The `test/` directory is a separate Bazel workspace used as a stress harness.
-It generates many inputs, source-directory style inputs, tree artifacts, output
-files, and output directories.
-
-## Current Runtime Set
-
-The runtime SquashFS currently packages these glibc runtime names:
+The embedded runtime image currently includes:
 
 - `glibc2.31`
 - `glibc2.35`
 - `glibc2.39`
 
-Bazel actions can request one with an execution/platform property:
+Actions that are not fully hermetic and need a glibc can request one be mounted into their chroot via execution property:
 
 ```python
 execution_requirements = {"libc": "glibc2.35"}
 ```
 
-Unsupported libc names fail instead of silently falling back.
+Unsupported libc names fail explicitly.
 
-## Input Mutation Semantics
+## Build From Source
 
-VM execution uses actiondfs for lazy CAS-backed inputs. By default, actiondfs
-treats declared inputs as immutable: reading input files is allowed, but opening
-an input for write or truncation fails. Actions may create new output files under
-input directories, and those writes are staged outside the CAS until output
-collection.
+Most users should use releases. Source builds are mainly for development:
 
-Actions that intentionally rewrite, delete, or replace input files must opt into
-the overlayfs compatibility path:
-
-```python
-execution_requirements = {"mutates_inputs": "1"}
+```bash
+bazel build --config=remote -c opt //cmd/darwin-actiond
 ```
 
-Use this only for tools that really mutate their input tree or declare outputs
-that overlap input files. Normal actions should use the default strict actiondfs
-path.
+Normal contributor checks:
 
-## Status
+```bash
+bazel build --config=remote //...
+bazel test --config=remote //...
+```
 
-This is active systems work, not a polished product. The core path works:
+The macOS VM e2e harness is:
 
-- REAPI CAS/ByteStream/ActionCache/Execution surface
-- Linux chroot execution
-- macOS VM execution
-- guest-native CAS in VM mode
-- compressed VM/runtime packaging
-
-The design prioritizes correctness, hermeticity, and measurable copies before
-polishing the operator experience.
+```bash
+tools/e2e.sh vm
+```

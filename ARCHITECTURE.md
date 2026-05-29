@@ -1,128 +1,20 @@
 # Architecture
 
-`actiond` is a small Remote Execution API implementation with two Linux
-execution backends:
+`actiond` is a local Remote Execution API worker and cache for Bazel. Its main
+mode is `darwin-actiond serve-vm`: a macOS process owns the public gRPC
+listener, starts a small Linux VM, and forwards REAPI traffic into a Linux guest
+over virtio-vsock.
 
-- direct Linux host execution through `linux-actiond`
-- macOS-hosted Linux VM execution through `darwin-actiond serve-vm`
+The design centers on three ideas:
 
-The shared goal is the same in both modes: accept Bazel REAPI traffic, keep CAS
-and ActionCache state local, construct a Linux execroot with minimal copies, run
-the action in an isolated filesystem view, then publish declared outputs back
-into the CAS.
+- run Linux actions from macOS behind a VM boundary
+- make sandbox setup independent of input-tree size
+- keep CAS, ActionCache, and output storage local to the machine
 
-## Components
+There is also a direct Linux mode, `linux-actiond serve`, that uses the same
+executor code on a Linux host. The macOS VM path is the primary product path.
 
-### Binaries
-
-`darwin-actiond`
-
-- macOS host binary.
-- `serve-vm` starts and supervises a Virtualization.framework Linux VM.
-- Proxies public REAPI traffic into the guest over virtio-vsock.
-- VM mode has one guest-owned CAS on the VM block device.
-
-`linux-actiond`
-
-- Linux host worker.
-- Runs actions directly using the same executor code used inside the VM.
-- Can embed the runtime SquashFS as a standalone binary payload.
-
-`linux-actiond-guest`
-
-- Linux guest binary placed in the initramfs.
-- Acts as PID 1 for the VM image.
-- Mounts guest filesystems, starts the REAPI/control worker, and runs actions.
-
-### Build Artifacts
-
-The VM bundle is produced by Bazel:
-
-- `//vm:linux_kernel`: raw arm64 Linux `Image`
-- `//vm:linux_kernel_zst`: zstd-compressed kernel image for packaging
-- `//vm:initramfs`: zstd-compressed initramfs cpio
-- `//runtimes:runtimes_squashfs`: zstd-compressed SquashFS runtime image
-
-Standalone binaries embed compressed payloads in native executable sections.
-
-The Darwin standalone binary uses Mach-O sections:
-
-- `__ACTIOND,__kernel`: `Image.zst`
-- `__ACTIOND,__initramfs`: `initramfs.cpio.zst`
-- `__ACTIOND,__runtimes`: `runtimes-aarch64.sqfs`
-
-The Linux standalone binary uses an ELF section:
-
-- `.actiond.runtimes`: runtime SquashFS
-
-At runtime, boot artifacts are extracted under the worker root. Zstd payloads
-are inflated to content-addressed files in `root/boot/` before
-Virtualization.framework is called. The runtime SquashFS remains compressed and
-is staged under the worker root. VM mode attaches it to the guest as a
-read-only virtio block device; direct Linux execution mounts it locally.
-
-## VM Shape
-
-The VM is intentionally small:
-
-- arm64 Linux kernel
-- initramfs with only `linux-actiond-guest`
-- no network devices
-- virtio-vsock control channel
-- writable virtio block device for the guest CAS
-- read-only virtio block device for the runtime SquashFS image
-- no SSH, package manager, systemd, graphics, audio, or user login
-
-The VM is a long-lived worker. Per-action isolation happens inside Linux with a
-fresh chroot, mount namespace, and network namespace rather than by cold-booting
-a VM per action.
-
-Each action network namespace brings up only `lo`. Actions can use local TCP
-listeners on `127.0.0.1` or `0.0.0.0`, but no host or external network interface
-is attached. The runtime image includes a canonical `/etc/hosts` so `localhost`
-resolves to loopback inside runtime-backed actions.
-
-## Why the Kernel Is Inflated Before Boot
-
-The packaged kernel is compressed, but the VM is booted with a raw Linux
-`Image`.
-
-Virtualization.framework's `VZLinuxBootLoader` accepts a kernel URL, but does
-not document a zstd/gzip decompression contract. On arm64 Linux, compressed
-kernel payloads are also a bootloader responsibility; the arm64 `Image` format
-is not an x86-style self-decompressing `bzImage`.
-
-So the implemented contract is:
-
-1. ship `Image.zst`
-2. extract it from the standalone binary
-3. inflate it into `root/boot/kernel-<sha256>.Image`
-4. pass the raw `Image` path to `VZLinuxBootLoader`
-
-That keeps distribution size low while keeping the VM boot ABI boring.
-
-## REAPI Surface
-
-The server implements the subset needed for Bazel remote execution:
-
-- `Execution/Execute`
-- `ContentAddressableStorage/FindMissingBlobs`
-- `ContentAddressableStorage/BatchUpdateBlobs`
-- `ContentAddressableStorage/BatchReadBlobs`
-- `ContentAddressableStorage/GetTree`
-- `ByteStream/Read`
-- `ByteStream/Write`
-- `ActionCache/GetActionResult`
-- `ActionCache/UpdateActionResult`
-- `Capabilities/GetCapabilities`
-
-The HTTP/2 server dispatches independent streams concurrently. Server-streaming
-responses use a body sink so large responses can be written as chunks instead
-of forcing the HTTP/2 layer to build one giant response buffer.
-
-## Darwin VM Request Routing
-
-The macOS VM path keeps all REAPI state inside the Linux guest:
+## Topology
 
 ```text
 Bazel
@@ -131,196 +23,145 @@ Bazel
   v
 darwin-actiond
   |
-  | framed gRPC payloads over virtio-vsock
+  | TCP-to-vsock bridge
   v
 linux-actiond-guest
   |
-  | CAS / ByteStream / AC / Capabilities / GetTree / Execute
+  | REAPI services, executor, CAS, ActionCache
   v
-guest ext4 CAS on virtio-blk
+guest ext4 disk mounted at /cas
 ```
 
-The host process still owns the public TCP listener and VM lifecycle, but CAS,
-ActionCache, and output storage are handled by `linux-actiond-guest` against the
-native guest filesystem.
+In VM mode, the host does not keep a second CAS mirror. Uploads, downloads,
+ActionCache requests, and Execute requests are forwarded to the guest. The
+guest stores state on its ext4 CAS disk and runs actions against that same
+native Linux filesystem.
 
-## CAS Layout and Data Flow
+## Components
 
-The CAS uses content-addressed paths for blobs and materialized tree
-directories.
+`darwin-actiond` is the released macOS binary. It embeds the Linux kernel,
+initramfs, and aarch64 runtime SquashFS in Mach-O `__ACTIOND` sections. At
+startup it extracts those payloads under `--root`, inflates the kernel and
+initramfs to raw boot files, starts the VM with Virtualization.framework, and
+bridges public gRPC traffic to the guest.
 
-In VM mode:
+`linux-actiond-guest` lives in the initramfs. It runs as guest init, mounts the
+minimal guest filesystems, mounts `/cas` and `/runtimes`, then execs itself as
+the guest REAPI worker.
 
-- `darwin-actiond` attaches a writable raw disk image as a virtio block device
-- the guest mounts that disk as ext4 at `/cas`
-- `linux-actiond-guest` stores CAS blobs, materialized trees, and ActionCache
-  state there
-- per-action chroot roots remain tmpfs under `/work`; actiondfs staged output
-  files live under `/cas/actiondfs-stage` so output collection can promote them
-  into CAS by same-filesystem rename
+`linux-actiond` is the direct Linux host worker. It is useful for Linux hosts
+and e2e coverage, but it does not use actiondfs because it must run on ordinary
+host kernels.
 
-Client uploads and downloads cross the VM boundary as REAPI/ByteStream traffic,
-but action input reads and action output writes hit the guest's native Linux
-filesystem once the data is in the VM-owned CAS.
+## VM Shape
 
-### Uploads
+The VM is intentionally small:
 
-Client uploads are forwarded to the guest:
-
-```text
-Bazel ByteStream/Write -> darwin-actiond -> vsock -> guest CAS
-```
-
-The host does not mirror uploaded blobs into a second CAS.
-
-### Inputs
-
-In VM mode, action input files are exposed through `actiondfs`, a small built-in
-Linux filesystem in the repo under `kernel/actiondfs`. For each action, the
-guest passes the REAPI input-root digest to actiondfs. The default child mount
-namespace mounts actiondfs directly at `/workspace`; it resolves REAPI directory
-and file nodes lazily from the guest CAS mounted at `/cas`, while staging new
-output files outside the CAS until output collection.
-
-Actions that opt into `execution_requirements = {"mutates_inputs": "1"}` use
-the compatibility path: actiondfs is mounted read-only as an overlay lowerdir,
-and stock overlayfs is mounted at `/workspace` with a per-action upper/workdir.
-
-`actiondfs` caches parsed non-root Directory protos by digest and materializes
-per-mount child nodes only when lookup needs them. It is the only supported VM
-input filesystem.
-
-Executable bits are recorded in REAPI file metadata and applied by `actiondfs`
-inode metadata. CAS blobs remain immutable data files and are not chmodded.
-
-`actiondfs` keeps a VM-lifetime parsed Directory cache keyed only by the
-Directory digest. The cache stores immutable child metadata for non-root
-directories so reused source directories and tree artifacts do not re-read and
-re-parse the same CAS Directory blob across action mounts. Per-action mounts
-attach cached directories by pointer and keep a compact list of child nodes
-materialized by lookup; they no longer allocate per-directory child pointer
-arrays sized to the whole cached tree. The per-action input root Directory is
-intentionally not cached because those roots are expected to be unique; VFS
-nodes, inodes, and dentries remain mount-local.
-
-For file contents, actiondfs opens the real CAS blob as a Linux backing file
-with the actiondfs path as the user-visible path. `read_iter`, `splice_read`,
-and `mmap` are delegated through the kernel backing-file helpers, so compiler
-mmap traffic goes directly through the native CAS filesystem page cache instead
-of being copied through actiondfs folios.
-
-The normal `actiondfs` filesystem has instrumentation compiled out. Profiling
-builds set `--//:executor_timing_logs=true`, which makes the generated Zig
-build options mount the sibling `actiondfs_instrumented` filesystem and exposes
-VM-lifetime counters at `/proc/actiondfs_stats`. Those counters track
-cache hits/misses, directory
-parses, lookup and readdir activity, CAS blob opens, backing reads, splice
-reads, mmap calls, and stale-handle retries.
-
-The Linux host path always keeps the non-actiondfs materialization strategy,
-which lets Docker e2e run on ordinary host kernels:
-
-- file inputs become read-only bind mounts from CAS into the chroot
-- tree artifacts can be materialized as CAS tree directories and bind-mounted as
-  whole directories
-- output parent directories are created in the writable execroot
-
-Hardlinks are not used as a fallback. The VM uses strict actiondfs by default
-and overlayfs only for explicit input-mutating actions, while Linux-direct uses
-bind mounts.
-
-### Outputs
-
-The guest writes action outputs into the actiondfs stage tree, then stores
-declared output files and directory trees directly into the guest `/cas`.
-When staged files and CAS blobs are on the same ext4 filesystem, output
-collection promotes files into CAS with a rename after hashing them; otherwise
-it falls back to byte-copying.
-`ExecuteResponse` is returned to the host as normal gRPC payload bytes; there is
-no post-Execute host import step in VM mode.
-
-## Execution Lifecycle
-
-For each action:
-
-1. Read the `Action` and `Command` protobufs from CAS.
-2. Read the input-root digest. The Linux-direct materialization path walks the
-   tree; the VM actiondfs path lets the kernel filesystem resolve it lazily.
-3. Create a per-action work root.
-4. In VM/actiondfs mode, prepare a strict actiondfs stage path, or overlay
-   lower/upper/work paths for actions marked `mutates_inputs`. Otherwise
-   materialize input paths using read-only bind mounts.
-5. If requested, attach libc runtime directories from SquashFS.
-6. Create output parent directories.
-7. Fork the action process.
-8. In the child:
-   - set process group
-   - join cgroup if one was created
-   - set `PR_SET_NO_NEW_PRIVS`
-   - close extra file descriptors
-   - unshare the mount and network namespaces
-   - bring up loopback inside the private network namespace
-   - make mounts private
-   - mount strict `actiondfs`, or actiondfs plus overlayfs for compatibility
-   - apply read-only bind mounts
-   - chroot into the work root
-   - chdir to the requested working directory
-   - drop to the sandbox uid/gid
-   - exec the command
-9. Collect stdout, stderr, exit status, and declared outputs.
-10. Store output blobs and directory tree metadata in CAS.
-
-## Sandbox Model
-
-The isolation boundary differs by host:
-
-### Linux Host
-
-`linux-actiond` relies on Linux kernel primitives:
-
-- chroot
-- private mount and network namespaces with only loopback enabled
-- read-only bind mounts
-- dropped uid/gid
-- `PR_SET_NO_NEW_PRIVS`
-- best-effort cgroup v2 limits
-
-This is not a VM boundary, but it gives actions a constrained filesystem view
-and avoids direct writes to CAS inputs.
-
-### macOS VM
-
-`darwin-actiond serve-vm` adds a VM boundary around the same Linux executor.
-macOS only exposes:
-
-- writable virtio block device containing the guest ext4 CAS
-- read-only virtio block device containing `runtimes.sqfs`
-- virtio-vsock control channel
+- arm64 Linux kernel built by `linux.bzl`
+- initramfs containing `linux-actiond-guest` and `mkfs.ext4`
+- writable virtio block device for `/cas`
+- read-only virtio block device for `/runtimes`
+- virtio-vsock for control and gRPC
 - serial stderr for logs
+- no guest network device, SSH, systemd, package manager, graphics, or login
 
-There is no guest network device, and each action still gets its own Linux
-network namespace inside the VM with only loopback enabled. Root inside the
-guest is not host root. The guest mounts the SquashFS block device at
-`/runtimes`, so runtime payloads stay compressed and separate from the
-initramfs without requiring VirtioFS or loop devices in the guest kernel.
+The VM is long-lived. Each action gets its own Linux process sandbox inside the
+guest instead of booting a new VM.
 
-## Cgroups
+When `serve-vm` creates a new CAS image, guest init formats it as ext4 before
+mounting it at `/cas`. Existing CAS images are mounted without formatting, so
+the local cache survives worker restarts.
 
-Cgroup setup is best-effort. If `/sys/fs/cgroup` is writable and cgroup v2
-controllers are available, actiond creates an `actiond/action-<id>` cgroup and
-applies limits from platform properties:
+## REAPI Services
 
-- `limits.memory.bytes`, `memory`, `memory_bytes`, `resources:memory:bytes`
-- `limits.cpu.cores`, `cpu`, `cores`, `resources:cpu:cores`
-- `limits.pids.max`, `pids.max`, `pids`
+The public server implements the Bazel-facing subset of REAPI:
 
-If cgroup setup fails, execution continues without limits rather than failing
-the action.
+- Execution
+- ContentAddressableStorage
+- ByteStream
+- ActionCache
+- Capabilities
 
-## Runtime Images and libc Selection
+The server uses SHA-256 digests. Remote cache compression is not supported yet,
+so Bazel clients should use `--noremote_cache_compression`.
 
-Runtime libraries are packaged separately from the initramfs in SquashFS so the
-same model works for both Linux-direct and VM execution.
+The HTTP/2 server handles independent streams concurrently. ByteStream reads can
+write gRPC framing bytes and then send file contents from the CAS blob fd,
+avoiding an extra full-blob userspace buffer for large reads.
+
+## CAS and ActionCache
+
+The CAS stores blobs and tree protos under sharded SHA-256 paths. In VM mode,
+the same `/cas` filesystem also holds ActionCache entries and the
+`actiondfs-stage` tree used for action-created files.
+
+`linux-actiond-guest` maintains an in-memory presence index while running. It
+avoids repeated filesystem probes for blobs already observed or produced during
+the worker lifetime. It is an optimization only; `/cas` is the source of truth.
+
+## Input Filesystem
+
+VM execution uses `actiondfs`, a small Linux filesystem built into the VM
+kernel. Bazel sends an input root digest; actiondfs receives that digest plus
+the guest CAS blob root and exposes the action input tree at `/workspace`.
+
+Important properties:
+
+- input tree setup uses O(1) setup syscalls with respect to input-file count;
+  per-file work happens later only for paths the action actually touches.
+- directory and file nodes are resolved lazily from REAPI Directory protos
+- file data is opened from real CAS blob files on `/cas`
+- `read_iter`, `splice_read`, and `mmap` delegate to the backing CAS file
+- executable bits come from REAPI file metadata, not chmodded CAS blobs
+- output writes are staged outside immutable CAS blobs
+
+This avoids symlink forests, hardlink forests, and per-file bind mounts in the
+normal VM path.
+
+By default, declared inputs are immutable. Legacy tools that really mutate their
+inputs can opt into a compatibility path:
+
+```python
+execution_requirements = {"mutates_inputs": "1"}
+```
+
+That path mounts actiondfs read-only as an overlay lowerdir and mounts stock
+overlayfs at `/workspace` with a per-action upper/work directory. Normal actions
+should not use it.
+
+actiondfs caches parsed non-root REAPI Directory protos by digest for the VM
+lifetime. The default filesystem is built with stats compiled out; builds with
+`--config=executor_timing_logs` mount the instrumented filesystem and expose
+`/proc/actiondfs_stats`.
+
+## Output Collection
+
+In VM/actiondfs mode, action-created files live under `/cas/actiondfs-stage`.
+Output collection hashes declared outputs, writes output Directory protos, and
+records digests in the `ActionResult`.
+
+Because the stage tree and CAS live on the same ext4 filesystem, file outputs
+can usually be finalized with hash plus rename into `blobs/sha256`, not copy. If
+a direct Linux path or unusual filesystem makes rename impossible, the CAS store
+has a copy fallback.
+
+## Execution Sandbox
+
+For each action, the executor reads `Action` and `Command` protos from CAS,
+checks ActionCache when allowed, creates a per-action work root, prepares
+actiondfs or Linux-direct inputs, mounts any selected runtime, runs the command,
+captures stdout/stderr/status, stores declared outputs, and updates ActionCache
+when allowed.
+
+The child process runs in a chroot with private mount and network namespaces,
+`PR_SET_NO_NEW_PRIVS`, dropped uid/gid, closed extra file descriptors, and a
+cgroup when available. Each action network namespace has loopback only. In VM
+mode there is no external guest network device.
+
+## Runtime Images
+
+Runtime libraries are packaged in SquashFS, separate from the initramfs. The
+same format is used by VM execution and direct Linux execution.
 
 Current runtime names:
 
@@ -328,105 +169,48 @@ Current runtime names:
 - `glibc2.35`
 - `glibc2.39`
 
-Actions select a runtime through the REAPI platform property named `libc`.
-Bazel maps `execution_requirements` into platform properties, so a target can
-request:
+Actions select a runtime with the REAPI platform property `libc`. In Bazel this
+can be set with:
 
 ```python
 execution_requirements = {"libc": "glibc2.35"}
 ```
 
-When a runtime is selected, actiond bind-mounts the matching runtime directories
-into the chroot:
+When selected, actiond bind-mounts the matching runtime paths into the action
+chroot. Runtime-backed actions run with their execroot at `/workspace` so
+runtime root paths such as `/etc` do not hide user input paths.
 
-- `/lib`
-- `/lib64`
-- `/usr/lib`
-- `/etc`
+## Direct Linux Mode
 
-Runtime-backed actions run with their execroot at `/workspace`. That lets
-actiond mount runtime-owned root paths such as `/etc` without hiding user input
-paths that happen to start with `etc/`. Actions that do not request a libc
-runtime still receive the runtime image's common `/etc` package for localhost
-resolution.
+`linux-actiond serve` keeps CAS, ActionCache, and work directories under
+`--root` on the host filesystem. Input materialization differs from VM mode:
+file inputs become read-only bind mounts from CAS, tree directories can be
+bind-mounted at directory granularity, and writable output directories live in
+the action work root.
 
-The glibc packages are extracted from Ubuntu `libc6` `.deb`s. The repo rule
-removes documentation, locales, gconv modules, lintian metadata, and package
-scratch directories. The current distro-provided ELF files are already stripped;
-actiond does not currently run an additional strip pass over glibc.
+Direct Linux mode is not a VM boundary. It relies on Linux kernel sandboxing
+primitives and should be treated as a constrained local executor.
 
-## Build System
+## Performance Model
 
-Bazel owns the full build:
+The important performance choices are:
 
-- `rules_zig` builds all Zig binaries.
-- `@llvm` provides C/C++/Objective-C tooling and the macOS SDK framework setup.
-- `linux.bzl` downloads Linux kernel sources and builds the VM kernel from a
-  compact Bazel-native object graph.
-- `repository_ctx.download_and_extract(..., type = ".deb")` extracts glibc
-  runtime packages.
+- one local worker/cache can serve multiple Bazel servers
+- VM CAS and ActionCache live on native guest ext4, not a host mirror
+- actiondfs makes sandbox setup syscall count independent of input-file count
+- CAS blob reads use the guest page cache and backing-file kernel helpers
+- staged outputs live on the same filesystem as CAS final blobs
+- runtime payloads stay compressed in SquashFS
+- timing logs and actiondfs counters are compiled out by default
 
-```bash
-bazel build //vm:linux_kernel_zst
-```
+For realistic VM performance comparisons, use the LLVM smoke scripts in `e2e/`.
+The small `test/` workspace is useful for correctness and targeted stress, but
+it is not the primary actiondfs performance benchmark.
 
-`MODULE.bazel` currently uses a `local_path_override` for `/Users/dzbarsky/linux.bzl`
-until the ruleset changes needed by actiond are published.
+## Caveats
 
-## Testing Strategy
-
-Unit tests cover protocol encoding/decoding, CAS behavior, HTTP/2 dispatch,
-execroot construction, runtime mount mapping, initramfs creation, SquashFS
-packing, and zstd packaging.
-
-End-to-end tests use `tools/e2e.sh` and the standalone `test/` workspace. The
-stress action graph covers bare files, source directories, tree artifact inputs,
-output directories, and action-level probes that fail if the sandbox can open an
-outbound TCP path, cannot use loopback TCP, or cannot see the runtime-provided
-`/etc/hosts` localhost mapping.
-
-Useful commands:
-
-```bash
-bazel build //...
-bazel test //...
-tools/docker/run_linux_e2e.sh
-tools/e2e.sh vm
-e2e/llvm_tblgen_smoke.sh
-ACTIOND_E2E_STANDALONE=1 tools/docker/run_linux_e2e.sh
-ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
-```
-
-The LLVM smoke uses the bootstrapped workspace's
-`//platforms:linux_arm64_musl` target and host platform. That keeps generated
-execution tools musl-linked, avoids glibc runtime actions, and avoids making
-actiond guess whether an arbitrary action needs a glibc runtime mounted into the
-chroot.
-
-The VM e2e is the test that proves the Virtualization.framework path can boot,
-connect over vsock, execute actions, and serve CAS from the guest ext4 image. It
-is also the actiondfs coverage path, because the built-in filesystem is only
-present in the Bazel-built VM kernel.
-
-## Performance Notes
-
-The main copy-minimizing choices are:
-
-- VM mode keeps CAS and ActionCache on a native guest ext4 filesystem
-- VM action inputs are served by strict actiondfs instead of per-file bind
-  mounts, hardlink forests, or the overlayfs compatibility path
-- Linux-host action inputs are bind-mounted instead of copied
-- tree directories are bind-mounted at directory granularity when available
-- runtimes are mounted from SquashFS instead of unpacked into the initramfs
-- kernel and initramfs are compressed for distribution, then inflated once per
-  worker root as needed
-
-## Current Caveats
-
-- The REAPI surface is intentionally focused on the methods Bazel needs here.
-- Cgroup enforcement is best-effort.
-- The VM path is arm64 Linux on Apple Silicon; this project does not try to run
-  an x86 kernel on Apple Silicon.
-- The kernel is booted as a raw arm64 `Image`; the packaged `Image.zst` is
-  decompressed by `darwin-actiond` before VM startup.
-- Runtime selection is limited to the glibc versions currently packaged.
+- The REAPI surface is intentionally focused on the methods Bazel uses here.
+- Remote cache compression is not supported yet.
+- Cgroup limits are best-effort.
+- VM mode is arm64 Linux on Apple Silicon.
+- Runtime selection is limited to the packaged glibc versions.
