@@ -24,6 +24,30 @@ http_archive(
     urls = ["https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.xz"],
 )
 
+http_archive(
+    name = "apple_codesign_linux_aarch64",
+    build_file = "//third_party/apple_codesign:apple_codesign.BUILD.bazel",
+    sha256 = "4af92c87ddf52f5f2d1258a3b4e56c7dcb8f1b2468df744976c5f139e031961f",
+    strip_prefix = "apple-codesign-0.29.0-aarch64-unknown-linux-musl",
+    urls = ["https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-aarch64-unknown-linux-musl.tar.gz"],
+)
+
+http_archive(
+    name = "apple_codesign_linux_x86_64",
+    build_file = "//third_party/apple_codesign:apple_codesign.BUILD.bazel",
+    sha256 = "dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002",
+    strip_prefix = "apple-codesign-0.29.0-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"],
+)
+
+http_archive(
+    name = "apple_codesign_macos_universal",
+    build_file = "//third_party/apple_codesign:apple_codesign.BUILD.bazel",
+    sha256 = "d98372d5524226ccf9dc0eda03d4e4f5826182dabb2fc3f2bd303ed9113a748d",
+    strip_prefix = "apple-codesign-0.29.0-macos-universal",
+    urls = ["https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-macos-universal.tar.gz"],
+)
+
 archive_override(
     module_name = "linux.bzl",
     integrity = "sha256-RKmqSDg5pFZJxsgEPkR3A5BNmGgkLsnbkV65yc/srBI=",

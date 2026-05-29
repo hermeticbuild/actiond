@@ -248,11 +248,11 @@ run_vm_e2e() {
   )
 
   if [[ "${ACTIOND_E2E_STANDALONE:-0}" == "1" ]]; then
-    run_bazel build //cmd/darwin_actiond:darwin-actiond-standalone
-    server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-standalone)"
+    run_bazel build //cmd/darwin-actiond
+    server="$(bazel_output //cmd/darwin-actiond)"
   else
     run_bazel build \
-      //cmd/darwin_actiond:darwin-actiond-signed \
+      //cmd/darwin-actiond \
       //vm:linux_kernel_zst \
       //vm:initramfs \
       //runtimes:runtimes_squashfs
@@ -260,7 +260,7 @@ run_vm_e2e() {
     kernel="$(bazel_output //vm:linux_kernel_zst)"
     initramfs="$(bazel_output //vm:initramfs)"
     runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
-    server="$(bazel_output //cmd/darwin_actiond:darwin-actiond-signed)"
+    server="$(bazel_output //cmd/darwin-actiond)"
     server_args+=(
       --kernel="${kernel}"
       --initramfs="${initramfs}"

@@ -1,0 +1,68 @@
+load("@bazel_lib//lib:run_binary.bzl", "run_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+objc_library(
+    name = "vz_bridge",
+    srcs = ["vz_bridge.m"],
+    copts = [
+        "-fblocks",
+        "-fobjc-arc",
+    ],
+    sdk_frameworks = [
+        "Foundation",
+        "Virtualization",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+zig_binary(
+    name = "darwin-actiond-bin",
+    main = "main.zig",
+    strip_debug_symbols = True,
+    target_compatible_with = ["@platforms//os:macos"],
+    deps = [
+        ":darwin-payload-sections",
+        ":vz_bridge",
+        "//src:actiond",
+        "@zstd",
+    ],
+)
+
+cc_library(
+    name = "darwin-payload-sections",
+    additional_linker_inputs = [
+        "//runtimes:runtimes_squashfs_aarch64",
+        "//vm:initramfs",
+        "//vm:linux_kernel_zst",
+    ],
+    linkopts = [
+        "-Wl,-sectcreate,__ACTIOND,__kernel,$(location //vm:linux_kernel_zst)",
+        "-Wl,-sectcreate,__ACTIOND,__initramfs,$(location //vm:initramfs)",
+        "-Wl,-sectcreate,__ACTIOND,__runtimes,$(location //runtimes:runtimes_squashfs_aarch64)",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+run_binary(
+    name = "darwin-actiond-signed",
+    srcs = [
+        ":darwin-actiond-bin",
+        "darwin-actiond.entitlements",
+    ],
+    outs = ["darwin-actiond"],
+    args = [
+        "sign",
+        "--entitlements-xml-file",
+        "$(location darwin-actiond.entitlements)",
+        "--binary-identifier",
+        "darwin-actiond",
+        "$(location :darwin-actiond-bin)",
+        "$@",
+    ],
+    mnemonic = "Codesign",
+    target_compatible_with = ["@platforms//os:macos"],
+    tool = "//third_party/apple_codesign:rcodesign",
+    visibility = ["//visibility:public"],
+)

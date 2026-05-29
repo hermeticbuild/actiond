@@ -30,8 +30,8 @@ cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
 run_vm="${ACTIOND_LLVM_SMOKE_VM:-1}"
 run_mac_host="${ACTIOND_LLVM_SMOKE_MAC_HOST:-1}"
 executor_timing_logs="${ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS:-1}"
-server_target="${ACTIOND_LLVM_SMOKE_SERVER_TARGET:-//cmd/darwin_actiond:darwin-actiond-standalone_pkg}"
-server_script_path="${ACTIOND_LLVM_SMOKE_SERVER_SCRIPT_PATH:-/tmp/darwin-actiond-standalone}"
+server_target="${ACTIOND_LLVM_SMOKE_SERVER_TARGET:-//cmd/darwin-actiond}"
+server_script_path="${ACTIOND_LLVM_SMOKE_SERVER_SCRIPT_PATH:-/tmp/darwin-actiond}"
 build_mode_flags=(
   -c opt
   --strip=always

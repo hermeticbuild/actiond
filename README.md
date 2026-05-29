@@ -30,7 +30,7 @@ The repo is fully Bazelized:
 Important targets:
 
 ```bash
-bazel build //cmd/darwin_actiond:darwin-actiond-standalone
+bazel build //cmd/darwin-actiond
 bazel build //cmd/linux_actiond:linux-actiond-standalone \
   --platforms=//platforms:linux_aarch64
 bazel build //cmd/linux_actiond:linux-actiond-standalone \
@@ -53,7 +53,7 @@ bazel build //vm:linux_kernel_zst
 For optimized artifacts:
 
 ```bash
-bazel build -c opt //cmd/darwin_actiond:darwin-actiond-standalone_pkg
+bazel build -c opt //cmd/darwin-actiond
 bazel build -c opt //cmd/linux_actiond:linux-actiond-standalone_pkg \
   --platforms=//platforms:linux_aarch64
 bazel build -c opt //cmd/linux_actiond:linux-actiond-standalone_pkg \
@@ -67,8 +67,8 @@ bazel build -c opt //cmd/linux_actiond:linux-actiond-standalone_pkg \
 Build and run the standalone Darwin worker:
 
 ```bash
-bazel build //cmd/darwin_actiond:darwin-actiond-standalone
-bazel-bin/cmd/darwin_actiond/darwin-actiond-standalone serve-vm \
+bazel build //cmd/darwin-actiond
+bazel-bin/cmd/darwin-actiond/darwin-actiond serve-vm \
   --listen=127.0.0.1:8980 \
   --root=/tmp/actiond-vm
 ```

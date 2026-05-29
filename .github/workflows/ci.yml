@@ -1,0 +1,25 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  macos-release-binary:
+    name: macOS release binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        run: .github/workflows/build_macos_release.sh release
