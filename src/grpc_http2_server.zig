@@ -267,6 +267,7 @@ pub const max_frame_payload_len = 16 * 1024 * 1024;
 const response_frame_payload_len = http2_frame.default_max_frame_size;
 const default_max_concurrent_streams = 128;
 const inbound_initial_window_size = 1024 * 1024 * 1024;
+const inbound_window_update_batch_size = 1024 * 1024;
 const grpc_response_headers = [_]http2_hpack.HeaderView{
     .{ .name = ":status", .value = "200" },
     .{ .name = "content-type", .value = "application/grpc" },
@@ -293,6 +294,9 @@ var grpc_response_concurrency_waits = std.atomic.Value(u64).init(0);
 var grpc_success_fast_paths = std.atomic.Value(u64).init(0);
 var grpc_success_fast_bytes = std.atomic.Value(u64).init(0);
 var grpc_success_fallbacks = std.atomic.Value(u64).init(0);
+var grpc_window_update_flushes = std.atomic.Value(u64).init(0);
+var grpc_window_update_connection_bytes = std.atomic.Value(u64).init(0);
+var grpc_window_update_stream_bytes = std.atomic.Value(u64).init(0);
 var grpc_data_frames = std.atomic.Value(u64).init(0);
 var grpc_data_bytes = std.atomic.Value(u64).init(0);
 var grpc_file_payload_frames = std.atomic.Value(u64).init(0);
@@ -322,6 +326,9 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
             \\grpc_success_fast_paths {d}
             \\grpc_success_fast_bytes {d}
             \\grpc_success_fallbacks {d}
+            \\grpc_window_update_flushes {d}
+            \\grpc_window_update_connection_bytes {d}
+            \\grpc_window_update_stream_bytes {d}
             \\grpc_data_frames {d}
             \\grpc_data_bytes {d}
             \\grpc_file_payload_frames {d}
@@ -343,6 +350,9 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
             grpc_success_fast_paths.load(.monotonic),
             grpc_success_fast_bytes.load(.monotonic),
             grpc_success_fallbacks.load(.monotonic),
+            grpc_window_update_flushes.load(.monotonic),
+            grpc_window_update_connection_bytes.load(.monotonic),
+            grpc_window_update_stream_bytes.load(.monotonic),
             grpc_data_frames.load(.monotonic),
             grpc_data_bytes.load(.monotonic),
             grpc_file_payload_frames.load(.monotonic),
@@ -379,6 +389,7 @@ const StreamState = struct {
     header_block: std.ArrayListUnmanaged(u8) = .empty,
     body: std.ArrayListUnmanaged(u8) = .empty,
     client_stream: ?ClientStream = null,
+    inbound_window_update_pending: usize = 0,
 
     fn init(id: u31) StreamState {
         return .{ .id = id };
@@ -397,6 +408,7 @@ const SharedHttp2Writer = struct {
     mutex: std.Io.Mutex = .init,
     flow: FlowControl = .{},
     writer: *std.Io.Writer,
+    inbound_connection_window_update_pending: usize = 0,
 
     fn deinit(self: *SharedHttp2Writer, allocator: std.mem.Allocator) void {
         self.flow.deinit(allocator);
@@ -448,13 +460,42 @@ const SharedHttp2Writer = struct {
         try self.writer.flush();
     }
 
-    fn sendWindowUpdates(self: *SharedHttp2Writer, io: std.Io, stream_id: u31, len: usize) !void {
+    fn sendWindowUpdates(
+        self: *SharedHttp2Writer,
+        io: std.Io,
+        state: *StreamState,
+        len: usize,
+        end_stream: bool,
+    ) !void {
         if (len == 0) return;
+        self.inbound_connection_window_update_pending += len;
+        state.inbound_window_update_pending += len;
+
+        const connection_len = if (self.inbound_connection_window_update_pending >= inbound_window_update_batch_size)
+            self.inbound_connection_window_update_pending
+        else
+            0;
+        const stream_len = if (!end_stream and state.inbound_window_update_pending >= inbound_window_update_batch_size)
+            state.inbound_window_update_pending
+        else
+            0;
+        if (connection_len == 0 and stream_len == 0) return;
+
+        if (connection_len != 0) self.inbound_connection_window_update_pending = 0;
+        if (stream_len != 0) state.inbound_window_update_pending = 0;
+
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
-        try sendWindowUpdate(self.writer, 0, len);
-        try sendWindowUpdate(self.writer, stream_id, len);
+        if (connection_len != 0) {
+            try sendWindowUpdate(self.writer, 0, connection_len);
+            addStat(&grpc_window_update_connection_bytes, connection_len);
+        }
+        if (stream_len != 0) {
+            try sendWindowUpdate(self.writer, state.id, stream_len);
+            addStat(&grpc_window_update_stream_bytes, stream_len);
+        }
         try self.writer.flush();
+        addStat(&grpc_window_update_flushes, 1);
     }
 
     fn sendGrpcSuccess(self: *SharedHttp2Writer, io: std.Io, stream_id: u31, response_body: []const u8) !void {
@@ -1030,8 +1071,9 @@ fn handleConnectionStreamsTracked(
                 } else {
                     try state.body.appendSlice(allocator, data);
                 }
-                try shared_writer.sendWindowUpdates(io, incoming.header.stream_id, data.len);
-                if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_stream)) {
+                const end_stream = http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_stream);
+                try shared_writer.sendWindowUpdates(io, state, data.len, end_stream);
+                if (end_stream) {
                     try respondAndRemove(io, allocator, dispatcher, &shared_writer, &responses, &response_tasks, &streams, incoming.header.stream_id);
                 }
             },
