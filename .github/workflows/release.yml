@@ -39,6 +39,5 @@ jobs:
           fi
           gh release upload "${TAG_NAME}" \
             release/darwin-actiond_macos_arm64 \
-            release/darwin-actiond_macos_arm64.tar.gz \
             release/SHA256.txt \
             --clobber
