@@ -52,6 +52,8 @@ http_archive(
 archive_override(
     module_name = "linux.bzl",
     integrity = "sha256-yPhL0CYmmsOZK8TgRDFlMF2t8QJ4kSLi0HXk1eevkA0=",
+    patch_strip = 1,
+    patches = ["//third_party/patches:linux_bzl_tools_docker_repro.patch"],
     strip_prefix = "linux.bzl-999522d71d920e6b825b8615eee81bdf1a749ebc",
     urls = ["https://github.com/hermeticbuild/linux.bzl/archive/999522d71d920e6b825b8615eee81bdf1a749ebc.tar.gz"],
 )

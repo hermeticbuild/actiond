@@ -1,4 +1,5 @@
 exports_files([
+    "linux_bzl_tools_docker_repro.patch",
     "llvm_musl_root_package_copy.patch",
     "zstd_no_pthread.patch",
 ])
