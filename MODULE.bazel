@@ -50,9 +50,9 @@ http_archive(
 
 archive_override(
     module_name = "linux.bzl",
-    integrity = "sha256-RKmqSDg5pFZJxsgEPkR3A5BNmGgkLsnbkV65yc/srBI=",
-    strip_prefix = "linux.bzl-7ececc50ab88b592a9f102f79163517899c3661d",
-    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/7ececc50ab88b592a9f102f79163517899c3661d.tar.gz"],
+    integrity = "sha256-oIapRqM7p5Yujk/Nvs86tZp9FW644Z9EUTDAbtL0IP4=",
+    strip_prefix = "linux.bzl-dab5cffac221bc1a58fe4e00c9e0ca3c24e4d6cf",
+    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/dab5cffac221bc1a58fe4e00c9e0ca3c24e4d6cf.tar.gz"],
 )
 
 single_version_override(
