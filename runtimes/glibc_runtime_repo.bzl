@@ -1,6 +1,79 @@
 def _json_string(value):
     return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+_MAX_RUNTIME_TREE_ENTRIES = 2000000
+
+def _delete_paths(rctx, paths):
+    for path in paths:
+        rctx.delete(path)
+
+def _delete_gconv_dirs(rctx):
+    dirs = [rctx.path("root")]
+    for _ in range(_MAX_RUNTIME_TREE_ENTRIES):
+        if not dirs:
+            return
+
+        path = dirs.pop()
+        for child in path.readdir(watch = "no"):
+            if _is_symlink(child):
+                continue
+            if child.basename == "gconv" and child.is_dir:
+                rctx.delete(child)
+            elif child.is_dir:
+                dirs.append(child)
+
+    fail("runtime tree exceeds max entry limit %d while pruning gconv directories" % _MAX_RUNTIME_TREE_ENTRIES)
+
+def _is_symlink(path):
+    return str(path.realpath) != str(path)
+
+def _runtime_symlink_target(root, path):
+    root_real = str(root.realpath)
+    target_real = str(path.realpath)
+    if target_real == root_real:
+        return "/"
+
+    root_prefix = root_real + "/"
+    if target_real.startswith(root_prefix):
+        return "/" + target_real[len(root_prefix):]
+
+    fail("runtime symlink %s points outside runtime root: %s" % (path, target_real))
+
+def _runtime_entries(root):
+    entries = []
+    paths = [("", root)]
+    for _ in range(_MAX_RUNTIME_TREE_ENTRIES):
+        if not paths:
+            return entries
+
+        rel, path = paths.pop()
+        if rel and _is_symlink(path):
+            entries.append(("s", rel, _runtime_symlink_target(root, path)))
+            continue
+
+        if rel:
+            if path.is_dir:
+                entries.append(("d", rel, ""))
+            else:
+                entries.append(("f", rel, ""))
+
+        if path.is_dir:
+            children = {}
+            for child in path.readdir(watch = "no"):
+                children[child.basename] = child
+            for child_name in sorted(children.keys(), reverse = True):
+                child_rel = child_name if not rel else rel + "/" + child_name
+                paths.append((child_rel, children[child_name]))
+
+    fail("runtime tree exceeds max entry limit %d while writing squashfs entries" % _MAX_RUNTIME_TREE_ENTRIES)
+
+def _write_runtime_entries(rctx):
+    root = rctx.path("root")
+    lines = []
+    for kind, rel, target in _runtime_entries(root):
+        lines.append("%s\t%s\t%s" % (kind, rel, target))
+    rctx.file("squashfs_entries.txt", "\n".join(lines) + "\n", executable = False)
+
 def _glibc_deb_runtime_impl(rctx):
     if len(rctx.attr.urls) != len(rctx.attr.sha256s):
         fail("urls and sha256s must have the same length")
@@ -24,51 +97,19 @@ def _glibc_deb_runtime_impl(rctx):
         if not extracted:
             fail("unsupported .deb payload compression for %s" % url)
 
-    rctx.execute([
-        "/bin/sh",
-        "-c",
-        """
-set -euo pipefail
-rm -rf \
-  deb_* \
-  root/DEBIAN \
-  root/usr/share/doc \
-  root/usr/share/info \
-  root/usr/share/lintian \
-  root/usr/share/locale \
-  root/usr/share/man \
-  root/var
-find root -path '*/gconv' -type d -prune -exec rm -rf '{}' +
-mkdir -p root/etc
-cat > root/etc/hosts <<'EOF'
-127.0.0.1 localhost
-::1 localhost ip6-localhost ip6-loopback
-EOF
-cat > root/etc/nsswitch.conf <<'EOF'
-passwd: files
-group: files
-hosts: files dns
-EOF
-(
-  cd root
-  root="$PWD"
-  find . -mindepth 1 -print | LC_ALL=C sort | while IFS= read -r path; do
-    rel="${path#./}"
-    if [ -L "${path}" ]; then
-      target="$(readlink "${path}")"
-      case "${target}" in
-        "${root}"/*) target="/${target#"${root}/"}" ;;
-      esac
-      printf 's\t%s\t%s\n' "${rel}" "${target}"
-    elif [ -d "${path}" ]; then
-      printf 'd\t%s\t\n' "${rel}"
-    elif [ -f "${path}" ]; then
-      printf 'f\t%s\t\n' "${rel}"
-    fi
-  done
-) > squashfs_entries.txt
-""",
-    ])
+    _delete_paths(rctx, [
+        "root/DEBIAN",
+        "root/usr/share/doc",
+        "root/usr/share/info",
+        "root/usr/share/lintian",
+        "root/usr/share/locale",
+        "root/usr/share/man",
+        "root/var",
+    ] + ["deb_%d" % i for i in range(len(rctx.attr.urls))])
+    _delete_gconv_dirs(rctx)
+    rctx.file("root/etc/hosts", "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n", executable = False)
+    rctx.file("root/etc/nsswitch.conf", "passwd: files\ngroup: files\nhosts: files dns\n", executable = False)
+    _write_runtime_entries(rctx)
 
     manifest = """{
   "name": %s,
