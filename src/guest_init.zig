@@ -37,10 +37,19 @@ const runtime_device_wait_ns = 100 * std.time.ns_per_ms;
 pub const runtimes_mount_target: [:0]const u8 = "/runtimes";
 pub const cas_mount_target: [:0]const u8 = "/cas";
 pub const cas_mount_fstype: [:0]const u8 = "ext4";
+pub const cas_format_cmdline_token = "actiond.format_cas=1";
+pub const cas_mkfs_path = "/sbin/mkfs.ext4";
+pub const cas_format_device = block_devices[0];
 const cas_mount_flags = std.os.linux.MS.NOSUID |
     std.os.linux.MS.NODEV |
     std.os.linux.MS.NOATIME;
 pub const worker_argv = [_][]const u8{ "/actiond", "--guest-worker" };
+
+const CasMountAttempt = enum {
+    mounted,
+    unavailable,
+    rejected,
+};
 
 pub fn run(io: std.Io) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
@@ -52,7 +61,7 @@ pub fn run(io: std.Io) !void {
     for (mounts) |mount_spec| {
         try mount(stderr, mount_spec);
     }
-    try mountCasStore(io, stderr);
+    try mountCasStore(io, stderr, readCasFormatFlag(io));
     try mountRuntimeImage(io, stderr);
     stderr.writeAll("linux-actiond guest init mounted filesystems; starting worker\n") catch {};
     stderr.flush() catch {};
@@ -60,11 +69,23 @@ pub fn run(io: std.Io) !void {
     return std.process.replace(io, .{ .argv = &worker_argv });
 }
 
-fn mountCasStore(io: std.Io, stderr: *std.Io.Writer) !void {
+fn mountCasStore(io: std.Io, stderr: *std.Io.Writer, format_if_needed: bool) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
     for (0..runtime_device_wait_attempts) |_| {
-        if (try mountFirstCasDevice(io, stderr)) return;
+        if (format_if_needed) {
+            switch (try tryMountCasDevice(stderr, cas_format_device)) {
+                .mounted => return,
+                .unavailable => {},
+                .rejected => {
+                    try formatCasDevice(io, stderr, cas_format_device);
+                    if (try tryMountCasDevice(stderr, cas_format_device) == .mounted) return;
+                    stderr.print("formatted CAS block device {s} did not mount as ext4\n", .{cas_format_device}) catch {};
+                    stderr.flush() catch {};
+                    return error.MountFailed;
+                },
+            }
+        } else if (try mountFirstCasDevice(io, stderr)) return;
         sleepRuntimeDevicePollInterval();
     }
 
@@ -95,7 +116,7 @@ fn mountFirstRuntimeDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
 
 fn mountFirstCasDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
     for (block_devices) |device| {
-        if (try tryMountCasDevice(stderr, device)) return true;
+        if (try tryMountCasDevice(stderr, device) == .mounted) return true;
     }
     return try mountSysBlockCasDevice(io, stderr);
 }
@@ -127,7 +148,7 @@ fn mountSysBlockCasDevice(io: std.Io, stderr: *std.Io.Writer) !bool {
 
         var device_buffer: [128]u8 = undefined;
         const device = std.fmt.bufPrintZ(&device_buffer, "/dev/{s}", .{entry.name}) catch continue;
-        if (try tryMountCasDevice(stderr, device)) return true;
+        if (try tryMountCasDevice(stderr, device) == .mounted) return true;
     }
     return false;
 }
@@ -173,13 +194,13 @@ fn tryMountRuntimeDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
     }
 }
 
-fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
+fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !CasMountAttempt {
     const linux = std.os.linux;
     const fd_rc = linux.open(device.ptr, .{ .CLOEXEC = true }, 0);
     switch (std.posix.errno(fd_rc)) {
         .SUCCESS => _ = linux.close(@intCast(fd_rc)),
-        .NOENT, .NXIO, .NODEV, .NOTBLK => return false,
-        else => return false,
+        .NOENT, .NXIO, .NODEV, .NOTBLK => return .unavailable,
+        else => return .unavailable,
     }
 
     const data: [:0]const u8 = "errors=remount-ro";
@@ -194,9 +215,10 @@ fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
         .SUCCESS => {
             stderr.print("mounted guest CAS from {s}\n", .{device}) catch {};
             stderr.flush() catch {};
-            return true;
+            return .mounted;
         },
-        .INVAL, .NODEV, .NXIO, .NOENT, .BUSY => return false,
+        .INVAL => return .rejected,
+        .NODEV, .NXIO, .NOENT, .BUSY => return .unavailable,
         else => |errno| {
             stderr.print("mount guest CAS {s} on {s} failed: {s}\n", .{
                 device,
@@ -207,6 +229,68 @@ fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
             return error.MountFailed;
         },
     }
+}
+
+fn formatCasDevice(io: std.Io, stderr: *std.Io.Writer, device: [:0]const u8) !void {
+    const argv = [_][]const u8{ cas_mkfs_path, "-F", "-q", "-t", "ext4", device };
+
+    stderr.print("formatting new guest CAS image on {s}\n", .{device}) catch {};
+    stderr.flush() catch {};
+
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch |err| {
+        stderr.print("spawn {s} failed: {s}\n", .{ cas_mkfs_path, @errorName(err) }) catch {};
+        stderr.flush() catch {};
+        return error.MountFailed;
+    };
+    errdefer child.kill(io);
+
+    const term = child.wait(io) catch |err| {
+        stderr.print("{s} wait failed: {s}\n", .{ cas_mkfs_path, @errorName(err) }) catch {};
+        stderr.flush() catch {};
+        return error.MountFailed;
+    };
+    switch (term) {
+        .exited => |code| if (code == 0) return,
+        .signal => |signal| {
+            stderr.print("{s} terminated by signal {d}\n", .{ cas_mkfs_path, @intFromEnum(signal) }) catch {};
+            stderr.flush() catch {};
+            return error.MountFailed;
+        },
+        .stopped => |signal| {
+            stderr.print("{s} stopped by signal {d}\n", .{ cas_mkfs_path, @intFromEnum(signal) }) catch {};
+            stderr.flush() catch {};
+            return error.MountFailed;
+        },
+        .unknown => |status| {
+            stderr.print("{s} exited with unknown status {d}\n", .{ cas_mkfs_path, status }) catch {};
+            stderr.flush() catch {};
+            return error.MountFailed;
+        },
+    }
+
+    stderr.print("{s} exited unsuccessfully\n", .{cas_mkfs_path}) catch {};
+    stderr.flush() catch {};
+    return error.MountFailed;
+}
+
+fn readCasFormatFlag(io: std.Io) bool {
+    var buffer: [4096]u8 = undefined;
+    const cmdline = std.Io.Dir.cwd().readFile(io, "/proc/cmdline", &buffer) catch return false;
+    return cmdlineRequestsCasFormat(cmdline);
+}
+
+fn cmdlineRequestsCasFormat(cmdline: []const u8) bool {
+    var tokens = std.mem.splitScalar(u8, cmdline, ' ');
+    while (tokens.next()) |raw_token| {
+        const token = std.mem.trim(u8, raw_token, " \t\r\n");
+        if (std.mem.eql(u8, token, cas_format_cmdline_token)) return true;
+    }
+    return false;
 }
 
 fn sleepRuntimeDevicePollInterval() void {
@@ -246,6 +330,9 @@ test "guest init mount plan stays minimal" {
     try std.testing.expectEqual(@as(usize, 6), mounts.len);
     try std.testing.expectEqualStrings("ext4", cas_mount_fstype);
     try std.testing.expectEqualStrings("/cas", cas_mount_target);
+    try std.testing.expectEqualStrings("actiond.format_cas=1", cas_format_cmdline_token);
+    try std.testing.expectEqualStrings("/sbin/mkfs.ext4", cas_mkfs_path);
+    try std.testing.expectEqualStrings("/dev/vda", cas_format_device);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOSUID) != 0);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NODEV) != 0);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOATIME) != 0);
@@ -256,4 +343,12 @@ test "guest init mount plan stays minimal" {
         try std.testing.expect(!std.mem.eql(u8, mount_spec.fstype, "nfs"));
         try std.testing.expect(!std.mem.eql(u8, mount_spec.fstype, "cifs"));
     }
+}
+
+test "guest init parses CAS format kernel flag as a token" {
+    try std.testing.expect(cmdlineRequestsCasFormat("console=hvc0 actiond.format_cas=1 quiet\n"));
+    try std.testing.expect(cmdlineRequestsCasFormat("actiond.format_cas=1"));
+    try std.testing.expect(!cmdlineRequestsCasFormat("console=hvc0 quiet"));
+    try std.testing.expect(!cmdlineRequestsCasFormat("fooactiond.format_cas=1"));
+    try std.testing.expect(!cmdlineRequestsCasFormat("actiond.format_cas=0"));
 }

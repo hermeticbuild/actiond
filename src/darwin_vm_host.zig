@@ -135,7 +135,7 @@ pub fn serve(
         "";
     defer if (options.cas_image == null) allocator.free(owned_cas_image_path);
     const cas_image_path = options.cas_image orelse owned_cas_image_path;
-    try ensureCasImageFile(io, cas_image_path, options.cas_image_size_mib);
+    const format_cas_image = try ensureCasImageFile(io, cas_image_path, options.cas_image_size_mib);
 
     const embedded_kernel = if (options.kernel == null)
         try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.kernel_name)
@@ -167,11 +167,12 @@ pub fn serve(
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas_image={s}\n", .{
+    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas_image={s} format_cas_image={}\n", .{
         boot_kernel_path,
         boot_initramfs_path,
         runtime_image_path orelse "<none>",
         cas_image_path,
+        format_cas_image,
     });
     try stderr.flush();
 
@@ -180,6 +181,7 @@ pub fn serve(
         .initramfs_path = boot_initramfs_path,
         .runtime_image_path = runtime_image_path,
         .cas_image_path = cas_image_path,
+        .format_cas_image = format_cas_image,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
         .start_timeout_ms = options.start_timeout_ms,
@@ -245,10 +247,10 @@ fn createParentDirs(io: std.Io, path: []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(io, path[0..slash]);
 }
 
-fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !void {
+fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !bool {
     if (std.Io.Dir.cwd().statFile(io, path, .{})) |stat| {
         if (stat.kind != .file) return error.InvalidCasImage;
-        return;
+        return false;
     } else |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
@@ -259,6 +261,7 @@ fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !void {
     defer file.close(io);
     const size_bytes = try std.math.mul(u64, size_mib, 1024 * 1024);
     try file.setLength(io, size_bytes);
+    return true;
 }
 
 fn parseU32(value: []const u8) !u32 {

@@ -2,10 +2,15 @@ load("@linux.bzl//:linux.bzl", "linux")
 
 genrule(
     name = "initramfs",
-    srcs = ["//cmd/linux_actiond_guest:linux-actiond-guest-aarch64"],
+    srcs = [
+        "//cmd/linux_actiond_guest:linux-actiond-guest-aarch64",
+    ],
     outs = ["initramfs.cpio.zst"],
-    cmd = "$(execpath //tools:initramfs_newc) $@ $(location //cmd/linux_actiond_guest:linux-actiond-guest-aarch64)",
-    tools = ["//tools:initramfs_newc"],
+    cmd = "$(execpath //tools:initramfs_newc) $@ $(location //cmd/linux_actiond_guest:linux-actiond-guest-aarch64) --file=$(execpath //third_party/e2fsprogs:mkfs_ext4_linux_aarch64)=/sbin/mkfs.ext4",
+    tools = [
+        "//third_party/e2fsprogs:mkfs_ext4_linux_aarch64",
+        "//tools:initramfs_newc",
+    ],
     visibility = ["//visibility:public"],
 )
 

@@ -139,7 +139,6 @@ run_smoke() {
   local elapsed
 
   mkdir -p "${output_root}"
-  "${repo_root}/tools/create_ext4_image.sh" "${cas_image}" "${cas_image_size_mib}"
   server="$(prepare_server)"
   server_log="${output_root}/darwin-actiond-vm.log"
 

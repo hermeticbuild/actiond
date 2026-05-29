@@ -1,9 +1,10 @@
 common --enable_platform_specific_config
 common --@rules_zig//zig/settings:use_cc_common_link=true
 common --@rules_zig//zig/settings:mode=release_fast
+common --stripopt=--strip-all
 
-build:linux --sandbox_add_mount_pair=/tmp
-build:macos --sandbox_add_mount_pair=/var/tmp
+common:linux --sandbox_add_mount_pair=/tmp
+common:macos --sandbox_add_mount_pair=/var/tmp
 
 common:remote --jobs=500
 common:remote --extra_execution_platforms=@llvm//:rbe_platform

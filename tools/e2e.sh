@@ -238,7 +238,6 @@ run_vm_e2e() {
   log="${root}/darwin-actiond-vm.log"
   cas_image="${ACTIOND_VM_CAS_IMAGE:-${root}/server/cas.ext4}"
   cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
-  "${repo_root}/tools/create_ext4_image.sh" "${cas_image}" "${cas_image_size_mib}"
   server_args=(
     --listen="${endpoint}"
     --root="${root}/server"

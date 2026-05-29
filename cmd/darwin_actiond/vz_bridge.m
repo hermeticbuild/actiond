@@ -61,6 +61,7 @@ void *actiond_vm_start(
     const char *initramfs_path,
     const char *runtime_image_path,
     const char *cas_image_path,
+    int format_cas_image,
     uint64_t memory_mib,
     uint32_t cpu_count,
     uint32_t start_timeout_ms,
@@ -79,7 +80,11 @@ void *actiond_vm_start(
 
         VZLinuxBootLoader *bootLoader = [[VZLinuxBootLoader alloc] initWithKernelURL:kernelURL];
         bootLoader.initialRamdiskURL = initramfsURL;
-        bootLoader.commandLine = @"console=hvc0 init=/init panic=-1 quiet";
+        NSMutableString *commandLine = [NSMutableString stringWithString:@"console=hvc0 init=/init panic=-1 quiet"];
+        if (format_cas_image != 0) {
+            [commandLine appendString:@" actiond.format_cas=1"];
+        }
+        bootLoader.commandLine = commandLine;
 
         NSError *casError = nil;
         VZDiskImageStorageDeviceAttachment *casAttachment =

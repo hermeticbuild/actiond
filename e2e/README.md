@@ -21,13 +21,12 @@ Start `darwin-actiond serve-vm` on `127.0.0.1:8998` before running it. The
 script runs `bazel clean --expunge` by default so a fresh worker CAS gets a full
 upload.
 
-VM mode expects a writable ext4 CAS image attached as virtio-blk. The runner
-creates one automatically with `tools/create_ext4_image.sh`; set
+VM mode expects a writable ext4 CAS image attached as virtio-blk. `serve-vm`
+creates a sparse image when the configured path is missing, and the guest
+formats that newly-created image before mounting it. Set
 `ACTIOND_VM_CAS_IMAGE=/path/cas.ext4` to reuse a persistent image, and
-`ACTIOND_VM_CAS_IMAGE_SIZE_MIB=8192` to override the default sparse size. If
-the host lacks `mkfs.ext4`, the helper formats through Docker; set
-`ACTIOND_EXT4_IMAGE_DOCKER_IMAGE` to use an image that already contains
-`mkfs.ext4` and avoid package installation during the run.
+`ACTIOND_VM_CAS_IMAGE_SIZE_MIB=8192` to override the default sparse size.
+Existing images are never reformatted automatically.
 
 ## LLVM VM Smoke Runner
 
