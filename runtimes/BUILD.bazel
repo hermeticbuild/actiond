@@ -1,3 +1,5 @@
+load(":squashfs.bzl", "runtime_squashfs")
+
 config_setting(
     name = "target_aarch64",
     constraint_values = ["@platforms//cpu:aarch64"],
@@ -24,96 +26,26 @@ alias(
     visibility = ["//visibility:public"],
 )
 
-genrule(
+runtime_squashfs(
     name = "runtimes_squashfs_aarch64",
-    srcs = [
-        "@glibc_2_31_aarch64//:runtime_manifest.json",
-        "@glibc_2_31_aarch64//:tree",
-        "@glibc_2_35_aarch64//:runtime_manifest.json",
-        "@glibc_2_35_aarch64//:tree",
-        "@glibc_2_39_aarch64//:runtime_manifest.json",
-        "@glibc_2_39_aarch64//:tree",
+    arch = "aarch64",
+    out = "runtimes-aarch64.sqfs",
+    runtimes = [
+        ("glibc_2_31_aarch64", "glibc2.31"),
+        ("glibc_2_35_aarch64", "glibc2.35"),
+        ("glibc_2_39_aarch64", "glibc2.39"),
     ],
-    outs = ["runtimes-aarch64.sqfs"],
-    cmd = """
-set -euo pipefail
-tree="$(@D)/runtimes-tree-aarch64"
-rm -rf "$${tree}"
-mkdir -p "$${tree}/libc"
-mkdir -p "$${tree}/common/root/etc"
-cat > "$${tree}/common/root/etc/hosts" <<'EOF'
-127.0.0.1 localhost
-::1 localhost ip6-localhost ip6-loopback
-EOF
-cat > "$${tree}/common/root/etc/nsswitch.conf" <<'EOF'
-passwd: files
-group: files
-hosts: files dns
-EOF
-
-copy_runtime() {
-  local repo_root="$$1"
-  local libc="$$2"
-  local arch="$$3"
-  local dest="$${tree}/libc/$${libc}/$${arch}"
-  mkdir -p "$${dest}"
-  cp -RL "$${repo_root}/root" "$${dest}/root"
-  cp "$${repo_root}/runtime_manifest.json" "$${dest}/runtime_manifest.json"
-}
-
-copy_runtime "$$(dirname "$(location @glibc_2_31_aarch64//:runtime_manifest.json)")" glibc2.31 aarch64
-copy_runtime "$$(dirname "$(location @glibc_2_35_aarch64//:runtime_manifest.json)")" glibc2.35 aarch64
-copy_runtime "$$(dirname "$(location @glibc_2_39_aarch64//:runtime_manifest.json)")" glibc2.39 aarch64
-
-"$(execpath //tools:sqfs_pack)" "$${tree}" "$@"
-""",
-    tools = ["//tools:sqfs_pack"],
     visibility = ["//visibility:public"],
 )
 
-genrule(
+runtime_squashfs(
     name = "runtimes_squashfs_x86_64",
-    srcs = [
-        "@glibc_2_31_x86_64//:runtime_manifest.json",
-        "@glibc_2_31_x86_64//:tree",
-        "@glibc_2_35_x86_64//:runtime_manifest.json",
-        "@glibc_2_35_x86_64//:tree",
-        "@glibc_2_39_x86_64//:runtime_manifest.json",
-        "@glibc_2_39_x86_64//:tree",
+    arch = "x86_64",
+    out = "runtimes-x86_64.sqfs",
+    runtimes = [
+        ("glibc_2_31_x86_64", "glibc2.31"),
+        ("glibc_2_35_x86_64", "glibc2.35"),
+        ("glibc_2_39_x86_64", "glibc2.39"),
     ],
-    outs = ["runtimes-x86_64.sqfs"],
-    cmd = """
-set -euo pipefail
-tree="$(@D)/runtimes-tree-x86_64"
-rm -rf "$${tree}"
-mkdir -p "$${tree}/libc"
-mkdir -p "$${tree}/common/root/etc"
-cat > "$${tree}/common/root/etc/hosts" <<'EOF'
-127.0.0.1 localhost
-::1 localhost ip6-localhost ip6-loopback
-EOF
-cat > "$${tree}/common/root/etc/nsswitch.conf" <<'EOF'
-passwd: files
-group: files
-hosts: files dns
-EOF
-
-copy_runtime() {
-  local repo_root="$$1"
-  local libc="$$2"
-  local arch="$$3"
-  local dest="$${tree}/libc/$${libc}/$${arch}"
-  mkdir -p "$${dest}"
-  cp -RL "$${repo_root}/root" "$${dest}/root"
-  cp "$${repo_root}/runtime_manifest.json" "$${dest}/runtime_manifest.json"
-}
-
-copy_runtime "$$(dirname "$(location @glibc_2_31_x86_64//:runtime_manifest.json)")" glibc2.31 x86_64
-copy_runtime "$$(dirname "$(location @glibc_2_35_x86_64//:runtime_manifest.json)")" glibc2.35 x86_64
-copy_runtime "$$(dirname "$(location @glibc_2_39_x86_64//:runtime_manifest.json)")" glibc2.39 x86_64
-
-"$(execpath //tools:sqfs_pack)" "$${tree}" "$@"
-""",
-    tools = ["//tools:sqfs_pack"],
     visibility = ["//visibility:public"],
 )

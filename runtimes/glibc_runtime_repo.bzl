@@ -49,6 +49,24 @@ passwd: files
 group: files
 hosts: files dns
 EOF
+(
+  cd root
+  root="$PWD"
+  find . -mindepth 1 -print | LC_ALL=C sort | while IFS= read -r path; do
+    rel="${path#./}"
+    if [ -L "${path}" ]; then
+      target="$(readlink "${path}")"
+      case "${target}" in
+        "${root}"/*) target="/${target#"${root}/"}" ;;
+      esac
+      printf 's\t%s\t%s\n' "${rel}" "${target}"
+    elif [ -d "${path}" ]; then
+      printf 'd\t%s\t\n' "${rel}"
+    elif [ -f "${path}" ]; then
+      printf 'f\t%s\t\n' "${rel}"
+    fi
+  done
+) > squashfs_entries.txt
 """,
     ])
 
@@ -79,7 +97,10 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-exports_files(["runtime_manifest.json"])
+exports_files([
+    "runtime_manifest.json",
+    "squashfs_entries.txt",
+])
 """)
 
 glibc_deb_runtime = repository_rule(

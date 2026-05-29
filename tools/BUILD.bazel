@@ -23,15 +23,6 @@ zig_test(
 )
 
 zig_binary(
-    name = "sqfs_pack",
-    linkopts = ["-lc"],
-    main = "sqfs_pack.zig",
-    strip_debug_symbols = True,
-    visibility = ["//visibility:public"],
-    deps = ["@zstd"],
-)
-
-zig_binary(
     name = "zstd_file",
     linkopts = ["-lc"],
     main = "zstd_file.zig",
@@ -60,13 +51,6 @@ zig_test(
     name = "initramfs_newc_tests",
     linkopts = ["-lc"],
     main = "initramfs_newc.zig",
-    deps = ["@zstd"],
-)
-
-zig_test(
-    name = "sqfs_pack_tests",
-    linkopts = ["-lc"],
-    main = "sqfs_pack.zig",
     deps = ["@zstd"],
 )
 
