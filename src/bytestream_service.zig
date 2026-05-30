@@ -24,44 +24,6 @@ var read_file_bytes = std.atomic.Value(u64).init(0);
 var read_buffer_records = std.atomic.Value(u64).init(0);
 var read_buffer_bytes = std.atomic.Value(u64).init(0);
 
-pub const ReadResult = struct {
-    response: bytestream.ReadResponse,
-
-    pub fn deinit(self: *ReadResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.response.data);
-        self.* = undefined;
-    }
-};
-
-pub fn read(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    request: bytestream.ReadRequest,
-) !ReadResult {
-    const resource = try bytestream.parseBlobResource(allocator, request.resource_name);
-    const blob = try store.readAlloc(io, allocator, resource.digest);
-    errdefer allocator.free(blob);
-
-    if (request.read_offset < 0) return error.InvalidOffset;
-    const offset: usize = @intCast(request.read_offset);
-    if (offset > blob.len) return error.InvalidOffset;
-
-    const available = blob.len - offset;
-    const limit: usize = if (request.read_limit <= 0)
-        available
-    else
-        @min(available, @as(usize, @intCast(request.read_limit)));
-
-    if (offset == 0 and limit == blob.len) {
-        return .{ .response = .{ .data = blob } };
-    }
-
-    const data = try allocator.dupe(u8, blob[offset..][0..limit]);
-    allocator.free(blob);
-    return .{ .response = .{ .data = data } };
-}
-
 pub fn writeReadGrpcRecords(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -200,49 +162,6 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
         defer allocator.free(text);
         try out.appendSlice(allocator, text);
     }
-}
-
-pub fn write(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    requests: []const bytestream.WriteRequest,
-) !bytestream.WriteResponse {
-    if (requests.len == 0) return error.EmptyWrite;
-
-    const resource_name = requests[0].resource_name;
-    if (resource_name.len == 0) return error.MissingResourceName;
-    const resource = try bytestream.parseBlobResource(allocator, resource_name);
-
-    var data: std.ArrayListUnmanaged(u8) = .empty;
-    defer data.deinit(allocator);
-
-    var finished = false;
-    for (requests) |request| {
-        if (request.resource_name.len != 0 and !std.mem.eql(u8, request.resource_name, resource_name)) {
-            return error.MissingResourceName;
-        }
-        if (request.write_offset < 0) return error.InvalidOffset;
-        if (@as(usize, @intCast(request.write_offset)) != data.items.len) return error.InvalidOffset;
-        try data.appendSlice(allocator, request.data);
-        if (request.finish_write) finished = true;
-    }
-    if (!finished) return error.IncompleteWrite;
-
-    const actual = cas.Digest.fromBytes(data.items);
-    if (!actual.eql(resource.digest)) return error.DigestMismatch;
-    _ = try store.putBytes(io, data.items);
-
-    return .{ .committed_size = @intCast(data.items.len) };
-}
-
-pub fn writeGrpcRecords(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    request_records: []const u8,
-) !bytestream.WriteResponse {
-    return try writeGrpcRecordsWithIndex(io, allocator, store, null, request_records);
 }
 
 pub fn writeGrpcRecordsWithIndex(
@@ -446,7 +365,7 @@ fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
     }
 }
 
-test "write assembles chunks and stores verified blob" {
+test "WriteGrpcStream assembles chunks and stores verified blob" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -460,15 +379,33 @@ test "write assembles chunks and stores verified blob" {
     );
     defer std.testing.allocator.free(resource_name);
 
-    const response = try write(std.testing.io, std.testing.allocator, store, &.{
-        .{ .resource_name = resource_name, .write_offset = 0, .data = "he" },
-        .{ .write_offset = 2, .data = "llo", .finish_write = true },
+    const first_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .resource_name = resource_name,
+        .write_offset = 0,
+        .data = "he",
     });
+    defer std.testing.allocator.free(first_proto);
+    const first_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = first_proto });
+    defer std.testing.allocator.free(first_record);
+    const second_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .write_offset = 2,
+        .data = "llo",
+        .finish_write = true,
+    });
+    defer std.testing.allocator.free(second_proto);
+    const second_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = second_proto });
+    defer std.testing.allocator.free(second_record);
+
+    var stream = WriteGrpcStream.init(store);
+    defer stream.deinit(std.testing.io, std.testing.allocator);
+    try stream.append(std.testing.io, std.testing.allocator, first_record);
+    try stream.append(std.testing.io, std.testing.allocator, second_record);
+    const response = try stream.finish(std.testing.io, std.testing.allocator);
     try std.testing.expectEqual(@as(i64, 5), response.committed_size);
     try std.testing.expect(try store.has(std.testing.io, digest));
 }
 
-test "writeGrpcRecords streams chunks into CAS" {
+test "writeGrpcRecordsWithIndex streams chunks into CAS" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -502,7 +439,7 @@ test "writeGrpcRecords streams chunks into CAS" {
     const records = try std.mem.concat(std.testing.allocator, u8, &.{ first_record, second_record });
     defer std.testing.allocator.free(records);
 
-    const response = try writeGrpcRecords(std.testing.io, std.testing.allocator, store, records);
+    const response = try writeGrpcRecordsWithIndex(std.testing.io, std.testing.allocator, store, null, records);
     try std.testing.expectEqual(@as(i64, 5), response.committed_size);
     try std.testing.expect(try store.has(std.testing.io, digest));
 }
@@ -551,7 +488,7 @@ test "WriteGrpcStream accepts records split across appends" {
     try std.testing.expect(try store.has(std.testing.io, digest));
 }
 
-test "write rejects offset and digest mismatches" {
+test "WriteGrpcStream rejects offset and digest mismatches" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -565,15 +502,35 @@ test "write rejects offset and digest mismatches" {
     );
     defer std.testing.allocator.free(resource_name);
 
-    try std.testing.expectError(error.InvalidOffset, write(std.testing.io, std.testing.allocator, store, &.{
-        .{ .resource_name = resource_name, .write_offset = 1, .data = "hello", .finish_write = true },
-    }));
-    try std.testing.expectError(error.DigestMismatch, write(std.testing.io, std.testing.allocator, store, &.{
-        .{ .resource_name = resource_name, .write_offset = 0, .data = "HELLO", .finish_write = true },
-    }));
+    const offset_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .resource_name = resource_name,
+        .write_offset = 1,
+        .data = "hello",
+        .finish_write = true,
+    });
+    defer std.testing.allocator.free(offset_proto);
+    const offset_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = offset_proto });
+    defer std.testing.allocator.free(offset_record);
+    var offset_stream = WriteGrpcStream.init(store);
+    defer offset_stream.deinit(std.testing.io, std.testing.allocator);
+    try std.testing.expectError(error.InvalidOffset, offset_stream.append(std.testing.io, std.testing.allocator, offset_record));
+
+    const digest_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .resource_name = resource_name,
+        .write_offset = 0,
+        .data = "HELLO",
+        .finish_write = true,
+    });
+    defer std.testing.allocator.free(digest_proto);
+    const digest_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = digest_proto });
+    defer std.testing.allocator.free(digest_record);
+    var digest_stream = WriteGrpcStream.init(store);
+    defer digest_stream.deinit(std.testing.io, std.testing.allocator);
+    try digest_stream.append(std.testing.io, std.testing.allocator, digest_record);
+    try std.testing.expectError(error.DigestMismatch, digest_stream.finish(std.testing.io, std.testing.allocator));
 }
 
-test "read returns requested byte range" {
+test "writeReadGrpcRecords returns requested byte range" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -587,14 +544,20 @@ test "read returns requested byte range" {
     );
     defer std.testing.allocator.free(resource_name);
 
-    var result = try read(std.testing.io, std.testing.allocator, store, .{
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    var list_writer = body_sink.ArrayListWriter{ .out = &out };
+    try writeReadGrpcRecords(std.testing.io, std.testing.allocator, store, .{
         .resource_name = resource_name,
         .read_offset = 2,
         .read_limit = 3,
-    });
-    defer result.deinit(std.testing.allocator);
+    }, list_writer.writer());
 
-    try std.testing.expectEqualStrings("cde", result.response.data);
+    var it = grpc_record.Iterator.init(out.items);
+    const record = (try it.next()).?;
+    var reader = protobuf.Reader.init(record.payload);
+    const response = try bytestream.ReadResponse.decode(&reader);
+    try std.testing.expectEqualStrings("cde", response.data);
 }
 
 test "writeReadGrpcRecords chunks large blobs into multiple gRPC messages" {

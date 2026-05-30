@@ -163,26 +163,6 @@ pub const Server = struct {
         return error.UnsupportedMethod;
     }
 
-    pub fn handleClientStreaming(
-        self: Server,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        method: []const u8,
-        request_records: []const u8,
-    ) ![]u8 {
-        if (std.mem.eql(u8, method, bytestream_write)) {
-            const response = try bytestream_service.writeGrpcRecordsWithIndex(
-                io,
-                allocator,
-                self.store,
-                self.cas_presence_index,
-                request_records,
-            );
-            return try encodeResponse(allocator, response);
-        }
-
-        return error.UnsupportedMethod;
-    }
 };
 
 fn singlePayload(record_bytes: []const u8) ![]const u8 {
@@ -313,31 +293,7 @@ test "Server dispatches ByteStream Write and Read record streams" {
     );
     defer std.testing.allocator.free(resource_name);
 
-    const first = try encodeRequest(std.testing.allocator, bytestream.WriteRequest{
-        .resource_name = resource_name,
-        .write_offset = 0,
-        .data = "pay",
-    });
-    defer std.testing.allocator.free(first);
-    const second = try encodeRequest(std.testing.allocator, bytestream.WriteRequest{
-        .write_offset = 3,
-        .finish_write = true,
-        .data = "load",
-    });
-    defer std.testing.allocator.free(second);
-    const write_stream = try std.mem.concat(std.testing.allocator, u8, &.{ first, second });
-    defer std.testing.allocator.free(write_stream);
-
-    const write_response_record = try server.handleClientStreaming(
-        std.testing.io,
-        std.testing.allocator,
-        bytestream_write,
-        write_stream,
-    );
-    defer std.testing.allocator.free(write_response_record);
-    var write_reader = protobuf.Reader.init(try singlePayload(write_response_record));
-    const write_response = try bytestream.WriteResponse.decode(&write_reader);
-    try std.testing.expectEqual(@as(i64, 7), write_response.committed_size);
+    try store.putKnownBytes(std.testing.io, digest, "payload");
 
     const read_name = try std.fmt.allocPrint(
         std.testing.allocator,

@@ -43,7 +43,6 @@ pub const Dispatcher = struct {
     ctx: *anyopaque,
     handle_unary: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
     handle_server_streaming_response: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8, body_sink.Writer) anyerror!void,
-    handle_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
     start_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8) anyerror!ClientStream,
 
     pub fn fromReapiServer(server: *reapi_dispatch.Server) Dispatcher {
@@ -51,7 +50,6 @@ pub const Dispatcher = struct {
             .ctx = server,
             .handle_unary = reapiUnary,
             .handle_server_streaming_response = reapiServerStreamingResponse,
-            .handle_client_streaming = reapiClientStreaming,
             .start_client_streaming = reapiStartClientStreaming,
         };
     }
@@ -75,16 +73,6 @@ pub const Dispatcher = struct {
         writer: body_sink.Writer,
     ) !void {
         return self.handle_server_streaming_response(self.ctx, io, allocator, method, body, writer);
-    }
-
-    pub fn handleClientStreaming(
-        self: Dispatcher,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        method: []const u8,
-        body: []const u8,
-    ) ![]u8 {
-        return self.handle_client_streaming(self.ctx, io, allocator, method, body);
     }
 
     pub fn startClientStreaming(
@@ -119,17 +107,6 @@ pub const Dispatcher = struct {
         return server.*.handleServerStreamingResponse(io, allocator, method, body, writer);
     }
 
-    fn reapiClientStreaming(
-        ctx: *anyopaque,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        method: []const u8,
-        body: []const u8,
-    ) ![]u8 {
-        const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
-        return server.*.handleClientStreaming(io, allocator, method, body);
-    }
-
     fn reapiStartClientStreaming(
         ctx: *anyopaque,
         io: std.Io,
@@ -153,17 +130,7 @@ pub const Dispatcher = struct {
             };
         }
         _ = io;
-        const stream = try allocator.create(BufferedClientStream);
-        stream.* = .{
-            .server = server,
-            .method = method,
-        };
-        return .{
-            .ctx = stream,
-            .append_fn = BufferedClientStream.append,
-            .finish_fn = BufferedClientStream.finish,
-            .deinit_fn = BufferedClientStream.deinit,
-        };
+        return error.UnsupportedMethod;
     }
 };
 
@@ -193,39 +160,6 @@ const ByteStreamWriteClientStream = struct {
     fn deinit(ctx: *anyopaque, io: std.Io, allocator: std.mem.Allocator) void {
         const self: *ByteStreamWriteClientStream = @ptrCast(@alignCast(ctx));
         self.stream.deinit(io, allocator);
-        allocator.destroy(self);
-    }
-};
-
-const BufferedClientStream = struct {
-    server: *reapi_dispatch.Server,
-    method: []const u8,
-    body: std.ArrayListUnmanaged(u8) = .empty,
-
-    fn append(
-        ctx: *anyopaque,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        bytes: []const u8,
-    ) !void {
-        _ = io;
-        const self: *BufferedClientStream = @ptrCast(@alignCast(ctx));
-        try self.body.appendSlice(allocator, bytes);
-    }
-
-    fn finish(
-        ctx: *anyopaque,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-    ) ![]u8 {
-        const self: *BufferedClientStream = @ptrCast(@alignCast(ctx));
-        return self.server.*.handleClientStreaming(io, allocator, self.method, self.body.items);
-    }
-
-    fn deinit(ctx: *anyopaque, io: std.Io, allocator: std.mem.Allocator) void {
-        _ = io;
-        const self: *BufferedClientStream = @ptrCast(@alignCast(ctx));
-        self.body.deinit(allocator);
         allocator.destroy(self);
     }
 };
@@ -1693,7 +1627,6 @@ test "HTTP/2 connection responds to completed streams concurrently" {
                 .ctx = self,
                 .handle_unary = unary,
                 .handle_server_streaming_response = serverStreamingResponse,
-                .handle_client_streaming = clientStreaming,
                 .start_client_streaming = startClientStreaming,
             };
         }
@@ -1838,7 +1771,6 @@ test "HTTP/2 client streaming dispatches DATA frames without buffered handler" {
                 .ctx = self,
                 .handle_unary = unary,
                 .handle_server_streaming_response = serverStreamingResponse,
-                .handle_client_streaming = clientStreaming,
                 .start_client_streaming = startClientStreaming,
             };
         }

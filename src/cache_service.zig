@@ -4,15 +4,6 @@ const cas = @import("cas.zig");
 const reapi = @import("reapi.zig");
 const staged_cas_index = @import("staged_cas_index.zig");
 
-pub fn findMissingBlobs(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    request: reapi.FindMissingBlobsRequest,
-) !reapi.FindMissingBlobsResponse {
-    return try findMissingBlobsWithIndex(io, allocator, store, null, request);
-}
-
 pub fn findMissingBlobsWithIndex(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -36,15 +27,6 @@ pub fn findMissingBlobsWithIndex(
     }
 
     return .{ .missing_blob_digests = try missing.toOwnedSlice(allocator) };
-}
-
-pub fn batchUpdateBlobs(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    request: reapi.BatchUpdateBlobsRequest,
-) !reapi.BatchUpdateBlobsResponse {
-    return try batchUpdateBlobsWithIndex(io, allocator, store, null, request);
 }
 
 pub fn batchUpdateBlobsWithIndex(
@@ -179,7 +161,7 @@ test "findMissingBlobs returns only absent digests" {
 
     var present_hash: [64]u8 = undefined;
     var absent_hash: [64]u8 = undefined;
-    var response = try findMissingBlobs(std.testing.io, std.testing.allocator, store, .{
+    var response = try findMissingBlobsWithIndex(std.testing.io, std.testing.allocator, store, null, .{
         .blob_digests = &.{
             present.toReapi(&present_hash),
             absent.toReapi(&absent_hash),
@@ -201,7 +183,7 @@ test "batchUpdateBlobs verifies digest before storing" {
 
     var good_hash: [64]u8 = undefined;
     var bad_hash: [64]u8 = undefined;
-    var response = try batchUpdateBlobs(std.testing.io, std.testing.allocator, store, .{
+    var response = try batchUpdateBlobsWithIndex(std.testing.io, std.testing.allocator, store, null, .{
         .requests = &.{
             .{ .digest = good.toReapi(&good_hash), .data = "good" },
             .{ .digest = bad.toReapi(&bad_hash), .data = "different" },
