@@ -2,47 +2,62 @@ const std = @import("std");
 const cas = @import("cas.zig");
 
 pub const Index = struct {
-    lock_flag: std.atomic.Value(u32) = .init(0),
-    digests: std.AutoHashMapUnmanaged(cas.Digest, void) = .empty,
+    const shard_count = 256;
+
+    const Shard = struct {
+        lock_flag: std.atomic.Value(u32) = .init(0),
+        digests: std.AutoHashMapUnmanaged(cas.Digest, void) = .empty,
+
+        fn lock(self: *Shard) void {
+            while (self.lock_flag.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+                std.Thread.yield() catch std.atomic.spinLoopHint();
+            }
+        }
+
+        fn unlock(self: *Shard) void {
+            self.lock_flag.store(0, .release);
+        }
+    };
+
+    shards: [shard_count]Shard = [_]Shard{.{}} ** shard_count,
 
     pub fn deinit(self: *Index, io: std.Io, allocator: std.mem.Allocator) void {
         _ = io;
-        self.lock();
-        defer self.unlock();
-        self.digests.deinit(allocator);
+        for (&self.shards) |*shard| {
+            shard.lock();
+            shard.digests.deinit(allocator);
+            shard.unlock();
+        }
         self.* = .{};
     }
 
     pub fn add(self: *Index, io: std.Io, allocator: std.mem.Allocator, digest: cas.Digest) !void {
         _ = io;
         if (digest.isEmpty()) return;
-        self.lock();
-        defer self.unlock();
-        try self.digests.put(allocator, digest, {});
+        const shard = self.shardFor(digest);
+        shard.lock();
+        defer shard.unlock();
+        try shard.digests.put(allocator, digest, {});
     }
 
     pub fn remove(self: *Index, io: std.Io, digest: cas.Digest) void {
         _ = io;
-        self.lock();
-        defer self.unlock();
-        _ = self.digests.remove(digest);
+        const shard = self.shardFor(digest);
+        shard.lock();
+        defer shard.unlock();
+        _ = shard.digests.remove(digest);
     }
 
     pub fn contains(self: *Index, io: std.Io, digest: cas.Digest) bool {
         _ = io;
-        self.lock();
-        defer self.unlock();
-        return self.digests.contains(digest);
+        const shard = self.shardFor(digest);
+        shard.lock();
+        defer shard.unlock();
+        return shard.digests.contains(digest);
     }
 
-    fn lock(self: *Index) void {
-        while (self.lock_flag.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-            std.Thread.yield() catch std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(self: *Index) void {
-        self.lock_flag.store(0, .release);
+    fn shardFor(self: *Index, digest: cas.Digest) *Shard {
+        return &self.shards[digest.hash[0]];
     }
 };
 
