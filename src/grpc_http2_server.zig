@@ -566,27 +566,12 @@ const SharedHttp2Writer = struct {
     }
 
     fn sendData(self: *SharedHttp2Writer, io: std.Io, stream_id: u31, body: []const u8) !void {
-        return self.sendDataWithHeaders(io, stream_id, body, false);
-    }
-
-    fn sendDataWithHeaders(
-        self: *SharedHttp2Writer,
-        io: std.Io,
-        stream_id: u31,
-        body: []const u8,
-        send_headers: bool,
-    ) !void {
         var remaining = body;
-        var headers_pending = send_headers;
         while (remaining.len != 0) {
             const chunk_len = try self.flow.reserveData(io, stream_id, remaining.len);
             const chunk = remaining[0..chunk_len];
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
-            if (headers_pending) {
-                try writeStaticHeaders(self.writer, stream_id, false, &grpc_response_headers_block);
-                headers_pending = false;
-            }
             try writeFrame(self.writer, .{
                 .length = chunk.len,
                 .type = .data,
@@ -609,19 +594,6 @@ const SharedHttp2Writer = struct {
         file_offset: u64,
         file_len: usize,
     ) !void {
-        return self.sendDataWithFileAndHeaders(io, stream_id, prefix, file_handle, file_offset, file_len, false);
-    }
-
-    fn sendDataWithFileAndHeaders(
-        self: *SharedHttp2Writer,
-        io: std.Io,
-        stream_id: u31,
-        prefix: []const u8,
-        file_handle: std.Io.File.Handle,
-        file_offset: u64,
-        file_len: usize,
-        send_headers: bool,
-    ) !void {
         var file: std.Io.File = .{
             .handle = file_handle,
             .flags = .{ .nonblocking = false },
@@ -632,7 +604,6 @@ const SharedHttp2Writer = struct {
 
         var prefix_remaining = prefix;
         var file_remaining = file_len;
-        var headers_pending = send_headers;
         while (prefix_remaining.len != 0 or file_remaining != 0) {
             const requested = prefix_remaining.len + file_remaining;
             const frame_payload_len = try self.flow.reserveData(io, stream_id, requested);
@@ -641,10 +612,6 @@ const SharedHttp2Writer = struct {
 
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
-            if (headers_pending) {
-                try writeStaticHeaders(self.writer, stream_id, false, &grpc_response_headers_block);
-                headers_pending = false;
-            }
             try writeFrameHeader(self.writer, .{
                 .length = frame_payload_len,
                 .type = .data,
@@ -1340,7 +1307,6 @@ fn respondStream(
 const Http2BodyWriter = struct {
     writer: *SharedHttp2Writer,
     stream_id: u31,
-    headers_sent: bool = false,
 
     fn bodyWriter(self: *Http2BodyWriter) body_sink.Writer {
         return .{
@@ -1358,8 +1324,7 @@ const Http2BodyWriter = struct {
     ) !void {
         _ = allocator;
         const self: *Http2BodyWriter = @ptrCast(@alignCast(ctx));
-        try self.writer.sendDataWithHeaders(io, self.stream_id, bytes, !self.headers_sent);
-        self.headers_sent = true;
+        try self.writer.sendData(io, self.stream_id, bytes);
     }
 
     fn writeFileWithPrefix(
@@ -1373,8 +1338,7 @@ const Http2BodyWriter = struct {
     ) !void {
         _ = allocator;
         const self: *Http2BodyWriter = @ptrCast(@alignCast(ctx));
-        try self.writer.sendDataWithFileAndHeaders(io, self.stream_id, prefix, file_handle, offset, len, !self.headers_sent);
-        self.headers_sent = true;
+        try self.writer.sendDataWithFile(io, self.stream_id, prefix, file_handle, offset, len);
     }
 };
 
@@ -1386,6 +1350,8 @@ fn respondServerStreaming(
     state: *StreamState,
     method: []const u8,
 ) !void {
+    try writer.sendGrpcResponseHeaders(io, state.id);
+
     var body_writer = Http2BodyWriter{
         .writer = writer,
         .stream_id = state.id,
@@ -1399,10 +1365,6 @@ fn respondServerStreaming(
     ) catch |err| {
         const status = grpcStatusForError(err);
         if (!std.mem.eql(u8, status, "5")) std.log.err("gRPC {s} failed: {s}", .{ method, @errorName(err) });
-        if (!body_writer.headers_sent) {
-            try writer.sendGrpcError(io, state.id, status, @errorName(err));
-            return;
-        }
         try writer.sendHeaders(io, state.id, true, &.{
             .{ .name = "grpc-status", .value = status },
             .{ .name = "grpc-message", .value = @errorName(err) },
@@ -1410,7 +1372,6 @@ fn respondServerStreaming(
         return;
     };
 
-    if (!body_writer.headers_sent) try writer.sendGrpcResponseHeaders(io, state.id);
     try writer.sendGrpcSuccessTrailers(io, state.id);
 }
 
