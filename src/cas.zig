@@ -276,33 +276,6 @@ pub const Store = struct {
         }
     }
 
-    pub fn putFile(
-        self: Store,
-        io: std.Io,
-        src_dir: std.Io.Dir,
-        src_path: []const u8,
-    ) !Digest {
-        putFileStatsAdd(&put_file_calls, 1);
-        return self.putFileCopy(io, src_dir, src_path);
-    }
-
-    pub fn putFilePromote(
-        self: Store,
-        io: std.Io,
-        src_dir: std.Io.Dir,
-        src_path: []const u8,
-    ) !Digest {
-        putFileStatsAdd(&put_file_calls, 1);
-        const open_start = putFileStatsNow(io);
-        var src = try src_dir.openFile(io, src_path, .{});
-        addElapsedNs(&put_file_promote_open_ns, open_start, io);
-        defer src.close(io);
-        const stat_start = putFileStatsNow(io);
-        const stat = try src.stat(io);
-        addElapsedNs(&put_file_promote_stat_ns, stat_start, io);
-        return self.putOpenFilePromote(io, src_dir, src_path, &src, stat);
-    }
-
     pub fn putFilePromoteWithStat(
         self: Store,
         io: std.Io,
@@ -1303,7 +1276,7 @@ test "Store putFile keeps the source file" {
         .data = "copy me",
     });
 
-    const digest = try store.putFile(std.testing.io, stage, "out.txt");
+    const digest = try store.putFileCopy(std.testing.io, stage, "out.txt");
     try std.testing.expect(digest.eql(Digest.fromBytes("copy me")));
     try std.testing.expect(try store.has(std.testing.io, digest));
     const stat = try stage.statFile(std.testing.io, "out.txt", .{});
@@ -1325,7 +1298,10 @@ test "Store promotes same-filesystem files into CAS" {
     });
 
     const before = snapshotPutFileStats();
-    const digest = try store.putFilePromote(std.testing.io, stage, "out.txt");
+    var src = try stage.openFile(std.testing.io, "out.txt", .{});
+    defer src.close(std.testing.io);
+    const stat = try src.stat(std.testing.io);
+    const digest = try store.putOpenFilePromote(std.testing.io, stage, "out.txt", &src, stat);
     const after = snapshotPutFileStats();
     try std.testing.expect(digest.eql(Digest.fromBytes("promote me")));
     try std.testing.expect(try store.has(std.testing.io, digest));
@@ -1353,7 +1329,7 @@ test "Store promotes same-filesystem files into CAS" {
             try std.testing.expectEqual(before.copy_calls, after.copy_calls);
             try std.testing.expectEqual(before.copy_bytes, after.copy_bytes);
         }
-        const stat = try stage.statFile(std.testing.io, "out.txt", .{});
-        try std.testing.expectEqual(@as(u64, "promote me".len), stat.size);
+        const staged_stat = try stage.statFile(std.testing.io, "out.txt", .{});
+        try std.testing.expectEqual(@as(u64, "promote me".len), staged_stat.size);
     }
 }

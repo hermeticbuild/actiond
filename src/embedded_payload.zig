@@ -39,7 +39,7 @@ pub fn extractFromSelf(
     return extractFromExecutablePath(io, allocator, root_dir, exe_path, name);
 }
 
-pub fn extractFromExecutablePath(
+fn extractFromExecutablePath(
     io: std.Io,
     allocator: std.mem.Allocator,
     root_dir: std.Io.Dir,

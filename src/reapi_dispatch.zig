@@ -31,14 +31,10 @@ pub const bytestream_read = "/google.bytestream.ByteStream/Read";
 pub const bytestream_write = "/google.bytestream.ByteStream/Write";
 pub const capabilities_get = "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities";
 pub const execution_execute = "/build.bazel.remote.execution.v2.Execution/Execute";
-pub const internal_cas_delete_blobs = "/actiond.internal.v1.CAS/DeleteBlobs";
 
 pub const Server = struct {
     store: cas.Store,
     action_cache_store: ?action_cache.Store = null,
-    cleanup_store: ?cas.Store = null,
-    cleanup_visible_store: ?cas.Store = null,
-    cleanup_staged_index: ?*staged_cas_index.Index = null,
     cas_presence_index: ?*staged_cas_index.Index = null,
     work_root: ?std.Io.Dir = null,
     execution_options: action_executor.ExecuteOptions = .{},
@@ -99,22 +95,6 @@ pub const Server = struct {
             var result = try cache_service.batchReadBlobs(io, allocator, self.store, request);
             defer result.deinit(allocator);
             return try encodeResponse(allocator, result.response);
-        }
-
-        if (std.mem.eql(u8, method, internal_cas_delete_blobs)) {
-            const cleanup_store = self.cleanup_store orelse return error.UnsupportedMethod;
-            var reader = protobuf.Reader.init(payload);
-            var request = try reapi.FindMissingBlobsRequest.decodeOwned(allocator, &reader);
-            defer request.deinit(allocator);
-            var response = if (self.cleanup_visible_store) |visible_store|
-                try cache_service.deleteBlobsWhenVisible(io, allocator, cleanup_store, visible_store, request)
-            else
-                try cache_service.deleteBlobs(io, allocator, cleanup_store, request);
-            defer response.deinit(allocator);
-            if (self.cleanup_staged_index) |index| {
-                removeCleanedStagedDigests(io, index, request, response);
-            }
-            return try encodeResponse(allocator, response);
         }
 
         if (std.mem.eql(u8, method, ac_get_action_result)) {
@@ -204,27 +184,6 @@ pub const Server = struct {
         return error.UnsupportedMethod;
     }
 };
-
-fn removeCleanedStagedDigests(
-    io: std.Io,
-    index: *staged_cas_index.Index,
-    request: reapi.FindMissingBlobsRequest,
-    response: reapi.FindMissingBlobsResponse,
-) void {
-    for (request.blob_digests) |digest| {
-        const local = cas.Digest.fromReapi(digest) catch continue;
-        if (responseContainsDigest(response.missing_blob_digests, local)) continue;
-        index.remove(io, local);
-    }
-}
-
-fn responseContainsDigest(digests: []const reapi.Digest, needle: cas.Digest) bool {
-    for (digests) |digest| {
-        const local = cas.Digest.fromReapi(digest) catch continue;
-        if (local.eql(needle)) return true;
-    }
-    return false;
-}
 
 fn singlePayload(record_bytes: []const u8) ![]const u8 {
     var it = grpc_record.Iterator.init(record_bytes);
@@ -524,43 +483,6 @@ test "Server dispatches ActionCache update and get" {
     try std.testing.expectEqualStrings("out/tree", result.output_directories[0].path);
     try std.testing.expect(result.output_directories[0].tree_digest.?.eql(tree_digest.toReapi(&tree_hash)));
     try std.testing.expect(result.output_directories[0].root_directory_digest.?.eql(root_directory_digest.toReapi(&root_directory_hash)));
-}
-
-test "Server dispatches internal CAS blob cleanup" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-    var cleanup_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cleanup", .{});
-    defer cleanup_dir.close(std.testing.io);
-
-    const cleanup_store = cas.Store.init(cleanup_dir);
-    const staged = try cleanup_store.putBytes(std.testing.io, "staged");
-    var staged_hash: [64]u8 = undefined;
-
-    const server: Server = .{
-        .store = cas.Store.init(cas_dir),
-        .cleanup_store = cleanup_store,
-    };
-    const request = try encodeRequest(std.testing.allocator, reapi.FindMissingBlobsRequest{
-        .blob_digests = &.{staged.toReapi(&staged_hash)},
-    });
-    defer std.testing.allocator.free(request);
-
-    const response_record = try server.handleUnary(
-        std.testing.io,
-        std.testing.allocator,
-        internal_cas_delete_blobs,
-        request,
-    );
-    defer std.testing.allocator.free(response_record);
-
-    var reader = protobuf.Reader.init(try singlePayload(response_record));
-    var response = try reapi.FindMissingBlobsResponse.decodeOwned(std.testing.allocator, &reader);
-    defer response.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), response.missing_blob_digests.len);
-    try std.testing.expect(!try cleanup_store.has(std.testing.io, staged));
 }
 
 test "Server dispatches GetCapabilities" {

@@ -38,55 +38,6 @@ pub fn findMissingBlobsWithIndex(
     return .{ .missing_blob_digests = try missing.toOwnedSlice(allocator) };
 }
 
-pub fn deleteBlobs(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    request: reapi.FindMissingBlobsRequest,
-) !reapi.FindMissingBlobsResponse {
-    var failed: std.ArrayListUnmanaged(reapi.Digest) = .empty;
-    errdefer failed.deinit(allocator);
-
-    for (request.blob_digests) |digest| {
-        const local = cas.Digest.fromReapi(digest) catch {
-            try failed.append(allocator, digest);
-            continue;
-        };
-        store.deleteBlob(io, local) catch {
-            try failed.append(allocator, digest);
-        };
-    }
-
-    return .{ .missing_blob_digests = try failed.toOwnedSlice(allocator) };
-}
-
-pub fn deleteBlobsWhenVisible(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    visible_store: cas.Store,
-    request: reapi.FindMissingBlobsRequest,
-) !reapi.FindMissingBlobsResponse {
-    var failed: std.ArrayListUnmanaged(reapi.Digest) = .empty;
-    errdefer failed.deinit(allocator);
-
-    for (request.blob_digests) |digest| {
-        const local = cas.Digest.fromReapi(digest) catch {
-            try failed.append(allocator, digest);
-            continue;
-        };
-        if (!try visible_store.has(io, local)) {
-            try failed.append(allocator, digest);
-            continue;
-        }
-        store.deleteBlob(io, local) catch {
-            try failed.append(allocator, digest);
-        };
-    }
-
-    return .{ .missing_blob_digests = try failed.toOwnedSlice(allocator) };
-}
-
 pub fn batchUpdateBlobs(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -238,62 +189,6 @@ test "findMissingBlobs returns only absent digests" {
 
     try std.testing.expectEqual(@as(usize, 1), response.missing_blob_digests.len);
     try std.testing.expect(response.missing_blob_digests[0].eql(absent.toReapi(&absent_hash)));
-}
-
-test "deleteBlobs removes requested blobs and reports invalid digests" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const store = cas.Store.init(tmp.dir);
-    const present = try store.putBytes(std.testing.io, "present");
-    const absent = cas.Digest.fromBytes("absent");
-
-    var present_hash: [64]u8 = undefined;
-    var absent_hash: [64]u8 = undefined;
-    var response = try deleteBlobs(std.testing.io, std.testing.allocator, store, .{
-        .blob_digests = &.{
-            present.toReapi(&present_hash),
-            absent.toReapi(&absent_hash),
-            .{ .hash = "not-hex", .size_bytes = 1 },
-        },
-    });
-    defer response.deinit(std.testing.allocator);
-
-    try std.testing.expect(!try store.has(std.testing.io, present));
-    try std.testing.expectEqual(@as(usize, 1), response.missing_blob_digests.len);
-    try std.testing.expectEqualStrings("not-hex", response.missing_blob_digests[0].hash);
-}
-
-test "deleteBlobsWhenVisible keeps staged blobs until visible in lower store" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var upper_dir = try tmp.dir.createDirPathOpen(std.testing.io, "upper", .{});
-    defer upper_dir.close(std.testing.io);
-    var lower_dir = try tmp.dir.createDirPathOpen(std.testing.io, "lower", .{});
-    defer lower_dir.close(std.testing.io);
-
-    const upper_store = cas.Store.init(upper_dir);
-    const lower_store = cas.Store.init(lower_dir);
-    const staged = try upper_store.putBytes(std.testing.io, "staged");
-    var staged_hash: [64]u8 = undefined;
-
-    var response = try deleteBlobsWhenVisible(std.testing.io, std.testing.allocator, upper_store, lower_store, .{
-        .blob_digests = &.{staged.toReapi(&staged_hash)},
-    });
-    defer response.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), response.missing_blob_digests.len);
-    try std.testing.expect(try upper_store.has(std.testing.io, staged));
-
-    try lower_store.putKnownBytes(std.testing.io, staged, "staged");
-    var visible_response = try deleteBlobsWhenVisible(std.testing.io, std.testing.allocator, upper_store, lower_store, .{
-        .blob_digests = &.{staged.toReapi(&staged_hash)},
-    });
-    defer visible_response.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 0), visible_response.missing_blob_digests.len);
-    try std.testing.expect(!try upper_store.has(std.testing.io, staged));
 }
 
 test "batchUpdateBlobs verifies digest before storing" {
