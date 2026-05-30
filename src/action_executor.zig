@@ -323,19 +323,6 @@ fn sleepShortRetry() void {
     while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
 }
 
-pub fn executeActionWithOptions(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    work_root: std.Io.Dir,
-    action_digest: cas.Digest,
-    options: ExecuteOptions,
-) !action_runner.Outcome {
-    var loaded_action = try loadAction(io, allocator, store, action_digest, options);
-    defer loaded_action.deinit(allocator);
-    return executeDecodedActionWithOptions(io, allocator, store, work_root, action_digest, loaded_action.action, options);
-}
-
 pub fn loadAction(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -621,23 +608,6 @@ pub fn executeDecodedActionWithOptions(
         }
     }
     return outcome;
-}
-
-pub fn actionResultFromOutcome(
-    outcome: action_runner.Outcome,
-    stdout_hash: *[64]u8,
-    stderr_hash: *[64]u8,
-) reapi.ActionResult {
-    return .{
-        .exit_code = switch (outcome.status) {
-            .exited => |code| code,
-            .signaled => |signal| 128 + @as(i32, signal),
-            .stopped, .unknown => 1,
-        },
-        .stdout_digest = if (outcome.stdout_digest) |digest| digest.toReapi(stdout_hash) else null,
-        .stderr_digest = if (outcome.stderr_digest) |digest| digest.toReapi(stderr_hash) else null,
-        .execution_metadata = outcome.execution_metadata,
-    };
 }
 
 fn libcRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
