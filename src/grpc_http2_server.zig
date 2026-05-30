@@ -749,20 +749,17 @@ const FlowControl = struct {
     }
 
     fn reserveData(self: *FlowControl, io: std.Io, stream_id: u31, requested: usize) !usize {
+        const desired: i64 = @intCast(@min(requested, self.max_frame_size));
         while (true) {
             self.lock_state.lock();
             if (self.findStreamIndexLocked(stream_id)) |index| {
                 const stream_window = self.streams.items[index].window;
                 const available = @min(self.connection_window, stream_window);
-                if (available > 0) {
-                    const chunk_len_i64 = @min(
-                        @as(i64, @intCast(@min(requested, self.max_frame_size))),
-                        available,
-                    );
-                    self.connection_window -= chunk_len_i64;
-                    self.streams.items[index].window -= chunk_len_i64;
+                if (available >= desired) {
+                    self.connection_window -= desired;
+                    self.streams.items[index].window -= desired;
                     self.lock_state.unlock();
-                    return @intCast(chunk_len_i64);
+                    return @intCast(desired);
                 }
                 self.lock_state.unlock();
                 try sleepMilliseconds(io, 1);
