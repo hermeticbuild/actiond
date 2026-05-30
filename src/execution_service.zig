@@ -49,14 +49,16 @@ pub fn execute(
         }
     }
 
-    const do_not_cache = readDoNotCache(io, allocator, blob_store, action_digest) catch |err| {
-        std.log.err("execute {s}/{d}: failed reading action cache policy: {s}", .{
+    var loaded_action = action_executor.loadAction(io, allocator, blob_store, action_digest, options) catch |err| {
+        std.log.err("execute {s}/{d}: failed reading action: {s}", .{
             action_hex,
             action_digest.size_bytes,
             @errorName(err),
         });
         return err;
     };
+    defer loaded_action.deinit(allocator);
+    const do_not_cache = loaded_action.action.do_not_cache;
     const work_path = try executionWorkKey(allocator, action_digest);
     defer allocator.free(work_path);
     var work_dir = try work_root.createDirPathOpen(io, work_path, .{});
@@ -65,7 +67,7 @@ pub fn execute(
     };
     defer work_dir.close(io);
 
-    var outcome = action_executor.executeActionWithOptions(io, allocator, blob_store, work_dir, action_digest, options) catch |err| {
+    var outcome = action_executor.executeDecodedActionWithOptions(io, allocator, blob_store, work_dir, action_digest, loaded_action.action, options) catch |err| {
         std.log.err("execute {s}/{d}: action execution setup failed: {s}", .{
             action_hex,
             action_digest.size_bytes,
@@ -101,18 +103,6 @@ fn statusOk(status: @import("action_runner.zig").Status) bool {
         .exited => |code| code == 0,
         .signaled, .stopped, .unknown => false,
     };
-}
-
-fn readDoNotCache(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    action_digest: cas.Digest,
-) !bool {
-    const action_bytes = try store.readAlloc(io, allocator, action_digest);
-    defer allocator.free(action_bytes);
-    var reader = protobuf.Reader.init(action_bytes);
-    return (try reapi.Action.decode(&reader)).do_not_cache;
 }
 
 fn completedOperation(

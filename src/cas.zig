@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const build_options = @import("actiond_build_options");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
 
@@ -47,6 +48,19 @@ var put_file_promote_rename_ns = std.atomic.Value(u64).init(0);
 var put_file_promote_existing_ns = std.atomic.Value(u64).init(0);
 var put_file_copy_calls = std.atomic.Value(u64).init(0);
 var put_file_copy_bytes = std.atomic.Value(u64).init(0);
+
+inline fn putFileStatsAdd(counter: *std.atomic.Value(u64), value: u64) void {
+    if (comptime build_options.executor_timing_logs) {
+        _ = counter.fetchAdd(value, .monotonic);
+    }
+}
+
+inline fn putFileStatsNow(io: std.Io) std.Io.Timestamp {
+    return if (comptime build_options.executor_timing_logs)
+        std.Io.Clock.awake.now(io)
+    else
+        undefined;
+}
 
 pub const PutFileStats = struct {
     calls: u64,
@@ -268,7 +282,7 @@ pub const Store = struct {
         src_dir: std.Io.Dir,
         src_path: []const u8,
     ) !Digest {
-        _ = put_file_calls.fetchAdd(1, .monotonic);
+        putFileStatsAdd(&put_file_calls, 1);
         return self.putFileCopy(io, src_dir, src_path);
     }
 
@@ -278,15 +292,48 @@ pub const Store = struct {
         src_dir: std.Io.Dir,
         src_path: []const u8,
     ) !Digest {
-        _ = put_file_calls.fetchAdd(1, .monotonic);
+        putFileStatsAdd(&put_file_calls, 1);
+        const open_start = putFileStatsNow(io);
+        var src = try src_dir.openFile(io, src_path, .{});
+        addElapsedNs(&put_file_promote_open_ns, open_start, io);
+        defer src.close(io);
+        const stat_start = putFileStatsNow(io);
+        const stat = try src.stat(io);
+        addElapsedNs(&put_file_promote_stat_ns, stat_start, io);
+        return self.putOpenFilePromote(io, src_dir, src_path, &src, stat);
+    }
+
+    pub fn putFilePromoteWithStat(
+        self: Store,
+        io: std.Io,
+        src_dir: std.Io.Dir,
+        src_path: []const u8,
+        stat: std.Io.Dir.Stat,
+    ) !Digest {
+        putFileStatsAdd(&put_file_calls, 1);
+        const open_start = putFileStatsNow(io);
+        var src = try src_dir.openFile(io, src_path, .{});
+        addElapsedNs(&put_file_promote_open_ns, open_start, io);
+        defer src.close(io);
+        return self.putOpenFilePromote(io, src_dir, src_path, &src, stat);
+    }
+
+    fn putOpenFilePromote(
+        self: Store,
+        io: std.Io,
+        src_dir: std.Io.Dir,
+        src_path: []const u8,
+        src: *std.Io.File,
+        stat: std.Io.Dir.Stat,
+    ) !Digest {
         if (comptime builtin.os.tag == .linux) {
-            return self.putFileByRenameLinux(io, src_dir, src_path) catch |err| switch (err) {
-                error.CrossDevice => return self.putFileCopy(io, src_dir, src_path),
-                error.PermissionDenied, error.AccessDenied => return self.putFileCopy(io, src_dir, src_path),
+            return self.putOpenFileByRenameLinux(io, src_dir, src_path, src, stat) catch |err| switch (err) {
+                error.CrossDevice => return self.putOpenFileCopy(io, src),
+                error.PermissionDenied, error.AccessDenied => return self.putOpenFileCopy(io, src),
                 else => |e| return e,
             };
         }
-        return self.putFileCopy(io, src_dir, src_path);
+        return self.putOpenFileCopy(io, src);
     }
 
     fn putFileCopy(
@@ -295,10 +342,18 @@ pub const Store = struct {
         src_dir: std.Io.Dir,
         src_path: []const u8,
     ) !Digest {
-        _ = put_file_copy_calls.fetchAdd(1, .monotonic);
         var src = try src_dir.openFile(io, src_path, .{});
         defer src.close(io);
+        return self.putOpenFileCopy(io, &src);
+    }
 
+    fn putOpenFileCopy(
+        self: Store,
+        io: std.Io,
+        src: *std.Io.File,
+    ) !Digest {
+        putFileStatsAdd(&put_file_copy_calls, 1);
+        try seekFd(src.handle, 0);
         var writer = try BlobWriter.begin(io, self);
         defer writer.deinit(io);
 
@@ -312,96 +367,88 @@ pub const Store = struct {
         }
 
         const digest = try writer.finish(io, null);
-        _ = put_file_copy_bytes.fetchAdd(size_bytes, .monotonic);
+        putFileStatsAdd(&put_file_copy_bytes, size_bytes);
         return digest;
     }
 
-    fn putFileByRenameLinux(
+    fn putOpenFileByRenameLinux(
         self: Store,
         io: std.Io,
         src_dir: std.Io.Dir,
         src_path: []const u8,
+        src: *std.Io.File,
+        stat: std.Io.Dir.Stat,
     ) !Digest {
         if (comptime builtin.os.tag != .linux) unreachable;
-        _ = put_file_promote_attempts.fetchAdd(1, .monotonic);
+        putFileStatsAdd(&put_file_promote_attempts, 1);
 
-        const open_start = std.Io.Clock.awake.now(io);
-        var src = try src_dir.openFile(io, src_path, .{});
-        addElapsedNs(&put_file_promote_open_ns, open_start, io);
-        var src_open = true;
-        defer if (src_open) src.close(io);
+        const original_mode = stat.permissions.toMode();
 
-        const stat_start = std.Io.Clock.awake.now(io);
-        const original_mode = (try src.stat(io)).permissions.toMode();
-        addElapsedNs(&put_file_promote_stat_ns, stat_start, io);
-
-        const digest_start = std.Io.Clock.awake.now(io);
-        const digest = try digestFile(src);
+        const digest_start = putFileStatsNow(io);
+        const digest = try digestFile(src.*);
         addElapsedNs(&put_file_promote_digest_ns, digest_start, io);
-        _ = put_file_promote_digest_bytes.fetchAdd(digest.size_bytes, .monotonic);
+        putFileStatsAdd(&put_file_promote_digest_bytes, digest.size_bytes);
 
         var final_path_buffer: [blob_path_len]u8 = undefined;
         const final_path = blobPath(digest, &final_path_buffer);
 
-        const preexisting_start = std.Io.Clock.awake.now(io);
+        const preexisting_start = putFileStatsNow(io);
         if (self.root.statFile(io, final_path, .{})) |_| {
             addElapsedNs(&put_file_promote_preexisting_check_ns, preexisting_start, io);
-            _ = put_file_promote_preexisting_hits.fetchAdd(1, .monotonic);
-            _ = put_file_promote_existing.fetchAdd(1, .monotonic);
+            putFileStatsAdd(&put_file_promote_preexisting_hits, 1);
+            putFileStatsAdd(&put_file_promote_existing, 1);
             return digest;
         } else |err| switch (err) {
             error.FileNotFound => addElapsedNs(&put_file_promote_preexisting_check_ns, preexisting_start, io),
             else => return err,
         }
 
-        const mkdir_start = std.Io.Clock.awake.now(io);
+        const mkdir_start = putFileStatsNow(io);
         try self.root.createDirPath(io, digestParentPath(final_path));
         addElapsedNs(&put_file_promote_mkdir_ns, mkdir_start, io);
 
-        const chmod_start = std.Io.Clock.awake.now(io);
+        const chmod_start = putFileStatsNow(io);
         setFdMode(src.handle, cas_blob_mode) catch |err| switch (err) {
             error.PermissionDenied, error.AccessDenied => {
                 addElapsedNs(&put_file_promote_chmod_ns, chmod_start, io);
-                _ = put_file_promote_permission_fallbacks.fetchAdd(1, .monotonic);
-                return self.putFileCopy(io, src_dir, src_path);
+                putFileStatsAdd(&put_file_promote_permission_fallbacks, 1);
+                return err;
             },
             else => |e| return e,
         };
         addElapsedNs(&put_file_promote_chmod_ns, chmod_start, io);
 
-        const rename_start = std.Io.Clock.awake.now(io);
+        const rename_start = putFileStatsNow(io);
         src_dir.renamePreserve(src_path, self.root, final_path, io) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 const rename_ns = elapsedNsSince(rename_start, io);
-                _ = put_file_promote_rename_ns.fetchAdd(rename_ns, .monotonic);
-                _ = put_file_promote_existing_ns.fetchAdd(rename_ns, .monotonic);
+                putFileStatsAdd(&put_file_promote_rename_ns, rename_ns);
+                putFileStatsAdd(&put_file_promote_existing_ns, rename_ns);
                 setFdMode(src.handle, original_mode) catch {};
-                _ = put_file_promote_existing.fetchAdd(1, .monotonic);
+                putFileStatsAdd(&put_file_promote_existing, 1);
                 return digest;
             },
             error.CrossDevice => {
-                _ = put_file_promote_rename_ns.fetchAdd(elapsedNsSince(rename_start, io), .monotonic);
+                putFileStatsAdd(&put_file_promote_rename_ns, elapsedNsSince(rename_start, io));
                 setFdMode(src.handle, original_mode) catch {};
-                _ = put_file_promote_cross_device_fallbacks.fetchAdd(1, .monotonic);
+                putFileStatsAdd(&put_file_promote_cross_device_fallbacks, 1);
                 return error.CrossDevice;
             },
             error.PermissionDenied, error.AccessDenied => {
-                _ = put_file_promote_rename_ns.fetchAdd(elapsedNsSince(rename_start, io), .monotonic);
+                putFileStatsAdd(&put_file_promote_rename_ns, elapsedNsSince(rename_start, io));
                 setFdMode(src.handle, original_mode) catch {};
-                _ = put_file_promote_permission_fallbacks.fetchAdd(1, .monotonic);
+                putFileStatsAdd(&put_file_promote_permission_fallbacks, 1);
                 return err;
             },
             else => |e| {
-                _ = put_file_promote_rename_ns.fetchAdd(elapsedNsSince(rename_start, io), .monotonic);
+                putFileStatsAdd(&put_file_promote_rename_ns, elapsedNsSince(rename_start, io));
                 setFdMode(src.handle, original_mode) catch {};
                 return e;
             },
         };
         addElapsedNs(&put_file_promote_rename_ns, rename_start, io);
-        src.close(io);
-        src_open = false;
-        _ = put_file_promote_success.fetchAdd(1, .monotonic);
-        _ = put_file_promote_bytes.fetchAdd(digest.size_bytes, .monotonic);
+        putFileStatsAdd(&put_file_promote_success, 1);
+        putFileStatsAdd(&put_file_promote_bytes, digest.size_bytes);
         return digest;
     }
 
@@ -532,6 +579,7 @@ pub const Store = struct {
 };
 
 pub fn snapshotPutFileStats() PutFileStats {
+    if (comptime !build_options.executor_timing_logs) return std.mem.zeroes(PutFileStats);
     return .{
         .calls = put_file_calls.load(.monotonic),
         .promote_attempts = put_file_promote_attempts.load(.monotonic),
@@ -556,6 +604,7 @@ pub fn snapshotPutFileStats() PutFileStats {
 }
 
 pub fn appendPutFileStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+    if (comptime !build_options.executor_timing_logs) return;
     const stats = snapshotPutFileStats();
     const text = try std.fmt.allocPrint(allocator,
         \\cas_put_file_calls {d}
@@ -901,11 +950,24 @@ fn digestFile(file: std.Io.File) !Digest {
     };
 }
 
+fn seekFd(fd: std.Io.File.Handle, offset: i64) !void {
+    while (true) {
+        const rc = std.posix.system.lseek(fd, offset, std.posix.SEEK.SET);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return error.Unexpected,
+        }
+    }
+}
+
 fn elapsedNsSince(start: std.Io.Timestamp, io: std.Io) u64 {
+    if (comptime !build_options.executor_timing_logs) return 0;
     return @intCast(start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
 }
 
 fn addElapsedNs(counter: *std.atomic.Value(u64), start: std.Io.Timestamp, io: std.Io) void {
+    if (comptime !build_options.executor_timing_logs) return;
     _ = counter.fetchAdd(elapsedNsSince(start, io), .monotonic);
 }
 
@@ -1267,15 +1329,30 @@ test "Store promotes same-filesystem files into CAS" {
     const after = snapshotPutFileStats();
     try std.testing.expect(digest.eql(Digest.fromBytes("promote me")));
     try std.testing.expect(try store.has(std.testing.io, digest));
-    try std.testing.expectEqual(before.calls + 1, after.calls);
+    if (comptime build_options.executor_timing_logs) {
+        try std.testing.expectEqual(before.calls + 1, after.calls);
+    } else {
+        try std.testing.expectEqual(before.calls, after.calls);
+    }
     if (comptime builtin.os.tag == .linux) {
-        try std.testing.expectEqual(before.promote_attempts + 1, after.promote_attempts);
-        try std.testing.expectEqual(before.promote_success + 1, after.promote_success);
-        try std.testing.expectEqual(before.promote_bytes + @as(u64, "promote me".len), after.promote_bytes);
+        if (comptime build_options.executor_timing_logs) {
+            try std.testing.expectEqual(before.promote_attempts + 1, after.promote_attempts);
+            try std.testing.expectEqual(before.promote_success + 1, after.promote_success);
+            try std.testing.expectEqual(before.promote_bytes + @as(u64, "promote me".len), after.promote_bytes);
+        } else {
+            try std.testing.expectEqual(before.promote_attempts, after.promote_attempts);
+            try std.testing.expectEqual(before.promote_success, after.promote_success);
+            try std.testing.expectEqual(before.promote_bytes, after.promote_bytes);
+        }
         try std.testing.expectError(error.FileNotFound, stage.statFile(std.testing.io, "out.txt", .{}));
     } else {
-        try std.testing.expectEqual(before.copy_calls + 1, after.copy_calls);
-        try std.testing.expectEqual(before.copy_bytes + @as(u64, "promote me".len), after.copy_bytes);
+        if (comptime build_options.executor_timing_logs) {
+            try std.testing.expectEqual(before.copy_calls + 1, after.copy_calls);
+            try std.testing.expectEqual(before.copy_bytes + @as(u64, "promote me".len), after.copy_bytes);
+        } else {
+            try std.testing.expectEqual(before.copy_calls, after.copy_calls);
+            try std.testing.expectEqual(before.copy_bytes, after.copy_bytes);
+        }
         const stat = try stage.statFile(std.testing.io, "out.txt", .{});
         try std.testing.expectEqual(@as(u64, "promote me".len), stat.size);
     }

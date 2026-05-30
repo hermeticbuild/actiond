@@ -102,6 +102,17 @@ pub const PreparedExecuteOptions = struct {
     }
 };
 
+pub const LoadedAction = struct {
+    bytes: []u8,
+    action: reapi.Action,
+
+    pub fn deinit(self: *LoadedAction, allocator: std.mem.Allocator) void {
+        self.action.deinit(allocator);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
 const CasReadRoots = struct {
     primary_blob_root_path: ?[]const u8 = null,
     staged_blob_root_path: ?[]const u8 = null,
@@ -320,21 +331,46 @@ pub fn executeActionWithOptions(
     action_digest: cas.Digest,
     options: ExecuteOptions,
 ) !action_runner.Outcome {
+    var loaded_action = try loadAction(io, allocator, store, action_digest, options);
+    defer loaded_action.deinit(allocator);
+    return executeDecodedActionWithOptions(io, allocator, store, work_root, action_digest, loaded_action.action, options);
+}
+
+pub fn loadAction(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    action_digest: cas.Digest,
+    options: ExecuteOptions,
+) !LoadedAction {
+    const read_roots = casReadRoots(options);
+    const action_bytes = readCasBlobAlloc(io, allocator, store, read_roots, action_digest) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingActionBlob,
+        else => return err,
+    };
+    errdefer allocator.free(action_bytes);
+    var action_reader = protobuf.Reader.init(action_bytes);
+    return .{
+        .bytes = action_bytes,
+        .action = try reapi.Action.decodeOwned(allocator, &action_reader),
+    };
+}
+
+pub fn executeDecodedActionWithOptions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    work_root: std.Io.Dir,
+    action_digest: cas.Digest,
+    action: reapi.Action,
+    options: ExecuteOptions,
+) !action_runner.Outcome {
     const worker_start_wall = timestampNow(io);
     const input_fetch_start_wall = worker_start_wall;
     const total_start = executorTimingNow(io);
     const input_fetch_start = total_start;
 
     const read_roots = casReadRoots(options);
-
-    const action_bytes = readCasBlobAlloc(io, allocator, store, read_roots, action_digest) catch |err| switch (err) {
-        error.FileNotFound => return error.MissingActionBlob,
-        else => return err,
-    };
-    defer allocator.free(action_bytes);
-    var action_reader = protobuf.Reader.init(action_bytes);
-    var action = try reapi.Action.decodeOwned(allocator, &action_reader);
-    defer action.deinit(allocator);
 
     const command_digest = try cas.Digest.fromReapi(action.command_digest orelse return error.MissingCommandDigest);
     const command_bytes = readCasBlobAlloc(io, allocator, store, read_roots, command_digest) catch |err| switch (err) {
@@ -1506,7 +1542,7 @@ fn collectOutputFileWithStat(
 ) !void {
     if (stat.size > max_output_file_bytes) return error.FileTooBig;
 
-    const digest = putOutputFile(io, allocator, store, work_root, path) catch |err| switch (err) {
+    const digest = putOutputFile(io, allocator, store, work_root, path, stat) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -1527,8 +1563,9 @@ fn putOutputFile(
     store: cas.Store,
     work_root: std.Io.Dir,
     path: []const u8,
+    stat: std.Io.Dir.Stat,
 ) !cas.Digest {
-    if (!isDepfileOutput(path)) return store.putFilePromote(io, work_root, path);
+    if (!isDepfileOutput(path)) return store.putFilePromoteWithStat(io, work_root, path, stat);
 
     const bytes = try work_root.readFileAlloc(io, path, allocator, .limited(max_output_file_bytes));
     defer allocator.free(bytes);
@@ -1724,7 +1761,7 @@ fn putOutputDirectoryTree(
         switch (entry.kind) {
             .file => {
                 const stat = try dir.statFile(io, entry.name, .{});
-                const digest = try store.putFilePromote(io, dir, entry.name);
+                const digest = try store.putFilePromoteWithStat(io, dir, entry.name, stat);
                 if (staged_index) |index| try index.add(io, allocator, digest);
                 try files.append(allocator, .{
                     .name = try tree.dupe(allocator, entry.name),

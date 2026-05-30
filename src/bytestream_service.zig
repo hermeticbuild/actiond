@@ -369,12 +369,14 @@ pub const WriteGrpcStream = struct {
 
         const digest = try self.writer.?.finish(io, self.expected_digest.?);
         if (self.presence_index) |index| try index.add(io, allocator, digest);
-        const elapsed_ns = elapsedNs(self.start.?, std.Io.Clock.awake.now(io));
-        if (shouldLogCasUpload(self.record_count, self.committed_size, elapsed_ns)) {
-            std.log.info(
-                "cas bytestream_write timing records={d} bytes={d} elapsed_ns={d}",
-                .{ self.record_count, self.committed_size, elapsed_ns },
-            );
+        if (comptime build_options.executor_timing_logs) {
+            const elapsed_ns = elapsedNs(self.start.?, std.Io.Clock.awake.now(io));
+            if (shouldLogCasUpload(self.record_count, self.committed_size, elapsed_ns)) {
+                std.log.info(
+                    "cas bytestream_write timing records={d} bytes={d} elapsed_ns={d}",
+                    .{ self.record_count, self.committed_size, elapsed_ns },
+                );
+            }
         }
         return .{ .committed_size = @intCast(self.committed_size) };
     }
@@ -386,7 +388,9 @@ pub const WriteGrpcStream = struct {
         payload: []const u8,
     ) !void {
         if (self.finished) return error.InvalidOffset;
-        if (self.start == null) self.start = std.Io.Clock.awake.now(io);
+        if (comptime build_options.executor_timing_logs) {
+            if (self.start == null) self.start = std.Io.Clock.awake.now(io);
+        }
         self.record_count += 1;
 
         var reader = protobuf.Reader.init(payload);

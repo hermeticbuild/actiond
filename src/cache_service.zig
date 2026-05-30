@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("actiond_build_options");
 const cas = @import("cas.zig");
 const reapi = @import("reapi.zig");
 const staged_cas_index = @import("staged_cas_index.zig");
@@ -102,7 +103,10 @@ pub fn batchUpdateBlobsWithIndex(
     presence_index: ?*staged_cas_index.Index,
     request: reapi.BatchUpdateBlobsRequest,
 ) !reapi.BatchUpdateBlobsResponse {
-    const start = std.Io.Clock.awake.now(io);
+    const start = if (comptime build_options.executor_timing_logs)
+        std.Io.Clock.awake.now(io)
+    else
+        undefined;
     var responses: std.ArrayListUnmanaged(reapi.BatchUpdateBlobsResponse.Item) = .empty;
     errdefer responses.deinit(allocator);
 
@@ -138,12 +142,14 @@ pub fn batchUpdateBlobsWithIndex(
         });
     }
 
-    const elapsed_ns = elapsedNs(start, std.Io.Clock.awake.now(io));
-    if (shouldLogCasUpload(request.requests.len, total_bytes, elapsed_ns)) {
-        std.log.info(
-            "cas batch_update timing blobs={d} ok={d} invalid={d} bytes={d} elapsed_ns={d}",
-            .{ request.requests.len, ok_count, invalid_count, total_bytes, elapsed_ns },
-        );
+    if (comptime build_options.executor_timing_logs) {
+        const elapsed_ns = elapsedNs(start, std.Io.Clock.awake.now(io));
+        if (shouldLogCasUpload(request.requests.len, total_bytes, elapsed_ns)) {
+            std.log.info(
+                "cas batch_update timing blobs={d} ok={d} invalid={d} bytes={d} elapsed_ns={d}",
+                .{ request.requests.len, ok_count, invalid_count, total_bytes, elapsed_ns },
+            );
+        }
     }
 
     return .{ .responses = try responses.toOwnedSlice(allocator) };
