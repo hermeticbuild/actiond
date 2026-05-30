@@ -626,6 +626,7 @@ const SharedHttp2Writer = struct {
             if (file_chunk_len != 0) {
                 try self.writeFilePayload(io, &file_reader, file_chunk_len);
             }
+            try self.writer.flush();
 
             addStat(&grpc_data_frames, 1);
             addStat(&grpc_data_bytes, frame_payload_len);
