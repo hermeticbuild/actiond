@@ -62,19 +62,6 @@ pub fn read(
     return .{ .response = .{ .data = data } };
 }
 
-pub fn readGrpcRecords(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    request: bytestream.ReadRequest,
-) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var list_writer = body_sink.ArrayListWriter{ .out = &out };
-    try writeReadGrpcRecords(io, allocator, store, request, list_writer.writer());
-    return try out.toOwnedSlice(allocator);
-}
-
 pub fn writeReadGrpcRecords(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -610,7 +597,7 @@ test "read returns requested byte range" {
     try std.testing.expectEqualStrings("cde", result.response.data);
 }
 
-test "readGrpcRecords chunks large blobs into multiple gRPC messages" {
+test "writeReadGrpcRecords chunks large blobs into multiple gRPC messages" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -629,12 +616,14 @@ test "readGrpcRecords chunks large blobs into multiple gRPC messages" {
     );
     defer std.testing.allocator.free(resource_name);
 
-    const records = try readGrpcRecords(std.testing.io, std.testing.allocator, store, .{
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(std.testing.allocator);
+    var list_writer = body_sink.ArrayListWriter{ .out = &records };
+    try writeReadGrpcRecords(std.testing.io, std.testing.allocator, store, .{
         .resource_name = resource_name,
-    });
-    defer std.testing.allocator.free(records);
+    }, list_writer.writer());
 
-    var it = grpc_record.Iterator.init(records);
+    var it = grpc_record.Iterator.init(records.items);
     const first = (try it.next()).?;
     var first_reader = protobuf.Reader.init(first.payload);
     const first_response = try bytestream.ReadResponse.decode(&first_reader);

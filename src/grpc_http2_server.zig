@@ -42,7 +42,6 @@ pub const ClientStream = struct {
 pub const Dispatcher = struct {
     ctx: *anyopaque,
     handle_unary: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
-    handle_server_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
     handle_server_streaming_response: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8, body_sink.Writer) anyerror!void,
     handle_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
     start_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8) anyerror!ClientStream,
@@ -51,7 +50,6 @@ pub const Dispatcher = struct {
         return .{
             .ctx = server,
             .handle_unary = reapiUnary,
-            .handle_server_streaming = reapiServerStreaming,
             .handle_server_streaming_response = reapiServerStreamingResponse,
             .handle_client_streaming = reapiClientStreaming,
             .start_client_streaming = reapiStartClientStreaming,
@@ -66,16 +64,6 @@ pub const Dispatcher = struct {
         body: []const u8,
     ) ![]u8 {
         return self.handle_unary(self.ctx, io, allocator, method, body);
-    }
-
-    pub fn handleServerStreaming(
-        self: Dispatcher,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        method: []const u8,
-        body: []const u8,
-    ) ![]u8 {
-        return self.handle_server_streaming(self.ctx, io, allocator, method, body);
     }
 
     pub fn handleServerStreamingResponse(
@@ -117,17 +105,6 @@ pub const Dispatcher = struct {
     ) ![]u8 {
         const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
         return server.*.handleUnary(io, allocator, method, body);
-    }
-
-    fn reapiServerStreaming(
-        ctx: *anyopaque,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        method: []const u8,
-        body: []const u8,
-    ) ![]u8 {
-        const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
-        return server.*.handleServerStreaming(io, allocator, method, body);
     }
 
     fn reapiServerStreamingResponse(
@@ -1419,7 +1396,7 @@ fn dispatchGrpc(
     const kind = methodKind(method) orelse return error.UnsupportedMethod;
     return switch (kind) {
         .unary => try dispatcher.handleUnary(io, allocator, method, state.body.items),
-        .server_streaming => try dispatcher.handleServerStreaming(io, allocator, method, state.body.items),
+        .server_streaming => unreachable,
         .client_streaming => blk: {
             try ensureClientStream(io, allocator, dispatcher, state);
             break :blk try state.client_stream.?.finish(io, allocator);
@@ -1715,7 +1692,6 @@ test "HTTP/2 connection responds to completed streams concurrently" {
             return .{
                 .ctx = self,
                 .handle_unary = unary,
-                .handle_server_streaming = serverStreaming,
                 .handle_server_streaming_response = serverStreamingResponse,
                 .handle_client_streaming = clientStreaming,
                 .start_client_streaming = startClientStreaming,
@@ -1861,7 +1837,6 @@ test "HTTP/2 client streaming dispatches DATA frames without buffered handler" {
             return .{
                 .ctx = self,
                 .handle_unary = unary,
-                .handle_server_streaming = serverStreaming,
                 .handle_server_streaming_response = serverStreamingResponse,
                 .handle_client_streaming = clientStreaming,
                 .start_client_streaming = startClientStreaming,

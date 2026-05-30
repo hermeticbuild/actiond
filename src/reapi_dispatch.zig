@@ -138,49 +138,6 @@ pub const Server = struct {
         return error.UnsupportedMethod;
     }
 
-    pub fn handleServerStreaming(
-        self: Server,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        method: []const u8,
-        request_record: []const u8,
-    ) ![]u8 {
-        const payload = try singlePayload(request_record);
-
-        if (std.mem.eql(u8, method, execution_execute)) {
-            const work_root = self.work_root orelse return error.UnsupportedMethod;
-            var reader = protobuf.Reader.init(payload);
-            const request = try reapi.ExecuteRequest.decode(&reader);
-            var operation = try execution_service.execute(
-                io,
-                allocator,
-                self.store,
-                self.action_cache_store,
-                work_root,
-                request,
-                self.execution_options,
-            );
-            defer operation.deinit(allocator);
-            return try encodeResponse(allocator, operation.operation);
-        }
-
-        if (std.mem.eql(u8, method, bytestream_read)) {
-            var reader = protobuf.Reader.init(payload);
-            const request = try bytestream.ReadRequest.decode(&reader);
-            return try bytestream_service.readGrpcRecords(io, allocator, self.store, request);
-        }
-
-        if (std.mem.eql(u8, method, cas_get_tree)) {
-            var reader = protobuf.Reader.init(payload);
-            const request = try reapi.GetTreeRequest.decode(&reader);
-            var result = try tree_service.getTree(io, allocator, self.store, request);
-            defer result.deinit(allocator);
-            return try encodeResponse(allocator, result.response);
-        }
-
-        return error.UnsupportedMethod;
-    }
-
     pub fn handleServerStreamingResponse(
         self: Server,
         io: std.Io,
@@ -203,9 +160,27 @@ pub const Server = struct {
             return try tree_service.writeGetTreeGrpcRecords(io, allocator, self.store, request, writer);
         }
 
-        const response = try self.handleServerStreaming(io, allocator, method, request_record);
-        defer allocator.free(response);
-        try writer.writeAll(io, allocator, response);
+        if (std.mem.eql(u8, method, execution_execute)) {
+            const payload = try singlePayload(request_record);
+            const work_root = self.work_root orelse return error.UnsupportedMethod;
+            var reader = protobuf.Reader.init(payload);
+            const request = try reapi.ExecuteRequest.decode(&reader);
+            var operation = try execution_service.execute(
+                io,
+                allocator,
+                self.store,
+                self.action_cache_store,
+                work_root,
+                request,
+                self.execution_options,
+            );
+            defer operation.deinit(allocator);
+            const response = try encodeResponse(allocator, operation.operation);
+            defer allocator.free(response);
+            return try writer.writeAll(io, allocator, response);
+        }
+
+        return error.UnsupportedMethod;
     }
 
     pub fn handleClientStreaming(
@@ -417,14 +392,17 @@ test "Server dispatches ByteStream Write and Read record streams" {
     });
     defer std.testing.allocator.free(read_request);
 
-    const read_response_record = try server.handleServerStreaming(
+    var read_response_records: std.ArrayListUnmanaged(u8) = .empty;
+    defer read_response_records.deinit(std.testing.allocator);
+    var read_list_writer = body_sink.ArrayListWriter{ .out = &read_response_records };
+    try server.handleServerStreamingResponse(
         std.testing.io,
         std.testing.allocator,
         bytestream_read,
         read_request,
+        read_list_writer.writer(),
     );
-    defer std.testing.allocator.free(read_response_record);
-    var read_reader = protobuf.Reader.init(try singlePayload(read_response_record));
+    var read_reader = protobuf.Reader.init(try singlePayload(read_response_records.items));
     const read_response = try bytestream.ReadResponse.decode(&read_reader);
     try std.testing.expectEqualStrings("load", read_response.data);
 }
@@ -449,21 +427,32 @@ test "Server dispatches GetTree" {
     });
     defer std.testing.allocator.free(request);
 
-    const response_record = try server.handleServerStreaming(
+    var response_records: std.ArrayListUnmanaged(u8) = .empty;
+    defer response_records.deinit(std.testing.allocator);
+    var list_writer = body_sink.ArrayListWriter{ .out = &response_records };
+    try server.handleServerStreamingResponse(
         std.testing.io,
         std.testing.allocator,
         cas_get_tree,
         request,
+        list_writer.writer(),
     );
-    defer std.testing.allocator.free(response_record);
 
-    var reader = protobuf.Reader.init(try singlePayload(response_record));
-    var response = try reapi.GetTreeResponse.decodeOwned(std.testing.allocator, &reader);
-    defer response.deinit(std.testing.allocator);
+    var records = grpc_record.Iterator.init(response_records.items);
+    const root_record = (try records.next()).?;
+    var root_reader = protobuf.Reader.init(root_record.payload);
+    var root_response = try reapi.GetTreeResponse.decodeOwned(std.testing.allocator, &root_reader);
+    defer root_response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), root_response.directories.len);
+    try std.testing.expectEqualStrings("child", root_response.directories[0].directories[0].name);
 
-    try std.testing.expectEqual(@as(usize, 2), response.directories.len);
-    try std.testing.expectEqualStrings("child", response.directories[0].directories[0].name);
-    try std.testing.expectEqualStrings("leaf.txt", response.directories[1].files[0].name);
+    const child_record = (try records.next()).?;
+    var child_reader = protobuf.Reader.init(child_record.payload);
+    var child_response = try reapi.GetTreeResponse.decodeOwned(std.testing.allocator, &child_reader);
+    defer child_response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), child_response.directories.len);
+    try std.testing.expectEqualStrings("leaf.txt", child_response.directories[0].files[0].name);
+    try std.testing.expectEqual(@as(?grpc_record.Message, null), try records.next());
 }
 
 test "Server dispatches ActionCache update and get" {
@@ -626,15 +615,18 @@ test "Server dispatches cached Execute operation" {
     });
     defer std.testing.allocator.free(request);
 
-    const response_record = try server.handleServerStreaming(
+    var response_records: std.ArrayListUnmanaged(u8) = .empty;
+    defer response_records.deinit(std.testing.allocator);
+    var list_writer = body_sink.ArrayListWriter{ .out = &response_records };
+    try server.handleServerStreamingResponse(
         std.testing.io,
         std.testing.allocator,
         execution_execute,
         request,
+        list_writer.writer(),
     );
-    defer std.testing.allocator.free(response_record);
 
-    var operation_reader = protobuf.Reader.init(try singlePayload(response_record));
+    var operation_reader = protobuf.Reader.init(try singlePayload(response_records.items));
     const operation = try reapi.Operation.decode(&operation_reader);
     try std.testing.expect(operation.done);
     try std.testing.expectEqualStrings(reapi.execute_response_type_url, operation.response.?.type_url);
