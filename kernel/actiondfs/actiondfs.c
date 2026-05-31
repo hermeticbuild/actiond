@@ -92,7 +92,6 @@ struct actiondfs_blob_path_cache_entry {
 
 struct actiondfs_cached_lookup {
 	struct actiondfs_cached_child *record;
-	size_t index;
 	bool is_dir;
 };
 
@@ -803,7 +802,6 @@ static bool actiondfs_find_cached_child(struct actiondfs_node *dir,
 					   name, len, &index)) {
 		*out = (struct actiondfs_cached_lookup){
 			.record = &cached->file_children[index],
-			.index = index,
 			.is_dir = false,
 		};
 		return true;
@@ -814,7 +812,6 @@ static bool actiondfs_find_cached_child(struct actiondfs_node *dir,
 					   name, len, &index)) {
 		*out = (struct actiondfs_cached_lookup){
 			.record = &cached->dir_children[index],
-			.index = index,
 			.is_dir = true,
 		};
 		return true;
@@ -874,17 +871,6 @@ static bool actiondfs_lookup_cached_record(struct actiondfs_node *dir,
 
 	found = actiondfs_find_cached_child(dir, name, len, out);
 	return found;
-}
-
-static struct actiondfs_node *actiondfs_lookup_child(struct actiondfs_sb_info *sbi,
-						     struct actiondfs_node *dir,
-						     const char *name,
-						     size_t len)
-{
-	if (!dir->cached_dir)
-		return NULL;
-
-	return actiondfs_lookup_cached_child(sbi, dir, name, len);
 }
 
 static int actiondfs_validate_next_cached_child(struct actiondfs_cached_child *children,
@@ -2730,9 +2716,10 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 		actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUP_HITS);
 		child = NULL;
 	} else {
-		child = actiondfs_lookup_child(actiondfs_sbi(dir->i_sb), parent,
-					       dentry->d_name.name,
-					       dentry->d_name.len);
+		child = actiondfs_lookup_cached_child(actiondfs_sbi(dir->i_sb),
+						      parent,
+						      dentry->d_name.name,
+						      dentry->d_name.len);
 		if (IS_ERR(child))
 			return ERR_CAST(child);
 		if (child) {
