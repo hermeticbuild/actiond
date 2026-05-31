@@ -87,6 +87,10 @@ def _shell_deb_runtime_impl(rctx):
     ] + ["deb_%d" % i for i in range(len(rctx.attr.urls))]:
         rctx.delete(path)
 
+    rctx.file("root/usr/bin/env", """#!/bin/bash
+exec "$@"
+""", executable = True)
+
     _write_runtime_entries(rctx)
 
     manifest = """{

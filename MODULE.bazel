@@ -172,11 +172,9 @@ shell_deb_runtime(
     shell = "bash",
     urls = [
         "https://ports.ubuntu.com/ubuntu-ports/pool/main/b/bash/bash_5.1-6ubuntu1.1_arm64.deb",
-        "https://ports.ubuntu.com/ubuntu-ports/pool/main/c/coreutils/coreutils_8.32-4.1ubuntu1_arm64.deb",
     ],
     sha256s = [
         "822f13fe9ab951346bca677e4e6860a8e995405c661ed7a4e29f9db5ad898724",
-        "9191f297b303511c2a49fec75410e163ebe77721a271d1328425d6f25b4abd55",
     ],
 )
 
@@ -186,11 +184,9 @@ shell_deb_runtime(
     shell = "bash",
     urls = [
         "https://archive.ubuntu.com/ubuntu/pool/main/b/bash/bash_5.1-6ubuntu1.1_amd64.deb",
-        "https://archive.ubuntu.com/ubuntu/pool/main/c/coreutils/coreutils_8.32-4.1ubuntu1_amd64.deb",
     ],
     sha256s = [
         "36b4ca42b0f3f52e95e4386d2ac6fa0293cc8c6db3a18ccb68ac3530b8a4f50a0",
-        "3a0501e78bbd6d23302d1edb0599c66cb07d99e22b52c1451e09f9af9d0db62a7",
     ],
 )
 
