@@ -101,9 +101,6 @@ enum actiondfs_node_origin {
 };
 
 struct actiondfs_node {
-	char *name;
-	size_t name_len;
-	bool name_borrowed;
 	enum actiondfs_node_origin origin;
 	u64 ino;
 	umode_t mode;
@@ -435,17 +432,13 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 {
 	if (!node)
 		return;
-	if (!node->name_borrowed)
-		kfree(node->name);
 	if (node->stage_dentry)
 		dput(node->stage_dentry);
 	kfree(node);
 }
 
-static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info *sbi,
-						       const char *name,
-						       size_t name_len,
-						       umode_t mode)
+static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi,
+						   umode_t mode)
 {
 	struct actiondfs_node *node;
 
@@ -453,35 +446,6 @@ static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info 
 	if (!node)
 		return NULL;
 
-	node->name = kmemdup_nul(name, name_len, GFP_KERNEL);
-	if (!node->name) {
-		kfree(node);
-		return NULL;
-	}
-
-	node->name_len = name_len;
-	node->origin = ACTIONDFS_NODE_INPUT;
-	node->ino = atomic64_inc_return(&sbi->next_ino);
-	node->mode = mode;
-	node->loaded = true;
-	return node;
-}
-
-static struct actiondfs_node *
-actiondfs_alloc_node_borrowed_name(struct actiondfs_sb_info *sbi,
-				   const char *name,
-				   size_t name_len,
-				   umode_t mode)
-{
-	struct actiondfs_node *node;
-
-	node = kzalloc(sizeof(*node), GFP_KERNEL);
-	if (!node)
-		return NULL;
-
-	node->name = (char *)name;
-	node->name_len = name_len;
-	node->name_borrowed = true;
 	node->origin = ACTIONDFS_NODE_INPUT;
 	node->ino = atomic64_inc_return(&sbi->next_ino);
 	node->mode = mode;
@@ -492,12 +456,11 @@ actiondfs_alloc_node_borrowed_name(struct actiondfs_sb_info *sbi,
 static struct actiondfs_node *
 actiondfs_alloc_staged_node(struct actiondfs_sb_info *sbi,
 			    struct actiondfs_node *parent,
-			    const char *name, size_t name_len,
 			    umode_t mode, u64 size)
 {
 	struct actiondfs_node *node;
 
-	node = actiondfs_alloc_node_len(sbi, name, name_len, mode);
+	node = actiondfs_alloc_node(sbi, mode);
 	if (!node)
 		return NULL;
 	node->origin = ACTIONDFS_NODE_STAGED;
@@ -821,9 +784,7 @@ actiondfs_materialize_cached_child(struct actiondfs_sb_info *sbi,
 {
 	struct actiondfs_node *node;
 
-	node = actiondfs_alloc_node_borrowed_name(sbi, record->name,
-						  record->name_len,
-						  record->mode);
+	node = actiondfs_alloc_node(sbi, record->mode);
 	if (!node)
 		return ERR_PTR(-ENOMEM);
 
@@ -2501,15 +2462,13 @@ static struct inode *actiondfs_iget(struct super_block *sb,
 
 static struct inode *actiondfs_iget_staged(struct super_block *sb,
 					   struct actiondfs_node *parent,
-					   const char *name, size_t name_len,
 					   umode_t mode, u64 size)
 {
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(sb);
 	struct actiondfs_node *node;
 	struct inode *inode;
 
-	node = actiondfs_alloc_staged_node(sbi, parent, name, name_len, mode,
-					   size);
+	node = actiondfs_alloc_staged_node(sbi, parent, mode, size);
 	if (!node)
 		return ERR_PTR(-ENOMEM);
 
@@ -2607,8 +2566,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		return NULL;
 	}
 
-	inode = actiondfs_iget_staged(dir->i_sb, parent, dentry->d_name.name,
-				      dentry->d_name.len, mode, size);
+	inode = actiondfs_iget_staged(dir->i_sb, parent, mode, size);
 	if (IS_ERR(inode)) {
 		actiondfs_stage_unlock_child(&parent_path, real_dentry);
 		path_put(&parent_path);
@@ -2724,8 +2682,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 	if (err)
 		goto out_drop_write;
 
-	inode = actiondfs_iget_staged(dir->i_sb, parent, dentry->d_name.name,
-				      dentry->d_name.len,
+	inode = actiondfs_iget_staged(dir->i_sb, parent,
 				      S_IFREG | (mode & 0777), 0);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
@@ -2804,8 +2761,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 	if (err)
 		goto out_drop_write;
 
-	inode = actiondfs_iget_staged(dir->i_sb, parent, dentry->d_name.name,
-				      dentry->d_name.len,
+	inode = actiondfs_iget_staged(dir->i_sb, parent,
 				      S_IFDIR | ACTIONDFS_DIR_MODE, 0);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
@@ -2943,7 +2899,6 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 					old_dentry->d_name.len);
 	struct qstr new_name = QSTR_LEN(new_dentry->d_name.name,
 					new_dentry->d_name.len);
-	char *new_name_copy = NULL;
 	int err;
 
 	if (flags & ~RENAME_NOREPLACE)
@@ -2954,15 +2909,9 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		return -EROFS;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_CALLS);
-	new_name_copy = kmemdup_nul(new_dentry->d_name.name,
-				    new_dentry->d_name.len, GFP_KERNEL);
-	if (!new_name_copy) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_FAILURES);
-		return -ENOMEM;
-	}
 	err = actiondfs_stage_node_path(sbi, old_parent, &old_parent_path);
 	if (err)
-		goto out_free_name;
+		goto out_done;
 	err = actiondfs_ensure_stage_parent_path(sbi, new_parent,
 						 new_dentry->d_parent,
 						 &new_parent_path);
@@ -3017,15 +2966,8 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	rd.new_dentry = real_new;
 	rd.flags = flags;
 	err = vfs_rename(&rd);
-	if (!err) {
-		if (!old_node->name_borrowed)
-			kfree(old_node->name);
-		old_node->name = new_name_copy;
-		old_node->name_len = new_dentry->d_name.len;
-		old_node->name_borrowed = false;
+	if (!err)
 		old_node->parent = new_parent;
-		new_name_copy = NULL;
-	}
 
 out_unlock:
 	if (real_new)
@@ -3039,8 +2981,7 @@ out_put_new_path:
 	path_put(&new_parent_path);
 out_put_old_path:
 	path_put(&old_parent_path);
-out_free_name:
-	kfree(new_name_copy);
+out_done:
 	if (err)
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_FAILURES);
 	else
@@ -3371,8 +3312,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_op = &actiondfs_super_ops;
 	sb->s_time_gran = 1;
 
-	sbi->root = actiondfs_alloc_node_len(sbi, "", 0,
-					    S_IFDIR | ACTIONDFS_DIR_MODE);
+	sbi->root = actiondfs_alloc_node(sbi, S_IFDIR | ACTIONDFS_DIR_MODE);
 	if (!sbi->root) {
 		err = -ENOMEM;
 		goto fail;
