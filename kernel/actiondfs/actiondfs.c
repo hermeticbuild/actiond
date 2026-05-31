@@ -104,7 +104,6 @@ struct actiondfs_node {
 	char *name;
 	size_t name_len;
 	bool name_borrowed;
-	bool cached_dir_owned;
 	enum actiondfs_node_origin origin;
 	u64 ino;
 	umode_t mode;
@@ -119,17 +118,20 @@ struct actiondfs_node {
 };
 
 struct actiondfs_sb_info {
+	struct path cas_path;
+	struct path stage_path;
+	bool stage_path_valid;
+	struct actiondfs_node *root;
+	struct actiondfs_cached_dir *root_cached_dir;
+	atomic64_t next_ino;
+	struct mutex load_lock;
+};
+
+struct actiondfs_mount_options {
 	char *cas_root;
 	char *root_hash;
 	u64 root_size;
 	char *stage_root;
-	struct path cas_path;
-	struct path stage_path;
-	bool cas_path_valid;
-	bool stage_path_valid;
-	struct actiondfs_node *root;
-	atomic64_t next_ino;
-	struct mutex load_lock;
 };
 
 #if ACTIONDFS_ENABLE_STATS
@@ -435,8 +437,6 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 {
 	if (!node)
 		return;
-	if (node->cached_dir_owned)
-		actiondfs_free_cached_dir(node->cached_dir);
 	if (!node->name_borrowed)
 		kfree(node->name);
 	if (node->blob_file)
@@ -2444,7 +2444,7 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 					 &dir->cached_dir);
 	if (err)
 		return err;
-	dir->cached_dir_owned = true;
+	sbi->root_cached_dir = dir->cached_dir;
 	dir->loaded = true;
 	return 0;
 }
@@ -2469,7 +2469,14 @@ static int actiondfs_ensure_loaded(struct super_block *sb,
 	return err;
 }
 
-static int actiondfs_parse_options(struct actiondfs_sb_info *sbi, void *data)
+static void actiondfs_free_mount_options(struct actiondfs_mount_options *opts)
+{
+	kfree(opts->cas_root);
+	kfree(opts->root_hash);
+	kfree(opts->stage_root);
+}
+
+static int actiondfs_parse_options(struct actiondfs_mount_options *opts, void *data)
 {
 	char *options;
 	char *cursor;
@@ -2485,28 +2492,28 @@ static int actiondfs_parse_options(struct actiondfs_sb_info *sbi, void *data)
 
 	while ((token = strsep(&cursor, ",")) != NULL) {
 		if (str_has_prefix(token, "root=")) {
-			kfree(sbi->root_hash);
-			sbi->root_hash = kstrdup(token + 5, GFP_KERNEL);
-			if (!sbi->root_hash) {
+			kfree(opts->root_hash);
+			opts->root_hash = kstrdup(token + 5, GFP_KERNEL);
+			if (!opts->root_hash) {
 				kfree(options);
 				return -ENOMEM;
 			}
 		} else if (str_has_prefix(token, "root_size=")) {
-			if (kstrtoull(token + 10, 10, &sbi->root_size)) {
+			if (kstrtoull(token + 10, 10, &opts->root_size)) {
 				kfree(options);
 				return -EINVAL;
 			}
 		} else if (str_has_prefix(token, "cas=")) {
-			kfree(sbi->cas_root);
-			sbi->cas_root = kstrdup(token + 4, GFP_KERNEL);
-			if (!sbi->cas_root) {
+			kfree(opts->cas_root);
+			opts->cas_root = kstrdup(token + 4, GFP_KERNEL);
+			if (!opts->cas_root) {
 				kfree(options);
 				return -ENOMEM;
 			}
 		} else if (str_has_prefix(token, "stage=")) {
-			kfree(sbi->stage_root);
-			sbi->stage_root = kstrdup(token + 6, GFP_KERNEL);
-			if (!sbi->stage_root) {
+			kfree(opts->stage_root);
+			opts->stage_root = kstrdup(token + 6, GFP_KERNEL);
+			if (!opts->stage_root) {
 				kfree(options);
 				return -ENOMEM;
 			}
@@ -2517,16 +2524,16 @@ static int actiondfs_parse_options(struct actiondfs_sb_info *sbi, void *data)
 	}
 
 	kfree(options);
-	if (!sbi->cas_root || !sbi->root_hash)
+	if (!opts->cas_root || !opts->root_hash)
 		return -EINVAL;
-	if (actiondfs_valid_hash(sbi->root_hash))
+	if (actiondfs_valid_hash(opts->root_hash))
 		return -EINVAL;
-	if (sbi->root_size != ACTIONDFS_UNKNOWN_SIZE &&
-	    sbi->root_size > ACTIONDFS_MAX_DIRECTORY_PROTO_SIZE)
+	if (opts->root_size != ACTIONDFS_UNKNOWN_SIZE &&
+	    opts->root_size > ACTIONDFS_MAX_DIRECTORY_PROTO_SIZE)
 		return -EINVAL;
-	if (strchr(sbi->cas_root, ','))
+	if (strchr(opts->cas_root, ','))
 		return -EINVAL;
-	if (sbi->stage_root && strchr(sbi->stage_root, ','))
+	if (opts->stage_root && strchr(opts->stage_root, ','))
 		return -EINVAL;
 	return 0;
 }
@@ -3388,13 +3395,11 @@ static void actiondfs_put_super(struct super_block *sb)
 	if (!sbi)
 		return;
 	actiondfs_free_tree(sbi->root);
-	if (sbi->cas_path_valid)
+	actiondfs_free_cached_dir(sbi->root_cached_dir);
+	if (sbi->cas_path.dentry)
 		path_put(&sbi->cas_path);
 	if (sbi->stage_path_valid)
 		path_put(&sbi->stage_path);
-	kfree(sbi->cas_root);
-	kfree(sbi->root_hash);
-	kfree(sbi->stage_root);
 	kfree(sbi);
 	sb->s_fs_info = NULL;
 }
@@ -3412,6 +3417,9 @@ struct actiondfs_mount_context {
 static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct actiondfs_mount_context *ctx = fc->fs_private;
+	struct actiondfs_mount_options opts = {
+		.root_size = ACTIONDFS_UNKNOWN_SIZE,
+	};
 	struct actiondfs_sb_info *sbi;
 	struct inode *root_inode;
 	int err;
@@ -3421,7 +3429,6 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -ENOMEM;
 
 	sb->s_fs_info = sbi;
-	sbi->root_size = ACTIONDFS_UNKNOWN_SIZE;
 	mutex_init(&sbi->load_lock);
 	atomic64_set(&sbi->next_ino, 0);
 	sb->s_magic = ACTIONDFS_MAGIC;
@@ -3439,15 +3446,15 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto fail;
 	}
 
-	err = actiondfs_parse_options(sbi, ctx ? ctx->options : NULL);
+	err = actiondfs_parse_options(&opts, ctx ? ctx->options : NULL);
 	if (err)
 		goto fail;
-	err = kern_path(sbi->cas_root, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &sbi->cas_path);
+	err = kern_path(opts.cas_root, LOOKUP_FOLLOW | LOOKUP_DIRECTORY,
+			&sbi->cas_path);
 	if (err)
 		goto fail;
-	sbi->cas_path_valid = true;
-	if (sbi->stage_root) {
-		err = kern_path(sbi->stage_root, LOOKUP_FOLLOW | LOOKUP_DIRECTORY,
+	if (opts.stage_root) {
+		err = kern_path(opts.stage_root, LOOKUP_FOLLOW | LOOKUP_DIRECTORY,
 				&sbi->stage_path);
 		if (err)
 			goto fail;
@@ -3456,9 +3463,9 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	} else {
 		sb->s_flags |= SB_RDONLY;
 	}
-	memcpy(sbi->root->hash, sbi->root_hash, 64);
+	memcpy(sbi->root->hash, opts.root_hash, 64);
 	sbi->root->hash[64] = '\0';
-	sbi->root->size = sbi->root_size;
+	sbi->root->size = opts.root_size;
 	sbi->root->loaded = false;
 
 	root_inode = actiondfs_iget(sb, sbi->root);
@@ -3473,9 +3480,11 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto fail;
 	}
 	actiondfs_stat_inc(ACTIONDFS_STAT_MOUNTS);
+	actiondfs_free_mount_options(&opts);
 	return 0;
 
 fail:
+	actiondfs_free_mount_options(&opts);
 	actiondfs_put_super(sb);
 	return err;
 }
