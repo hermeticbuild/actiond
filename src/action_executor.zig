@@ -561,6 +561,8 @@ pub fn executeDecodedActionWithOptions(
         }
     }
 
+    try appendDevNullMount(io, allocator, work_root, work_root_path, &bind_mounts);
+
     const input_fetch_completed_wall = timestampNow(io);
     const input_fetch_completed = executorTimingNow(io);
     const execution_start_wall = timestampNow(io);
@@ -1709,8 +1711,32 @@ fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void
 }
 
 fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
+    try chroot_root.createDirPath(io, "dev");
+    try chroot_root.createDirPath(io, "proc");
     try chroot_root.createDirPath(io, "tmp");
     try chroot_root.createDirPath(io, "var/tmp");
+}
+
+fn appendDevNullMount(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    try chroot_dir.writeFile(io, .{
+        .sub_path = "dev/null",
+        .data = "",
+    });
+    const source = try allocator.dupeZ(u8, "/dev/null");
+    errdefer allocator.free(source);
+    const target = try std.fmt.allocPrintSentinel(allocator, "{s}/dev/null", .{chroot_path}, 0);
+    errdefer allocator.free(target);
+    try bind_mounts.append(allocator, .{
+        .source = source,
+        .target = target,
+        .read_only = false,
+    });
 }
 
 fn isExecutable(stat: std.Io.Dir.Stat) bool {

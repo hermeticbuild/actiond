@@ -64,6 +64,7 @@ pub const RunOptions = struct {
 pub const BindMount = struct {
     source: [:0]u8,
     target: [:0]u8,
+    read_only: bool = true,
 };
 
 pub const ActiondfsMount = union(enum) {
@@ -531,7 +532,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
         .strict => |strict| childMountActiondfsStrict(strict),
         .overlay => |overlay| childMountActiondfsOverlay(overlay),
     };
-    for (action.bind_mounts) |mount| childBindMountReadOnly(mount);
+    for (action.bind_mounts) |mount| childBindMount(mount);
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
@@ -586,9 +587,10 @@ fn childBringUpLoopback() void {
     childSyscallName(linux.ioctl(fd, linux.SIOCSIFFLAGS, @intFromPtr(&ifr)), "ioctl_set_loopback");
 }
 
-fn childBindMountReadOnly(mount: BindMount) void {
+fn childBindMount(mount: BindMount) void {
     const linux = std.os.linux;
     childSyscallName(linux.mount(mount.source.ptr, mount.target.ptr, null, linux.MS.BIND, 0), "mount_bind");
+    if (!mount.read_only) return;
     childSyscallName(linux.mount(
         null,
         mount.target.ptr,
