@@ -124,10 +124,6 @@ struct actiondfs_node {
 	size_t materialized_capacity;
 };
 
-struct actiondfs_file_ctx {
-	struct file *staged_file;
-};
-
 struct actiondfs_sb_info {
 	char *cas_root;
 	char *root_hash;
@@ -541,13 +537,6 @@ actiondfs_alloc_node_borrowed_name(struct actiondfs_sb_info *sbi,
 	node->stage_children_known_empty = true;
 	mutex_init(&node->blob_lock);
 	return node;
-}
-
-static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi,
-						   const char *name,
-						   umode_t mode)
-{
-	return actiondfs_alloc_node_len(sbi, name, strlen(name), mode);
 }
 
 static struct actiondfs_node *
@@ -1511,10 +1500,8 @@ static struct file *actiondfs_open_real_staged(struct actiondfs_sb_info *sbi,
 	struct file *file;
 	u64 total_start = actiondfs_stat_time_start();
 
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS);
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_ATTEMPTS);
 	if (!sbi->stage_path_valid || !node->stage_rel) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES);
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
 					   total_start);
@@ -1524,7 +1511,6 @@ static struct file *actiondfs_open_real_staged(struct actiondfs_sb_info *sbi,
 	file = file_open_root(&sbi->stage_path, node->stage_rel,
 			      flags | O_LARGEFILE, 0);
 	if (IS_ERR(file)) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES);
 	}
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
@@ -1562,24 +1548,18 @@ actiondfs_get_staged_backing(struct actiondfs_sb_info *sbi,
 			     struct file *actiondfs_file,
 			     int flags, bool *need_fput)
 {
-	struct actiondfs_file_ctx *ctx = actiondfs_file->private_data;
+	struct file *staged_file = actiondfs_file->private_data;
 
 	*need_fput = true;
-	if (ctx && ctx->staged_file &&
-	    actiondfs_staged_backing_supports(ctx->staged_file, flags)) {
+	if (staged_file &&
+	    actiondfs_staged_backing_supports(staged_file, flags)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_HITS);
 		*need_fput = false;
-		return ctx->staged_file;
+		return staged_file;
 	}
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_MISSES);
 	return actiondfs_open_staged_backing(sbi, node, actiondfs_file, flags);
-}
-
-static void actiondfs_put_staged_backing(struct file *file, bool need_fput)
-{
-	if (need_fput)
-		fput(file);
 }
 
 static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
@@ -1615,7 +1595,8 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		}
 		nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
 					       &ctx);
-		actiondfs_put_staged_backing(file, need_fput);
+		if (need_fput)
+			fput(file);
 		if (nread > 0)
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_READ_BYTES,
 					   (u64)nread);
@@ -1691,7 +1672,8 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES,
 					   (u64)nwritten);
 		}
-		actiondfs_put_staged_backing(file, need_fput);
+		if (need_fput)
+			fput(file);
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
 					   total_start);
 	}
@@ -1784,7 +1766,6 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 
 	copied = vfs_copy_file_range(real_in, pos_in, real_out, pos_out, len, 0);
 	if (copied > 0) {
-		pos_in += copied;
 		pos_out += copied;
 	}
 	fput(real_out);
@@ -1857,7 +1838,8 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_SPLICE_READ_BYTES,
 					   (u64)nread);
 		}
-		actiondfs_put_staged_backing(file, need_fput);
+		if (need_fput)
+			fput(file);
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_SPLICE_READ_TOTAL_NS,
 					   total_start);
 		return nread;
@@ -1927,7 +1909,8 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 			return PTR_ERR(file);
 		}
 		err = backing_file_mmap(file, vma, &ctx);
-		actiondfs_put_staged_backing(file, need_fput);
+		if (need_fput)
+			fput(file);
 		if (err)
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_FAILURES);
 		else
@@ -2643,20 +2626,6 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 	return 0;
 }
 
-static int actiondfs_build_private_cached_dir(struct actiondfs_sb_info *sbi,
-					      const char *hash,
-					      u64 expected_size,
-					      struct actiondfs_cached_dir **out)
-{
-	int err;
-
-	err = actiondfs_valid_hash(hash);
-	if (err)
-		return err;
-
-	return actiondfs_build_cached_dir(sbi, hash, expected_size, out);
-}
-
 static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 						 struct actiondfs_node *dir)
 {
@@ -2678,8 +2647,8 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 	}
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_ROOT_DIR_PARSES);
-	err = actiondfs_build_private_cached_dir(sbi, dir->hash, dir->size,
-						 &dir->cached_dir);
+	err = actiondfs_build_cached_dir(sbi, dir->hash, dir->size,
+					 &dir->cached_dir);
 	if (err)
 		return err;
 	dir->cached_dir_owned = true;
@@ -3378,7 +3347,6 @@ static int actiondfs_open(struct inode *inode, struct file *file)
 {
 	struct actiondfs_node *node = inode->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
-	struct actiondfs_file_ctx *ctx;
 	struct file *staged_file;
 
 	if (node->origin != ACTIONDFS_NODE_STAGED &&
@@ -3387,30 +3355,21 @@ static int actiondfs_open(struct inode *inode, struct file *file)
 	if (node->origin != ACTIONDFS_NODE_STAGED)
 		return 0;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
-
 	staged_file = actiondfs_open_staged_backing(
 		sbi, node, file, actiondfs_staged_backing_flags(file));
-	if (IS_ERR(staged_file)) {
-		kfree(ctx);
+	if (IS_ERR(staged_file))
 		return PTR_ERR(staged_file);
-	}
-	ctx->staged_file = staged_file;
-	file->private_data = ctx;
+	file->private_data = staged_file;
 	return 0;
 }
 
 static int actiondfs_release(struct inode *inode, struct file *file)
 {
-	struct actiondfs_file_ctx *ctx = file->private_data;
+	struct file *staged_file = file->private_data;
 
-	if (!ctx)
+	if (!staged_file)
 		return 0;
-	if (ctx->staged_file)
-		fput(ctx->staged_file);
-	kfree(ctx);
+	fput(staged_file);
 	file->private_data = NULL;
 	return 0;
 }
@@ -3707,7 +3666,8 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_op = &actiondfs_super_ops;
 	sb->s_time_gran = 1;
 
-	sbi->root = actiondfs_alloc_node(sbi, "", S_IFDIR | ACTIONDFS_DIR_MODE);
+	sbi->root = actiondfs_alloc_node_len(sbi, "", 0,
+					    S_IFDIR | ACTIONDFS_DIR_MODE);
 	if (!sbi->root) {
 		err = -ENOMEM;
 		goto fail;
@@ -3813,10 +3773,6 @@ static struct file_system_type actiondfs_fs_type = {
 	.kill_sb = kill_anon_super,
 };
 
-static struct file_system_type *actiondfs_fs_types[] = {
-	&actiondfs_fs_type,
-};
-
 #if ACTIONDFS_ENABLE_STATS
 static int actiondfs_stats_show(struct seq_file *m, void *v)
 {
@@ -3831,14 +3787,11 @@ static int actiondfs_stats_show(struct seq_file *m, void *v)
 
 static int __init actiondfs_init(void)
 {
-	size_t i;
 	int err;
 
-	for (i = 0; i < ARRAY_SIZE(actiondfs_fs_types); i++) {
-		err = register_filesystem(actiondfs_fs_types[i]);
-		if (err)
-			goto fail;
-	}
+	err = register_filesystem(&actiondfs_fs_type);
+	if (err)
+		return err;
 #if ACTIONDFS_ENABLE_STATS
 	if (!proc_create_single(ACTIONDFS_PROC_STATS, 0444, NULL,
 				actiondfs_stats_show)) {
@@ -3849,20 +3802,16 @@ static int __init actiondfs_init(void)
 	return 0;
 
 fail:
-	while (i > 0)
-		unregister_filesystem(actiondfs_fs_types[--i]);
+	unregister_filesystem(&actiondfs_fs_type);
 	return err;
 }
 
 static void __exit actiondfs_exit(void)
 {
-	size_t i;
-
 #if ACTIONDFS_ENABLE_STATS
 	remove_proc_entry(ACTIONDFS_PROC_STATS, NULL);
 #endif
-	for (i = ARRAY_SIZE(actiondfs_fs_types); i > 0; i--)
-		unregister_filesystem(actiondfs_fs_types[i - 1]);
+	unregister_filesystem(&actiondfs_fs_type);
 	actiondfs_destroy_blob_path_cache();
 	actiondfs_destroy_dir_cache();
 }
