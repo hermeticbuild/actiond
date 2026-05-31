@@ -35,6 +35,9 @@ runtime_squashfs(
         ("glibc_2_35_aarch64", "glibc2.35"),
         ("glibc_2_39_aarch64", "glibc2.39"),
     ],
+    shell_runtimes = [
+        ("bash_5_1_aarch64", "bash"),
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -46,6 +49,9 @@ runtime_squashfs(
         ("glibc_2_31_x86_64", "glibc2.31"),
         ("glibc_2_35_x86_64", "glibc2.35"),
         ("glibc_2_39_x86_64", "glibc2.39"),
+    ],
+    shell_runtimes = [
+        ("bash_5_1_x86_64", "bash"),
     ],
     visibility = ["//visibility:public"],
 )

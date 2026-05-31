@@ -21,6 +21,7 @@ pub const Error = error{
     OutputParentCreateFailed,
     InvalidDirectoryEntryName,
     UnsupportedLibcRuntime,
+    UnsupportedShellRuntime,
     UnsupportedOutputDirectoryEntry,
     UnsupportedRuntimeArch,
 };
@@ -29,6 +30,7 @@ const max_output_file_bytes = 1024 * 1024 * 1024;
 const chroot_execroot_prefix = "/workspace/";
 const worker_name = "actiond";
 const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
+const supported_shell_runtimes = [_][]const u8{"bash"};
 var next_actiondfs_workspace_id = std.atomic.Value(u64).init(0);
 
 inline fn executorTimingNow(io: std.Io) std.Io.Timestamp {
@@ -39,14 +41,18 @@ inline fn executorTimingNow(io: std.Io) std.Io.Timestamp {
 }
 
 pub const RuntimeMountSources = struct {
+    bin: ?[:0]const u8 = null,
     lib: ?[:0]const u8 = null,
     lib64: ?[:0]const u8 = null,
+    usr_bin: ?[:0]const u8 = null,
     usr_lib: ?[:0]const u8 = null,
     etc: ?[:0]const u8 = null,
 
     fn deinit(self: *RuntimeMountSources, allocator: std.mem.Allocator) void {
+        if (self.bin) |path| allocator.free(path);
         if (self.lib) |path| allocator.free(path);
         if (self.lib64) |path| allocator.free(path);
+        if (self.usr_bin) |path| allocator.free(path);
         if (self.usr_lib) |path| allocator.free(path);
         if (self.etc) |path| allocator.free(path);
         self.* = .{};
@@ -58,12 +64,14 @@ pub const RuntimeMountCache = struct {
     glibc2_31: RuntimeMountSources = .{},
     glibc2_35: RuntimeMountSources = .{},
     glibc2_39: RuntimeMountSources = .{},
+    bash: RuntimeMountSources = .{},
 
     fn deinit(self: *RuntimeMountCache, allocator: std.mem.Allocator) void {
         self.common.deinit(allocator);
         self.glibc2_31.deinit(allocator);
         self.glibc2_35.deinit(allocator);
         self.glibc2_39.deinit(allocator);
+        self.bash.deinit(allocator);
         self.* = .{};
     }
 
@@ -71,6 +79,11 @@ pub const RuntimeMountCache = struct {
         if (std.mem.eql(u8, libc, "glibc2.31")) return &self.glibc2_31;
         if (std.mem.eql(u8, libc, "glibc2.35")) return &self.glibc2_35;
         if (std.mem.eql(u8, libc, "glibc2.39")) return &self.glibc2_39;
+        return null;
+    }
+
+    fn forShell(self: *const RuntimeMountCache, shell: []const u8) ?*const RuntimeMountSources {
+        if (std.mem.eql(u8, shell, "bash")) return &self.bash;
         return null;
     }
 };
@@ -409,6 +422,7 @@ pub fn executeDecodedActionWithOptions(
     const work_root_path = cwd_buffer[0..cwd_len];
 
     const libc_runtime = try libcRuntimeFromPlatform(platform);
+    const shell_runtime = try shellRuntimeFromPlatform(platform);
     var exec_root_dir = work_root;
     var workspace_dir: ?std.Io.Dir = null;
     defer if (workspace_dir) |*dir| dir.close(io);
@@ -528,6 +542,10 @@ pub fn executeDecodedActionWithOptions(
         } else {
             try appendCachedCommonRuntimeMounts(io, allocator, work_root, work_root_path, &cache.common, &bind_mounts);
         }
+        if (shell_runtime) |shell| {
+            const sources = cache.forShell(shell) orelse return error.UnsupportedShellRuntime;
+            try appendCachedShellRuntimeMounts(io, allocator, work_root, work_root_path, sources, &bind_mounts);
+        }
     } else {
         if (options.runtime_root_path) |runtime_root| {
             if (libc_runtime == null) {
@@ -537,6 +555,10 @@ pub fn executeDecodedActionWithOptions(
         if (libc_runtime) |libc| {
             const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
             try appendLibcRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, libc, &bind_mounts);
+        }
+        if (shell_runtime) |shell| {
+            const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
+            try appendShellRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, shell, &bind_mounts);
         }
     }
 
@@ -619,6 +641,19 @@ fn libcRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
             if (std.mem.eql(u8, property.value, name)) return name;
         }
         return error.UnsupportedLibcRuntime;
+    }
+    return null;
+}
+
+fn shellRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
+    const value = platform orelse return null;
+    for (value.properties) |property| {
+        if (!std.mem.eql(u8, property.name, "shell")) continue;
+        if (property.value.len == 0 or std.mem.eql(u8, property.value, "none")) return null;
+        for (supported_shell_runtimes) |name| {
+            if (std.mem.eql(u8, property.value, name)) return name;
+        }
+        return error.UnsupportedShellRuntime;
     }
     return null;
 }
@@ -1083,6 +1118,7 @@ fn discoverRuntimeMounts(
     cache.glibc2_31 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.31");
     cache.glibc2_35 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.35");
     cache.glibc2_39 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.39");
+    cache.bash = try discoverShellRuntimeMounts(io, allocator, runtime_root_path, "bash");
 
     return cache;
 }
@@ -1103,6 +1139,23 @@ fn discoverLibcRuntimeMounts(
     sources.lib64 = try firstRuntimePathIfExists(io, allocator, runtime_root, &.{ "lib64", "usr/lib64" });
     sources.usr_lib = try runtimePathIfExists(io, allocator, runtime_root, "usr/lib");
     sources.etc = try runtimePathIfExists(io, allocator, runtime_root, "etc");
+    return sources;
+}
+
+fn discoverShellRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime_root_path: []const u8,
+    shell: []const u8,
+) !RuntimeMountSources {
+    const arch = try runtimeArch();
+    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/shell/{s}/{s}/root", .{ runtime_root_path, shell, arch });
+    defer allocator.free(runtime_root);
+
+    var sources: RuntimeMountSources = .{};
+    errdefer sources.deinit(allocator);
+    sources.bin = try runtimePathIfExists(io, allocator, runtime_root, "bin");
+    sources.usr_bin = try runtimePathIfExists(io, allocator, runtime_root, "usr/bin");
     return sources;
 }
 
@@ -1161,6 +1214,18 @@ fn appendCachedLibcRuntimeMounts(
     if (sources.etc) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "etc", bind_mounts);
 }
 
+fn appendCachedShellRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    sources: *const RuntimeMountSources,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    if (sources.bin) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "bin", bind_mounts);
+    if (sources.usr_bin) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "usr/bin", bind_mounts);
+}
+
 fn appendCachedRuntimeMount(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1209,6 +1274,23 @@ fn appendLibcRuntimeMounts(
     try appendFirstExistingRuntimeMount(io, allocator, chroot_dir, chroot_path, runtime_root, &.{ "lib64", "usr/lib64" }, "lib64", bind_mounts);
     _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "usr/lib", "usr/lib", bind_mounts);
     _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "etc", "etc", bind_mounts);
+}
+
+fn appendShellRuntimeMounts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    runtime_root_path: []const u8,
+    shell: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    const arch = try runtimeArch();
+    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/shell/{s}/{s}/root", .{ runtime_root_path, shell, arch });
+    defer allocator.free(runtime_root);
+
+    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "bin", "bin", bind_mounts);
+    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "usr/bin", "usr/bin", bind_mounts);
 }
 
 fn appendFirstExistingRuntimeMount(
