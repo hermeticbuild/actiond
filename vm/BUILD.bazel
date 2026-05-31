@@ -38,13 +38,3 @@ genrule(
     tools = ["//tools:zstd_file"],
     visibility = ["//visibility:public"],
 )
-
-filegroup(
-    name = "vm_bundle",
-    srcs = [
-        ":initramfs",
-        ":linux_kernel_zst",
-        "//runtimes:runtimes_squashfs",
-    ],
-    visibility = ["//visibility:public"],
-)
