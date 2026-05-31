@@ -80,14 +80,28 @@ The embedded runtime image currently includes:
 - `glibc2.31`
 - `glibc2.35`
 - `glibc2.39`
+- `bash`
 
 Actions that are not fully hermetic and need a glibc can request one be mounted into their chroot via execution property:
 
 ```python
-execution_requirements = {"libc": "glibc2.35"}
+exec_properties = {"libc": "glibc2.35"}
 ```
 
 Unsupported libc names fail explicitly.
+
+Actions that invoke a Bash script can request the embedded Bash runtime with
+the `requires-bash` exec property:
+
+```python
+exec_properties = {"requires-bash": ""}
+```
+
+For a whole build, Bazel can inject the same property globally:
+
+```bash
+--remote_default_exec_properties=requires-bash=
+```
 
 ## Build From Source
 

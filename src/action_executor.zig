@@ -30,7 +30,6 @@ const max_output_file_bytes = 1024 * 1024 * 1024;
 const chroot_execroot_prefix = "/workspace/";
 const worker_name = "actiond";
 const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
-const supported_shell_runtimes = [_][]const u8{"bash"};
 var next_actiondfs_workspace_id = std.atomic.Value(u64).init(0);
 
 inline fn executorTimingNow(io: std.Io) std.Io.Timestamp {
@@ -648,12 +647,9 @@ fn libcRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
 fn shellRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
     const value = platform orelse return null;
     for (value.properties) |property| {
-        if (!std.mem.eql(u8, property.name, "shell")) continue;
-        if (property.value.len == 0 or std.mem.eql(u8, property.value, "none")) return null;
-        for (supported_shell_runtimes) |name| {
-            if (std.mem.eql(u8, property.value, name)) return name;
-        }
-        return error.UnsupportedShellRuntime;
+        if (!std.mem.eql(u8, property.name, "requires-bash")) continue;
+        if (property.value.len != 0) return error.UnsupportedShellRuntime;
+        return "bash";
     }
     return null;
 }
