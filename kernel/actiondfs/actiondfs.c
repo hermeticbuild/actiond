@@ -192,8 +192,6 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_MMAP_FAILURES,
 	ACTIONDFS_STAT_DIRECTORY_BLOB_READS,
 	ACTIONDFS_STAT_DIRECTORY_BLOB_BYTES,
-	ACTIONDFS_STAT_STAGE_PARENT_PATH_LOOKUPS,
-	ACTIONDFS_STAT_STAGE_PARENT_PATH_ERRORS,
 	ACTIONDFS_STAT_STAGE_CHILD_LOOKUPS,
 	ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_HITS,
 	ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_NEGATIVE,
@@ -212,11 +210,6 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES,
-	ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_HITS,
-	ACTIONDFS_STAT_STAGE_BACKING_OPEN_READ_CALLS,
-	ACTIONDFS_STAT_STAGE_BACKING_OPEN_WRITE_CALLS,
-	ACTIONDFS_STAT_STAGE_BACKING_OPEN_SPLICE_READ_CALLS,
-	ACTIONDFS_STAT_STAGE_BACKING_OPEN_MMAP_CALLS,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
@@ -312,8 +305,6 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_MMAP_FAILURES] = "mmap_failures",
 	[ACTIONDFS_STAT_DIRECTORY_BLOB_READS] = "directory_blob_reads",
 	[ACTIONDFS_STAT_DIRECTORY_BLOB_BYTES] = "directory_blob_bytes",
-	[ACTIONDFS_STAT_STAGE_PARENT_PATH_LOOKUPS] = "stage_parent_path_lookups",
-	[ACTIONDFS_STAT_STAGE_PARENT_PATH_ERRORS] = "stage_parent_path_errors",
 	[ACTIONDFS_STAT_STAGE_CHILD_LOOKUPS] = "stage_child_lookups",
 	[ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_HITS] = "stage_child_lookup_hits",
 	[ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_NEGATIVE] = "stage_child_lookup_negative",
@@ -332,11 +323,6 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES] = "stage_inode_lookup_input_dir_merges",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS] = "stage_backing_open_attempts",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES] = "stage_backing_open_failures",
-	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_HITS] = "stage_backing_open_cached_hits",
-	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_READ_CALLS] = "stage_backing_open_read_calls",
-	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_WRITE_CALLS] = "stage_backing_open_write_calls",
-	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_SPLICE_READ_CALLS] = "stage_backing_open_splice_read_calls",
-	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_MMAP_CALLS] = "stage_backing_open_mmap_calls",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS] = "stage_backing_open_total_ns",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS] = "stage_backing_open_lookup_ns",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS] = "stage_backing_open_file_ns",
@@ -1492,16 +1478,6 @@ static int actiondfs_staged_backing_flags(const struct file *file)
 	return O_RDONLY;
 }
 
-static struct file *actiondfs_get_staged_backing(struct file *actiondfs_file)
-{
-	struct file *staged_file = actiondfs_file->private_data;
-
-	if (!staged_file)
-		return ERR_PTR(-EBADF);
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_CACHED_HITS);
-	return staged_file;
-}
-
 static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -1524,12 +1500,11 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 			return 0;
 		total_start = actiondfs_stat_time_start();
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_READ_CALLS);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_READ_CALLS);
-		file = actiondfs_get_staged_backing(iocb->ki_filp);
-		if (IS_ERR(file)) {
+		file = iocb->ki_filp->private_data;
+		if (!file) {
 			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_READ_TOTAL_NS,
 						   total_start);
-			return PTR_ERR(file);
+			return -EBADF;
 		}
 		nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
 					       &ctx);
@@ -1586,12 +1561,11 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		u64 total_start = actiondfs_stat_time_start();
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_WRITE_CALLS);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_WRITE_CALLS);
-		file = actiondfs_get_staged_backing(iocb->ki_filp);
-		if (IS_ERR(file)) {
+		file = iocb->ki_filp->private_data;
+		if (!file) {
 			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
 						   total_start);
-			return PTR_ERR(file);
+			return -EBADF;
 		}
 		nwritten = backing_file_write_iter(file, from, iocb,
 						   iocb->ki_flags, &ctx);
@@ -1670,8 +1644,10 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 			return 0;
 		}
 		len = min_t(u64, (u64)len, node_in->size - pos_in);
-		real_in = actiondfs_get_staged_backing(file_in);
-		if (!IS_ERR(real_in))
+		real_in = file_in->private_data;
+		if (!real_in)
+			real_in = ERR_PTR(-EBADF);
+		else
 			get_file(real_in);
 	} else {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
@@ -1686,8 +1662,10 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		return PTR_ERR(real_in);
 	}
 
-	real_out = actiondfs_get_staged_backing(file_out);
-	if (!IS_ERR(real_out))
+	real_out = file_out->private_data;
+	if (!real_out)
+		real_out = ERR_PTR(-EBADF);
+	else
 		get_file(real_out);
 	if (IS_ERR(real_out)) {
 		fput(real_in);
@@ -1753,12 +1731,11 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 		u64 total_start = actiondfs_stat_time_start();
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SPLICE_READ_CALLS);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_SPLICE_READ_CALLS);
-		file = actiondfs_get_staged_backing(actiondfs_file);
-		if (IS_ERR(file)) {
+		file = actiondfs_file->private_data;
+		if (!file) {
 			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_SPLICE_READ_TOTAL_NS,
 						   total_start);
-			return PTR_ERR(file);
+			return -EBADF;
 		}
 		init_sync_kiocb(&backing_iocb, actiondfs_file);
 		backing_iocb.ki_pos = pos;
@@ -1826,13 +1803,12 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 		u64 total_start = actiondfs_stat_time_start();
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_CALLS);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_MMAP_CALLS);
-		file = actiondfs_get_staged_backing(actiondfs_file);
-		if (IS_ERR(file)) {
+		file = actiondfs_file->private_data;
+		if (!file) {
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_FAILURES);
 			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_MMAP_TOTAL_NS,
 						   total_start);
-			return PTR_ERR(file);
+			return -EBADF;
 		}
 		err = backing_file_mmap(file, vma, &ctx);
 		if (err)
