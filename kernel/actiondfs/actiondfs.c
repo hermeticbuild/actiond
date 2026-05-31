@@ -161,8 +161,6 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_CACHED_DIR_BYTES,
 	ACTIONDFS_STAT_CACHED_FILE_RECORDS,
 	ACTIONDFS_STAT_CACHED_DIR_RECORDS,
-	ACTIONDFS_STAT_DIRECT_FILE_NODES,
-	ACTIONDFS_STAT_DIRECT_DIR_NODES,
 	ACTIONDFS_STAT_LOOKUPS,
 	ACTIONDFS_STAT_LOOKUP_HITS,
 	ACTIONDFS_STAT_LOOKUP_NEGATIVE,
@@ -289,8 +287,6 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_CACHED_DIR_BYTES] = "cached_dir_bytes",
 	[ACTIONDFS_STAT_CACHED_FILE_RECORDS] = "cached_file_records",
 	[ACTIONDFS_STAT_CACHED_DIR_RECORDS] = "cached_dir_records",
-	[ACTIONDFS_STAT_DIRECT_FILE_NODES] = "direct_file_nodes",
-	[ACTIONDFS_STAT_DIRECT_DIR_NODES] = "direct_dir_nodes",
 	[ACTIONDFS_STAT_LOOKUPS] = "lookups",
 	[ACTIONDFS_STAT_LOOKUP_HITS] = "lookup_hits",
 	[ACTIONDFS_STAT_LOOKUP_NEGATIVE] = "lookup_negative",
@@ -1097,28 +1093,6 @@ static struct actiondfs_node *actiondfs_lookup_child(struct actiondfs_sb_info *s
 	return child;
 }
 
-static int actiondfs_validate_no_cross_type_duplicates(struct actiondfs_node *dir)
-{
-	size_t file_index = 0;
-	size_t dir_index = 0;
-
-	while (file_index < dir->file_count && dir_index < dir->dir_count) {
-		struct actiondfs_node *file = dir->file_children[file_index];
-		struct actiondfs_node *child_dir = dir->dir_children[dir_index];
-		int cmp = actiondfs_compare_name(file->name, file->name_len,
-						 child_dir->name,
-						 child_dir->name_len);
-
-		if (!cmp)
-			return -EEXIST;
-		if (cmp < 0)
-			file_index++;
-		else
-			dir_index++;
-	}
-	return 0;
-}
-
 static int actiondfs_validate_next_cached_child(struct actiondfs_cached_child *children,
 						size_t count,
 						const char *name,
@@ -1229,22 +1203,6 @@ static void actiondfs_destroy_blob_path_cache(void)
 	}
 }
 
-static int actiondfs_validate_next_child(struct actiondfs_node **children,
-					 size_t count,
-					 const char *name,
-					 size_t name_len)
-{
-	struct actiondfs_node *last;
-
-	if (!count)
-		return 0;
-
-	last = children[count - 1];
-	if (actiondfs_compare_name(last->name, last->name_len, name, name_len) >= 0)
-		return -EINVAL;
-	return 0;
-}
-
 static int actiondfs_append_cached_child(struct actiondfs_cached_child **children_ptr,
 					 size_t *count,
 					 size_t *capacity_ptr,
@@ -1326,115 +1284,6 @@ static int actiondfs_append_cached_dir_child(struct actiondfs_cached_dir *parent
 	if (!err)
 		actiondfs_stat_inc(ACTIONDFS_STAT_CACHED_DIR_RECORDS);
 	return err;
-}
-
-static int actiondfs_append_child(struct actiondfs_node *dir,
-				  struct actiondfs_node ***children_ptr,
-				  size_t *count,
-				  size_t *capacity_ptr,
-				  struct actiondfs_node *child)
-{
-	struct actiondfs_node **children;
-	size_t capacity;
-
-	if (!actiondfs_is_dir(dir))
-		return -ENOTDIR;
-
-	child->parent = dir;
-	if (*count == *capacity_ptr) {
-		if (*capacity_ptr > SIZE_MAX / 2)
-			return -EOVERFLOW;
-		capacity = *capacity_ptr ? *capacity_ptr * 2 : 8;
-		children = krealloc_array(*children_ptr, capacity,
-					  sizeof(*children), GFP_KERNEL);
-		if (!children)
-			return -ENOMEM;
-		*children_ptr = children;
-		*capacity_ptr = capacity;
-	}
-	(*children_ptr)[(*count)++] = child;
-	return 0;
-}
-
-static struct actiondfs_node *actiondfs_add_dir_child(struct actiondfs_sb_info *sbi,
-						      struct actiondfs_node *parent,
-						      const char *name,
-						      size_t name_len,
-						      const char *hash,
-						      u64 size,
-						      bool loaded)
-{
-	struct actiondfs_node *dir;
-	int err;
-
-	err = actiondfs_valid_component(name, name_len);
-	if (err)
-		return ERR_PTR(err);
-	err = actiondfs_validate_next_child(parent->dir_children,
-					    parent->dir_count,
-					    name, name_len);
-	if (err)
-		return ERR_PTR(err);
-
-	dir = actiondfs_alloc_node_len(sbi, name, name_len, S_IFDIR | ACTIONDFS_DIR_MODE);
-	if (!dir)
-		return ERR_PTR(-ENOMEM);
-
-	if (hash) {
-		memcpy(dir->hash, hash, 64);
-		dir->hash[64] = '\0';
-	}
-	dir->size = size;
-	dir->loaded = loaded;
-
-	err = actiondfs_append_child(parent, &parent->dir_children,
-				     &parent->dir_count,
-				     &parent->dir_capacity, dir);
-	if (err) {
-		actiondfs_free_tree(dir);
-		return ERR_PTR(err);
-	}
-	actiondfs_stat_inc(ACTIONDFS_STAT_DIRECT_DIR_NODES);
-	return dir;
-}
-
-static int actiondfs_add_file_child(struct actiondfs_sb_info *sbi,
-				    struct actiondfs_node *parent,
-				    const char *name,
-				    size_t name_len,
-				    umode_t mode,
-				    u64 size,
-				    const char *hash)
-{
-	struct actiondfs_node *file;
-	int err;
-
-	err = actiondfs_valid_component(name, name_len);
-	if (err)
-		return err;
-	err = actiondfs_validate_next_child(parent->file_children,
-					    parent->file_count,
-					    name, name_len);
-	if (err)
-		return err;
-
-	file = actiondfs_alloc_node_len(sbi, name, name_len, S_IFREG | (mode & 0777));
-	if (!file)
-		return -ENOMEM;
-
-	file->size = size;
-	memcpy(file->hash, hash, 64);
-	file->hash[64] = '\0';
-
-	err = actiondfs_append_child(parent, &parent->file_children,
-				     &parent->file_count,
-				     &parent->file_capacity, file);
-	if (err) {
-		actiondfs_free_tree(file);
-		return err;
-	}
-	actiondfs_stat_inc(ACTIONDFS_STAT_DIRECT_FILE_NODES);
-	return 0;
 }
 
 static int actiondfs_hex_nibble(char c)
@@ -2424,40 +2273,6 @@ static int actiondfs_parse_reapi_dir_fields(const u8 *data, size_t len,
 	}
 
 	return out->name && has_digest ? 0 : -EINVAL;
-}
-
-static int actiondfs_parse_reapi_file(struct actiondfs_sb_info *sbi,
-				      struct actiondfs_node *parent,
-				      const u8 *data, size_t len)
-{
-	struct actiondfs_parsed_file file;
-	int err;
-
-	err = actiondfs_parse_reapi_file_fields(data, len, &file);
-	if (err)
-		return err;
-
-	return actiondfs_add_file_child(sbi, parent, file.name, file.name_len,
-					file.executable ? 0555 : 0444,
-					file.digest.size, file.digest.hash);
-}
-
-static int actiondfs_parse_reapi_directory_node(struct actiondfs_sb_info *sbi,
-						struct actiondfs_node *parent,
-						const u8 *data, size_t len)
-{
-	struct actiondfs_parsed_dir dir;
-	int err;
-
-	err = actiondfs_parse_reapi_dir_fields(data, len, &dir);
-	if (err)
-		return err;
-
-	return PTR_ERR_OR_ZERO(actiondfs_add_dir_child(sbi, parent, dir.name,
-						      dir.name_len,
-						      dir.digest.hash,
-						      dir.digest.size,
-						      false));
 }
 
 static int actiondfs_parse_reapi_cached_file(struct actiondfs_cached_dir *parent,
