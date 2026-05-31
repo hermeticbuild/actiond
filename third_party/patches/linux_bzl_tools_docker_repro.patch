@@ -1,0 +1,45 @@
+diff --git a/linux.bzl b/linux.bzl
+index 9448f1c..04b2c0f 100644
+--- a/linux.bzl
++++ b/linux.bzl
+@@ -163,7 +163,6 @@ _LINUX_ARCHIVE_EXCLUDES = [
+     "samples/",
+     "samples/*",
+     "samples/**",
+-    "tools/docker/**",
+     "*/Build",
+ ]
+ 
+diff --git a/source_repo.BUILD.bazel b/source_repo.BUILD.bazel
+index 6f6fbe5..b0e7e8d 100644
+--- a/source_repo.BUILD.bazel
++++ b/source_repo.BUILD.bazel
+@@ -35,15 +35,6 @@ filegroup(
+     ], allow_empty = True),
+ )
+ 
+-filegroup(
+-    name = "tools_files",
+-    srcs = glob([
+-        "tools/**",
+-    ], exclude = [
+-        "tools/docker/**",
+-    ], allow_empty = True),
+-)
+-
+ filegroup(
+     name = "all_files",
+     srcs = glob(
+@@ -51,12 +42,10 @@ filegroup(
+         exclude = [
+             "Documentation",
+             "samples",
+-            "tools",
+         ],
+         exclude_directories = 0,
+     ) + [
+         ":source_tree_lookup_files",
+-        ":tools_files",
+     ],
+ )
+ 
