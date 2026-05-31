@@ -349,7 +349,7 @@ fn runCommandChroot(
 
     var cgroup = try Cgroup.create(io, allocator, options.cgroup_limits);
     defer cgroup.deinit(io, allocator);
-    try prepareChrootWritableDirs(io, allocator, chroot_dir, options.sandbox_uid, options.sandbox_gid);
+    try prepareChrootWritableDirs(io, chroot_dir, options.sandbox_uid, options.sandbox_gid);
     for (options.actiondfs_mounts) |mount| {
         switch (mount) {
             .strict => |strict| try prepareChrootWritableDirs(io, strict.stage_dir, options.sandbox_uid, options.sandbox_gid),
