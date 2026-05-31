@@ -1615,6 +1615,7 @@ fn prepareOutputParents(
 ) !void {
     if (command.output_paths.len != 0) {
         for (command.output_paths) |path| try createOutputParent(io, work_root, path);
+        return;
     }
 
     for (command.output_files) |path| try createOutputParent(io, work_root, path);
@@ -2629,6 +2630,23 @@ test "prepareOutputParents creates parent directories for declared output paths"
         .output_paths = &.{"bazel-out/bin/pkg/out.txt"},
     });
     _ = try work_dir.statFile(std.testing.io, "bazel-out/bin/pkg", .{});
+}
+
+test "prepareOutputParents ignores legacy output fields when output_paths is present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    try prepareOutputParents(std.testing.io, work_dir, .{
+        .output_paths = &.{"new/out.txt"},
+        .output_files = &.{"legacy/file.txt"},
+        .output_directories = &.{"legacy/tree"},
+    });
+
+    _ = try work_dir.statFile(std.testing.io, "new", .{});
+    try std.testing.expectError(error.FileNotFound, work_dir.statFile(std.testing.io, "legacy", .{}));
 }
 
 test "prepareOutputParents accepts Bazel-style external output paths" {
