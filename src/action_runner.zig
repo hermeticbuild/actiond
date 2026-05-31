@@ -22,7 +22,7 @@ inline fn runnerTimingNow(io: std.Io) std.Io.Timestamp {
 
 fn actionNamespaceFlags() usize {
     const linux = std.os.linux;
-    return linux.CLONE.NEWNS | linux.CLONE.NEWNET;
+    return linux.CLONE.NEWNS | linux.CLONE.NEWNET | linux.CLONE.NEWPID;
 }
 
 pub const CgroupLimits = struct {
@@ -526,6 +526,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "prctl_no_new_privs");
     childCloseExtraFdsFrom(child_setup_fd + 1);
     childSyscallName(linux.unshare(actionNamespaceFlags()), "unshare_namespaces");
+    childEnterPidNamespace();
     childBringUpLoopback();
     childSyscallName(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0), "mount_private");
     for (action.actiondfs_mounts) |mount| switch (mount) {
@@ -534,6 +535,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     };
     for (action.bind_mounts) |mount| childBindMount(mount);
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
+    childSyscallName(linux.mount("proc", "/proc", "proc", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, 0), "mount_proc");
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
     childWriteSetupComplete();
@@ -541,6 +543,42 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childWriteLiteral("actiond child setup failed: execve ");
     childWriteBytes(@tagName(std.posix.errno(execve_rc)));
     childWriteLiteral("\n");
+    linux.exit(127);
+}
+
+fn childEnterPidNamespace() void {
+    const linux = std.os.linux;
+    const rc = linux.fork();
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => {},
+        else => {
+            childWriteLiteral("actiond child setup failed: fork_pidns\n");
+            linux.exit(127);
+        },
+    }
+
+    const pid: linux.pid_t = @intCast(rc);
+    if (pid == 0) return;
+
+    var raw_status: u32 = 0;
+    while (true) {
+        const wait_rc = linux.waitpid(pid, &raw_status, 0);
+        switch (std.posix.errno(wait_rc)) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => {
+                childWriteLiteral("actiond child setup failed: waitpid_pidns\n");
+                linux.exit(127);
+            },
+        }
+    }
+
+    if (linux.W.IFEXITED(raw_status)) {
+        linux.exit(linux.W.EXITSTATUS(raw_status));
+    }
+    if (linux.W.IFSIGNALED(raw_status)) {
+        linux.exit(@intCast(128 + @intFromEnum(linux.W.TERMSIG(raw_status))));
+    }
     linux.exit(127);
 }
 
