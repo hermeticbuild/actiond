@@ -3,7 +3,7 @@ const cas = @import("cas.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
 
-const key_prefix = "ac/sha256/";
+const key_prefix = "sha256/";
 
 pub const Store = struct {
     root: std.Io.Dir,
@@ -18,7 +18,7 @@ pub const Store = struct {
     }
 
     pub fn ensureLayout(self: Store, io: std.Io) !void {
-        try self.root.createDirPath(io, "ac/sha256");
+        try self.root.createDirPath(io, "sha256");
     }
 
     pub fn put(
