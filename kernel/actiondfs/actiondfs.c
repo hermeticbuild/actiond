@@ -105,6 +105,7 @@ struct actiondfs_node {
 	char *name;
 	size_t name_len;
 	bool name_borrowed;
+	bool cached_dir_owned;
 	enum actiondfs_node_origin origin;
 	char *stage_rel;
 	u64 ino;
@@ -473,6 +474,8 @@ static struct actiondfs_sb_info *actiondfs_sbi(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
+static void actiondfs_free_cached_dir(struct actiondfs_cached_dir *dir);
+
 static bool actiondfs_is_dir(const struct actiondfs_node *node)
 {
 	return S_ISDIR(node->mode);
@@ -495,6 +498,8 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 	kfree(node->materialized_children);
 	kfree(node->file_children);
 	kfree(node->dir_children);
+	if (node->cached_dir_owned)
+		actiondfs_free_cached_dir(node->cached_dir);
 	kfree(node->stage_rel);
 	if (!node->name_borrowed)
 		kfree(node->name);
@@ -525,7 +530,10 @@ static void actiondfs_clear_children(struct actiondfs_node *node)
 	node->dir_children = NULL;
 	node->dir_count = 0;
 	node->dir_capacity = 0;
+	if (node->cached_dir_owned)
+		actiondfs_free_cached_dir(node->cached_dir);
 	node->cached_dir = NULL;
+	node->cached_dir_owned = false;
 }
 
 static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info *sbi,
@@ -2899,12 +2907,23 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 	return 0;
 }
 
+static int actiondfs_build_private_cached_dir(struct actiondfs_sb_info *sbi,
+					      const char *hash,
+					      u64 expected_size,
+					      struct actiondfs_cached_dir **out)
+{
+	int err;
+
+	err = actiondfs_valid_hash(hash);
+	if (err)
+		return err;
+
+	return actiondfs_build_cached_dir(sbi, hash, expected_size, out);
+}
+
 static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 						 struct actiondfs_node *dir)
 {
-	u8 *buffer;
-	size_t len;
-	size_t pos = 0;
 	int err;
 
 	if (dir->loaded)
@@ -2922,66 +2941,14 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 		return 0;
 	}
 
-	if (!dir->parent)
-		actiondfs_stat_inc(ACTIONDFS_STAT_ROOT_DIR_PARSES);
-	err = actiondfs_read_cas_blob(sbi, dir->hash, dir->size, &buffer, &len);
+	actiondfs_stat_inc(ACTIONDFS_STAT_ROOT_DIR_PARSES);
+	err = actiondfs_build_private_cached_dir(sbi, dir->hash, dir->size,
+						 &dir->cached_dir);
 	if (err)
 		return err;
-
-	while (pos < len) {
-		const u8 *field;
-		size_t field_len;
-		u64 key;
-
-		err = actiondfs_pb_read_varint(buffer, len, &pos, &key);
-		if (err)
-			goto out;
-
-		switch (key >> 3) {
-		case 1:
-			if ((key & 7) != 2) {
-				err = -EINVAL;
-				goto out;
-			}
-			err = actiondfs_pb_read_len(buffer, len, &pos, &field, &field_len);
-			if (err)
-				goto out;
-			err = actiondfs_parse_reapi_file(sbi, dir, field, field_len);
-			if (err)
-				goto out;
-			break;
-		case 2:
-			if ((key & 7) != 2) {
-				err = -EINVAL;
-				goto out;
-			}
-			err = actiondfs_pb_read_len(buffer, len, &pos, &field, &field_len);
-			if (err)
-				goto out;
-			err = actiondfs_parse_reapi_directory_node(sbi, dir, field, field_len);
-			if (err)
-				goto out;
-			break;
-		case 3:
-			err = -EOPNOTSUPP;
-			goto out;
-		default:
-			err = actiondfs_pb_skip(buffer, len, &pos, key & 7);
-			if (err)
-				goto out;
-		}
-	}
-
-	err = actiondfs_validate_no_cross_type_duplicates(dir);
-	if (err)
-		goto out;
-
+	dir->cached_dir_owned = true;
 	dir->loaded = true;
-out:
-	if (err)
-		actiondfs_clear_children(dir);
-	kvfree(buffer);
-	return err;
+	return 0;
 }
 
 static int actiondfs_ensure_loaded(struct super_block *sb,
