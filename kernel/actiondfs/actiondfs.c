@@ -220,11 +220,6 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS,
 	ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
-	ACTIONDFS_STAT_STAGE_REAL_OPEN_ATTEMPTS,
-	ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES,
-	ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_IN_CALLS,
-	ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_OUT_CALLS,
-	ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
 	ACTIONDFS_STAT_STAGE_READ_CALLS,
 	ACTIONDFS_STAT_STAGE_READ_BYTES,
 	ACTIONDFS_STAT_STAGE_READ_TOTAL_NS,
@@ -345,11 +340,6 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS] = "stage_backing_open_total_ns",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS] = "stage_backing_open_lookup_ns",
 	[ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS] = "stage_backing_open_file_ns",
-	[ACTIONDFS_STAT_STAGE_REAL_OPEN_ATTEMPTS] = "stage_real_open_attempts",
-	[ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES] = "stage_real_open_failures",
-	[ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_IN_CALLS] = "stage_real_open_copy_in_calls",
-	[ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_OUT_CALLS] = "stage_real_open_copy_out_calls",
-	[ACTIONDFS_STAT_STAGE_REAL_OPEN_NS] = "stage_real_open_ns",
 	[ACTIONDFS_STAT_STAGE_READ_CALLS] = "stage_read_calls",
 	[ACTIONDFS_STAT_STAGE_READ_BYTES] = "stage_read_bytes",
 	[ACTIONDFS_STAT_STAGE_READ_TOTAL_NS] = "stage_read_total_ns",
@@ -1493,42 +1483,6 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	return file;
 }
 
-static struct file *actiondfs_open_real_staged(struct actiondfs_sb_info *sbi,
-					       struct file *actiondfs_file,
-					       int flags)
-{
-	struct actiondfs_node *node = file_inode(actiondfs_file)->i_private;
-	struct path real_path;
-	struct file *file;
-	u64 total_start = actiondfs_stat_time_start();
-	int err;
-
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_ATTEMPTS);
-	if (!sbi->stage_path_valid) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES);
-		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
-					   total_start);
-		return ERR_PTR(-EROFS);
-	}
-
-	err = actiondfs_stage_node_path(sbi, node, &real_path);
-	if (err) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES);
-		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
-					   total_start);
-		return ERR_PTR(err);
-	}
-
-	file = dentry_open(&real_path, flags | O_LARGEFILE, current_cred());
-	path_put(&real_path);
-	if (IS_ERR(file)) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_FAILURES);
-	}
-	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_REAL_OPEN_NS,
-				   total_start);
-	return file;
-}
-
 static int actiondfs_staged_backing_flags(const struct file *file)
 {
 	if ((file->f_mode & FMODE_READ) && (file->f_mode & FMODE_WRITE))
@@ -1716,8 +1670,9 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 			return 0;
 		}
 		len = min_t(u64, (u64)len, node_in->size - pos_in);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_IN_CALLS);
-		real_in = actiondfs_open_real_staged(sbi, file_in, O_RDONLY);
+		real_in = actiondfs_get_staged_backing(file_in);
+		if (!IS_ERR(real_in))
+			get_file(real_in);
 	} else {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
@@ -1731,8 +1686,9 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		return PTR_ERR(real_in);
 	}
 
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_REAL_OPEN_COPY_OUT_CALLS);
-	real_out = actiondfs_open_real_staged(sbi, file_out, O_WRONLY);
+	real_out = actiondfs_get_staged_backing(file_out);
+	if (!IS_ERR(real_out))
+		get_file(real_out);
 	if (IS_ERR(real_out)) {
 		fput(real_in);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_FALLBACKS);
