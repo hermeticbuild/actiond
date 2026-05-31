@@ -122,12 +122,6 @@ struct actiondfs_node {
 	struct actiondfs_materialized_child *materialized_children;
 	size_t materialized_count;
 	size_t materialized_capacity;
-	struct actiondfs_node **file_children;
-	size_t file_count;
-	size_t file_capacity;
-	struct actiondfs_node **dir_children;
-	size_t dir_count;
-	size_t dir_capacity;
 };
 
 struct actiondfs_file_ctx {
@@ -486,14 +480,8 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 
 	for (i = 0; i < node->materialized_count; i++)
 		actiondfs_free_tree(node->materialized_children[i].node);
-	for (i = 0; i < node->file_count; i++)
-		actiondfs_free_tree(node->file_children[i]);
-	for (i = 0; i < node->dir_count; i++)
-		actiondfs_free_tree(node->dir_children[i]);
 
 	kfree(node->materialized_children);
-	kfree(node->file_children);
-	kfree(node->dir_children);
 	if (node->cached_dir_owned)
 		actiondfs_free_cached_dir(node->cached_dir);
 	kfree(node->stage_rel);
@@ -502,34 +490,6 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 	if (node->blob_file)
 		fput(node->blob_file);
 	kfree(node);
-}
-
-static void actiondfs_clear_children(struct actiondfs_node *node)
-{
-	size_t i;
-
-	for (i = 0; i < node->materialized_count; i++)
-		actiondfs_free_tree(node->materialized_children[i].node);
-	for (i = 0; i < node->file_count; i++)
-		actiondfs_free_tree(node->file_children[i]);
-	for (i = 0; i < node->dir_count; i++)
-		actiondfs_free_tree(node->dir_children[i]);
-	kfree(node->materialized_children);
-	kfree(node->file_children);
-	kfree(node->dir_children);
-	node->materialized_children = NULL;
-	node->materialized_count = 0;
-	node->materialized_capacity = 0;
-	node->file_children = NULL;
-	node->file_count = 0;
-	node->file_capacity = 0;
-	node->dir_children = NULL;
-	node->dir_count = 0;
-	node->dir_capacity = 0;
-	if (node->cached_dir_owned)
-		actiondfs_free_cached_dir(node->cached_dir);
-	node->cached_dir = NULL;
-	node->cached_dir_owned = false;
 }
 
 static struct actiondfs_node *actiondfs_alloc_node_len(struct actiondfs_sb_info *sbi,
@@ -894,45 +854,6 @@ static int actiondfs_compare_name(const char *lhs, size_t lhs_len,
 	return 0;
 }
 
-static struct actiondfs_node *actiondfs_find_child_in(struct actiondfs_node **children,
-						      size_t count,
-						      const char *name,
-						      size_t len)
-{
-	size_t lo = 0;
-	size_t hi = count;
-
-	while (lo < hi) {
-		size_t mid = lo + (hi - lo) / 2;
-		struct actiondfs_node *child = children[mid];
-		int cmp = actiondfs_compare_name(child->name, child->name_len,
-						 name, len);
-
-		if (cmp < 0) {
-			lo = mid + 1;
-		} else if (cmp > 0) {
-			hi = mid;
-		} else {
-			return child;
-		}
-	}
-	return NULL;
-}
-
-static struct actiondfs_node *actiondfs_find_child(struct actiondfs_node *dir,
-						   const char *name,
-						   size_t len)
-{
-	struct actiondfs_node *child;
-
-	child = actiondfs_find_child_in(dir->file_children, dir->file_count,
-					name, len);
-	if (child)
-		return child;
-	return actiondfs_find_child_in(dir->dir_children, dir->dir_count,
-				       name, len);
-}
-
 static bool actiondfs_find_cached_child_in(struct actiondfs_cached_child *children,
 					   size_t count,
 					   const char *name,
@@ -1085,7 +1006,7 @@ static struct actiondfs_node *actiondfs_lookup_child(struct actiondfs_sb_info *s
 	struct actiondfs_node *child;
 
 	if (!dir->cached_dir)
-		return actiondfs_find_child(dir, name, len);
+		return NULL;
 
 	mutex_lock(&sbi->load_lock);
 	child = actiondfs_lookup_cached_child_locked(sbi, dir, name, len);
@@ -3664,32 +3585,6 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 			ctx->pos = pos + 1;
 		}
 		base += cached->dir_count;
-	} else {
-		i = actiondfs_readdir_start_index_counted(ctx->pos, base,
-							  dir->file_count);
-		for (; i < dir->file_count; i++) {
-			struct actiondfs_node *child = dir->file_children[i];
-			loff_t pos = base + i;
-
-			if (!dir_emit(ctx, child->name, child->name_len, child->ino, DT_REG))
-				return 0;
-			actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
-			ctx->pos = pos + 1;
-		}
-		base += dir->file_count;
-
-		i = actiondfs_readdir_start_index_counted(ctx->pos, base,
-							  dir->dir_count);
-		for (; i < dir->dir_count; i++) {
-			struct actiondfs_node *child = dir->dir_children[i];
-			loff_t pos = base + i;
-
-			if (!dir_emit(ctx, child->name, child->name_len, child->ino, DT_DIR))
-				return 0;
-			actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
-			ctx->pos = pos + 1;
-		}
-		base += dir->dir_count;
 	}
 	return actiondfs_iterate_stage_dir(inode, dir, ctx, base);
 }
