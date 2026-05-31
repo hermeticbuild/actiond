@@ -28,7 +28,6 @@
 #include <linux/mount.h>
 #include <linux/mutex.h>
 #include <linux/namei.h>
-#include <linux/parser.h>
 #include <linux/path.h>
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
@@ -143,7 +142,6 @@ struct actiondfs_sb_info {
 	struct path stage_path;
 	bool cas_path_valid;
 	bool stage_path_valid;
-	bool staged_writes;
 	struct actiondfs_node *root;
 	atomic64_t next_ino;
 	struct mutex load_lock;
@@ -1922,24 +1920,6 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	return nwritten;
 }
 
-static ssize_t actiondfs_vfs_copy_file_range(struct file *file_in,
-					     loff_t *pos_in,
-					     struct file *file_out,
-					     loff_t *pos_out,
-					     size_t len)
-{
-	loff_t in = *pos_in;
-	loff_t out = *pos_out;
-	ssize_t copied;
-
-	copied = vfs_copy_file_range(file_in, in, file_out, out, len, 0);
-	if (copied > 0) {
-		*pos_in = in + copied;
-		*pos_out = out + copied;
-	}
-	return copied;
-}
-
 static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 					 struct file *file_out, loff_t pos_out,
 					 size_t len, unsigned int flags)
@@ -2024,8 +2004,11 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		return PTR_ERR(real_out);
 	}
 
-	copied = actiondfs_vfs_copy_file_range(real_in, &pos_in, real_out,
-					       &pos_out, len);
+	copied = vfs_copy_file_range(real_in, pos_in, real_out, pos_out, len, 0);
+	if (copied > 0) {
+		pos_in += copied;
+		pos_out += copied;
+	}
 	fput(real_out);
 	fput(real_in);
 	if (copied > 0) {
@@ -2496,8 +2479,6 @@ static int actiondfs_parse_reapi_cached_dir(struct actiondfs_cached_dir *parent,
 	if (err)
 		return err;
 
-	if (actiondfs_valid_hash(dir.digest.hash))
-		return -EINVAL;
 	return actiondfs_append_cached_dir_child(parent,
 						 dir.name, dir.name_len,
 						 S_IFDIR | ACTIONDFS_DIR_MODE,
@@ -2918,14 +2899,6 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 	return 0;
 }
 
-static int actiondfs_attach_cached_dir(struct actiondfs_node *dir,
-				       struct actiondfs_cached_dir *cached)
-{
-	dir->cached_dir = cached;
-	dir->loaded = true;
-	return 0;
-}
-
 static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 						 struct actiondfs_node *dir)
 {
@@ -2944,7 +2917,9 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 					       &cached);
 		if (err)
 			return err;
-		return actiondfs_attach_cached_dir(dir, cached);
+		dir->cached_dir = cached;
+		dir->loaded = true;
+		return 0;
 	}
 
 	if (!dir->parent)
@@ -3161,7 +3136,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	u64 size = 0;
 	int err;
 
-	if (!sbi->staged_writes)
+	if (!sbi->stage_path_valid)
 		return NULL;
 	if (actiondfs_stage_children_known_empty(parent)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_SKIPPED_EMPTY_DIR);
@@ -3304,7 +3279,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 	char *rel;
 	int err;
 
-	if (!sbi->staged_writes)
+	if (!sbi->stage_path_valid)
 		return -EROFS;
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_CALLS);
 	err = actiondfs_ensure_loaded(dir->i_sb, parent);
@@ -3396,7 +3371,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 	char *rel;
 	int err;
 
-	if (!sbi->staged_writes)
+	if (!sbi->stage_path_valid)
 		return ERR_PTR(-EROFS);
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MKDIR_CALLS);
 	err = actiondfs_ensure_loaded(dir->i_sb, parent);
@@ -3821,7 +3796,7 @@ static int actiondfs_iterate_stage_dir(struct inode *inode,
 	char *rel;
 	int err;
 
-	if (!sbi->staged_writes)
+	if (!sbi->stage_path_valid)
 		return 0;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_READDIR_CALLS);
@@ -4074,7 +4049,6 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		if (err)
 			goto fail;
 		sbi->stage_path_valid = true;
-		sbi->staged_writes = true;
 		actiondfs_mark_stage_children_maybe_present(sbi->root);
 		actiondfs_mark_stage_dir_ready(sbi->root);
 	} else {
