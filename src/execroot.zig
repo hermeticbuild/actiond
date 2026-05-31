@@ -378,10 +378,6 @@ pub fn validatePath(path: []const u8) !void {
     }
 }
 
-fn createParentDirs(root: std.Io.Dir, io: std.Io, path: []const u8) !void {
-    if (parentDir(path)) |parent| try root.createDirPath(io, parent);
-}
-
 fn parentDir(path: []const u8) ?[]const u8 {
     const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
     return path[0..last_slash];

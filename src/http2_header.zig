@@ -9,10 +9,9 @@ pub const HeaderView = Header;
 
 pub const HeaderList = struct {
     items: []Header = &.{},
-    owned_from_index: usize = 0,
 
     pub fn deinit(self: *HeaderList, allocator: std.mem.Allocator) void {
-        for (self.items[self.owned_from_index..]) |header| {
+        for (self.items) |header| {
             freeIfNonEmpty(allocator, header.name);
             freeIfNonEmpty(allocator, header.value);
         }

@@ -294,12 +294,10 @@ fn writeCgroupValue(
 
 fn prepareChrootWritableDirs(
     io: std.Io,
-    allocator: std.mem.Allocator,
     chroot_dir: []const u8,
     uid: u32,
     gid: u32,
 ) !void {
-    _ = allocator;
     if (comptime builtin.os.tag != .linux) return;
     if (std.os.linux.geteuid() != 0) return;
 
@@ -354,8 +352,8 @@ fn runCommandChroot(
     try prepareChrootWritableDirs(io, allocator, chroot_dir, options.sandbox_uid, options.sandbox_gid);
     for (options.actiondfs_mounts) |mount| {
         switch (mount) {
-            .strict => |strict| try prepareChrootWritableDirs(io, allocator, strict.stage_dir, options.sandbox_uid, options.sandbox_gid),
-            .overlay => |overlay| try prepareChrootWritableDirs(io, allocator, overlay.upperdir, options.sandbox_uid, options.sandbox_gid),
+            .strict => |strict| try prepareChrootWritableDirs(io, strict.stage_dir, options.sandbox_uid, options.sandbox_gid),
+            .overlay => |overlay| try prepareChrootWritableDirs(io, overlay.upperdir, options.sandbox_uid, options.sandbox_gid),
         }
     }
 
@@ -667,10 +665,6 @@ fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
         }
     }
     childClose(fd);
-}
-
-fn childSyscall(rc: usize) void {
-    if (std.posix.errno(rc) != .SUCCESS) std.os.linux.exit(127);
 }
 
 fn childSyscallName(rc: usize, comptime name: []const u8) void {

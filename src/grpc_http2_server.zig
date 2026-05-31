@@ -175,7 +175,6 @@ pub const Error = error{
 };
 
 pub const max_frame_payload_len = 16 * 1024 * 1024;
-const response_frame_payload_len = http2_frame.default_max_frame_size;
 const default_max_concurrent_streams = 128;
 const inbound_initial_window_size = 1024 * 1024 * 1024;
 const inbound_window_update_batch_size = 1024 * 1024;
@@ -1370,18 +1369,6 @@ fn methodKind(method: []const u8) ?MethodKind {
     return null;
 }
 
-fn writeGrpcSuccess(writer: *std.Io.Writer, stream_id: u31, response_body: []const u8) !void {
-    try writeHeaders(writer, stream_id, false, &.{
-        .{ .name = ":status", .value = "200" },
-        .{ .name = "content-type", .value = "application/grpc" },
-    });
-    try writeData(writer, stream_id, response_body);
-    try writeHeaders(writer, stream_id, true, &.{
-        .{ .name = "grpc-status", .value = "0" },
-    });
-    try writer.flush();
-}
-
 fn writeGrpcError(
     writer: *std.Io.Writer,
     stream_id: u31,
@@ -1441,21 +1428,6 @@ fn writeStaticHeaders(
         .flags = flags,
         .stream_id = stream_id,
     }, encoded);
-}
-
-fn writeData(writer: *std.Io.Writer, stream_id: u31, body: []const u8) !void {
-    var remaining = body;
-    while (remaining.len != 0) {
-        const chunk_len = @min(remaining.len, response_frame_payload_len);
-        const chunk = remaining[0..chunk_len];
-        try writeFrame(writer, .{
-            .length = chunk.len,
-            .type = .data,
-            .flags = 0,
-            .stream_id = stream_id,
-        }, chunk);
-        remaining = remaining[chunk_len..];
-    }
 }
 
 fn removeStream(

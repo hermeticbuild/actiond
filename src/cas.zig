@@ -39,7 +39,6 @@ var put_file_promote_preexisting_hits = std.atomic.Value(u64).init(0);
 var put_file_promote_cross_device_fallbacks = std.atomic.Value(u64).init(0);
 var put_file_promote_permission_fallbacks = std.atomic.Value(u64).init(0);
 var put_file_promote_open_ns = std.atomic.Value(u64).init(0);
-var put_file_promote_stat_ns = std.atomic.Value(u64).init(0);
 var put_file_promote_digest_ns = std.atomic.Value(u64).init(0);
 var put_file_promote_preexisting_check_ns = std.atomic.Value(u64).init(0);
 var put_file_promote_mkdir_ns = std.atomic.Value(u64).init(0);
@@ -73,7 +72,6 @@ pub const PutFileStats = struct {
     promote_cross_device_fallbacks: u64,
     promote_permission_fallbacks: u64,
     promote_open_ns: u64,
-    promote_stat_ns: u64,
     promote_digest_ns: u64,
     promote_preexisting_check_ns: u64,
     promote_mkdir_ns: u64,
@@ -169,23 +167,12 @@ pub const Store = struct {
         if (digest.isEmpty()) return true;
 
         var path_buffer: [blob_path_len]u8 = undefined;
-        const path = blobPath(digest, &path_buffer);
+        const path = blobSubPath(digest, &path_buffer);
         self.root.access(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => |e| return e,
         };
         return true;
-    }
-
-    pub fn deleteBlob(self: Store, io: std.Io, digest: Digest) !void {
-        if (digest.isEmpty()) return;
-
-        var path_buffer: [blob_path_len]u8 = undefined;
-        const path = blobPath(digest, &path_buffer);
-        self.root.deleteFile(io, path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| return e,
-        };
     }
 
     pub fn hasTree(self: Store, io: std.Io, digest: Digest) !bool {
@@ -231,7 +218,7 @@ pub const Store = struct {
 
     pub fn openBlob(self: Store, io: std.Io, digest: Digest) !std.Io.File {
         var path_buffer: [blob_path_len]u8 = undefined;
-        const path = blobPath(digest, &path_buffer);
+        const path = blobSubPath(digest, &path_buffer);
         if (comptime builtin.os.tag == .linux) return openFileLinuxRetry(self.root, path);
         return self.root.openFile(io, path, .{});
     }
@@ -309,17 +296,6 @@ pub const Store = struct {
         return self.putOpenFileCopy(io, src);
     }
 
-    fn putFileCopy(
-        self: Store,
-        io: std.Io,
-        src_dir: std.Io.Dir,
-        src_path: []const u8,
-    ) !Digest {
-        var src = try src_dir.openFile(io, src_path, .{});
-        defer src.close(io);
-        return self.putOpenFileCopy(io, &src);
-    }
-
     fn putOpenFileCopy(
         self: Store,
         io: std.Io,
@@ -363,7 +339,7 @@ pub const Store = struct {
         putFileStatsAdd(&put_file_promote_digest_bytes, digest.size_bytes);
 
         var final_path_buffer: [blob_path_len]u8 = undefined;
-        const final_path = blobPath(digest, &final_path_buffer);
+        const final_path = blobSubPath(digest, &final_path_buffer);
 
         const preexisting_start = putFileStatsNow(io);
         if (self.root.statFile(io, final_path, .{})) |_| {
@@ -531,7 +507,7 @@ pub const Store = struct {
     ) !void {
         if (!is_executable) {
             var src_path_buffer: [blob_path_len]u8 = undefined;
-            const src_path = blobPath(digest, &src_path_buffer);
+            const src_path = blobSubPath(digest, &src_path_buffer);
             var should_copy = false;
             self.root.hardLink(src_path, self.root, dest_path, io, .{}) catch |err| switch (err) {
                 error.PathAlreadyExists => return,
@@ -564,7 +540,6 @@ pub fn snapshotPutFileStats() PutFileStats {
         .promote_cross_device_fallbacks = put_file_promote_cross_device_fallbacks.load(.monotonic),
         .promote_permission_fallbacks = put_file_promote_permission_fallbacks.load(.monotonic),
         .promote_open_ns = put_file_promote_open_ns.load(.monotonic),
-        .promote_stat_ns = put_file_promote_stat_ns.load(.monotonic),
         .promote_digest_ns = put_file_promote_digest_ns.load(.monotonic),
         .promote_preexisting_check_ns = put_file_promote_preexisting_check_ns.load(.monotonic),
         .promote_mkdir_ns = put_file_promote_mkdir_ns.load(.monotonic),
@@ -590,7 +565,6 @@ pub fn appendPutFileStats(allocator: std.mem.Allocator, out: *std.ArrayListUnman
         \\cas_put_file_promote_cross_device_fallbacks {d}
         \\cas_put_file_promote_permission_fallbacks {d}
         \\cas_put_file_promote_open_ns {d}
-        \\cas_put_file_promote_stat_ns {d}
         \\cas_put_file_promote_digest_ns {d}
         \\cas_put_file_promote_preexisting_check_ns {d}
         \\cas_put_file_promote_mkdir_ns {d}
@@ -611,7 +585,6 @@ pub fn appendPutFileStats(allocator: std.mem.Allocator, out: *std.ArrayListUnman
         stats.promote_cross_device_fallbacks,
         stats.promote_permission_fallbacks,
         stats.promote_open_ns,
-        stats.promote_stat_ns,
         stats.promote_digest_ns,
         stats.promote_preexisting_check_ns,
         stats.promote_mkdir_ns,
@@ -710,7 +683,7 @@ pub const BlobWriter = struct {
         }
 
         var final_path_buffer: [blob_path_len]u8 = undefined;
-        const final_path = blobPath(digest, &final_path_buffer);
+        const final_path = blobSubPath(digest, &final_path_buffer);
         try self.store.root.createDirPath(io, digestParentPath(final_path));
         switch (self.temp_kind) {
             .named => {
@@ -853,23 +826,6 @@ test "Store treats the empty digest as always present" {
     const bytes = try store.readAlloc(std.testing.io, std.testing.allocator, empty_digest);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("", bytes);
-}
-
-test "Store can remove only a blob file" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const store = Store.init(tmp.dir);
-    const digest = try store.putBytes(std.testing.io, "temporary");
-    try std.testing.expect(try store.has(std.testing.io, digest));
-
-    try store.deleteBlob(std.testing.io, digest);
-    try std.testing.expect(!try store.has(std.testing.io, digest));
-    try store.deleteBlob(std.testing.io, digest);
-}
-
-fn blobPath(digest: Digest, out: *[blob_path_len]u8) []const u8 {
-    return blobSubPath(digest, out);
 }
 
 pub fn blobSubPath(digest: Digest, out: *[blob_path_len]u8) []const u8 {
@@ -1276,7 +1232,9 @@ test "Store putFile keeps the source file" {
         .data = "copy me",
     });
 
-    const digest = try store.putFileCopy(std.testing.io, stage, "out.txt");
+    var src = try stage.openFile(std.testing.io, "out.txt", .{});
+    defer src.close(std.testing.io);
+    const digest = try store.putOpenFileCopy(std.testing.io, &src);
     try std.testing.expect(digest.eql(Digest.fromBytes("copy me")));
     try std.testing.expect(try store.has(std.testing.io, digest));
     const stat = try stage.statFile(std.testing.io, "out.txt", .{});

@@ -164,19 +164,6 @@ pub fn appendStats(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
     }
 }
 
-pub fn writeGrpcRecordsWithIndex(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    presence_index: ?*staged_cas_index.Index,
-    request_records: []const u8,
-) !bytestream.WriteResponse {
-    var stream = WriteGrpcStream.initWithIndex(store, presence_index);
-    defer stream.deinit(io, allocator);
-    try stream.append(io, allocator, request_records);
-    return try stream.finish(io, allocator);
-}
-
 pub const WriteGrpcStream = struct {
     store: cas.Store,
     presence_index: ?*staged_cas_index.Index = null,
@@ -405,7 +392,7 @@ test "WriteGrpcStream assembles chunks and stores verified blob" {
     try std.testing.expect(try store.has(std.testing.io, digest));
 }
 
-test "writeGrpcRecordsWithIndex streams chunks into CAS" {
+test "WriteGrpcStream streams chunks into CAS" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -439,7 +426,10 @@ test "writeGrpcRecordsWithIndex streams chunks into CAS" {
     const records = try std.mem.concat(std.testing.allocator, u8, &.{ first_record, second_record });
     defer std.testing.allocator.free(records);
 
-    const response = try writeGrpcRecordsWithIndex(std.testing.io, std.testing.allocator, store, null, records);
+    var stream = WriteGrpcStream.init(store);
+    defer stream.deinit(std.testing.io, std.testing.allocator);
+    try stream.append(std.testing.io, std.testing.allocator, records);
+    const response = try stream.finish(std.testing.io, std.testing.allocator);
     try std.testing.expectEqual(@as(i64, 5), response.committed_size);
     try std.testing.expect(try store.has(std.testing.io, digest));
 }
