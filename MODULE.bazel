@@ -13,6 +13,7 @@ bazel_dep(name = "llvm", version = "0.8.1")
 bazel_dep(name = "linux.bzl", version = "0.0.0")
 bazel_dep(name = "squashfs-tools", version = "4.7.5")
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
+bazel_dep(name = "codesign.bzl", version = "0.0.13")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
@@ -24,35 +25,11 @@ http_archive(
     urls = ["https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.xz"],
 )
 
-http_archive(
-    name = "apple_codesign_linux_aarch64",
-    build_file = "//third_party/apple_codesign:apple_codesign.BUILD.bazel",
-    sha256 = "4af92c87ddf52f5f2d1258a3b4e56c7dcb8f1b2468df744976c5f139e031961f",
-    strip_prefix = "apple-codesign-0.29.0-aarch64-unknown-linux-musl",
-    urls = ["https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-aarch64-unknown-linux-musl.tar.gz"],
-)
-
-http_archive(
-    name = "apple_codesign_linux_x86_64",
-    build_file = "//third_party/apple_codesign:apple_codesign.BUILD.bazel",
-    sha256 = "dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002",
-    strip_prefix = "apple-codesign-0.29.0-x86_64-unknown-linux-musl",
-    urls = ["https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"],
-)
-
-http_archive(
-    name = "apple_codesign_macos_universal",
-    build_file = "//third_party/apple_codesign:apple_codesign.BUILD.bazel",
-    sha256 = "d98372d5524226ccf9dc0eda03d4e4f5826182dabb2fc3f2bd303ed9113a748d",
-    strip_prefix = "apple-codesign-0.29.0-macos-universal",
-    urls = ["https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-macos-universal.tar.gz"],
-)
-
 archive_override(
     module_name = "linux.bzl",
-    integrity = "sha256-yPhL0CYmmsOZK8TgRDFlMF2t8QJ4kSLi0HXk1eevkA0=",
-    strip_prefix = "linux.bzl-999522d71d920e6b825b8615eee81bdf1a749ebc",
-    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/999522d71d920e6b825b8615eee81bdf1a749ebc.tar.gz"],
+    integrity = "sha256-HvmX1dVoB4AL5Xh7ueNUq6ibi/o9DSIdUrHYFyrsF/4=",
+    strip_prefix = "linux.bzl-7fc0e206a0147d878e6e18ae7b71e5567d1756c9",
+    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/7fc0e206a0147d878e6e18ae7b71e5567d1756c9.tar.gz"],
 )
 
 single_version_override(
@@ -81,6 +58,7 @@ register_toolchains("@zig_toolchains//:all")
 register_execution_platforms("//platforms:local_execution_platform")
 
 register_toolchains("@llvm//toolchain:all")
+register_toolchains("@codesign.bzl//toolchain:all")
 
 osx = use_extension("@llvm//extensions:osx.bzl", "osx")
 osx.frameworks(names = [

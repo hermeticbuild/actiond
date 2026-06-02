@@ -1,4 +1,4 @@
-load(":codesign.bzl", "darwin_codesign")
+load("@codesign.bzl", "codesign")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
@@ -45,12 +45,11 @@ cc_library(
     target_compatible_with = ["@platforms//os:macos"],
 )
 
-darwin_codesign(
+codesign(
     name = "darwin-actiond",
     binary = ":darwin-actiond-bin",
     binary_identifier = "darwin-actiond",
     entitlements = "darwin-actiond.entitlements",
     target_compatible_with = ["@platforms//os:macos"],
-    tool = "//third_party/apple_codesign:rcodesign",
     visibility = ["//visibility:public"],
 )
