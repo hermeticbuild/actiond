@@ -10,8 +10,10 @@ from source to use it.
 
 ## Why Use It?
 
-- Perfect sandboxing! actions run inside an empty chroot inside the VM.
-  No nonhermetic dependencies can creep in.
+- Correctness! Build actions run inside an empty chroot inside the VM.
+  No nonhermetic dependencies can creep into the perfect sandbox.
+- Security! Rust, Python, and NodeJS package ecosystems are built around giving arbitrary
+  package authors RCE in your build environment. Actiond constrains them to a VM to thwart nefarious packages.
 - Performance! the LLVM smoke build has measured about 20-30%
   faster through actiond than the comparable mac-host Bazel build.
 - Save disk! No duplication of artifacts between CAS and output base(s)
