@@ -53,7 +53,6 @@ pub const CgroupLimits = struct {
 pub const RunOptions = struct {
     chroot_dir: []const u8,
     chroot_cwd: []const u8 = "/",
-    exec_path_override: ?[]const u8 = null,
     bind_mounts: []const BindMount = &.{},
     actiondfs_mounts: []const ActiondfsMount = &.{},
     cgroup_limits: CgroupLimits = .{},
@@ -358,18 +357,16 @@ fn runCommandChroot(
         }
     }
 
-    const exec_path = if (options.exec_path_override) |path|
-        try allocator.dupe(u8, path)
-    else
-        try resolveExecPath(io, allocator, command, chroot_dir);
-    defer allocator.free(exec_path);
-
     const chroot_z = try allocator.dupeZ(u8, chroot_dir);
     defer allocator.free(chroot_z);
     const cwd_z = try allocator.dupeZ(u8, options.chroot_cwd);
     defer allocator.free(cwd_z);
-    const exec_z = try allocator.dupeZ(u8, exec_path);
-    defer allocator.free(exec_z);
+    var exec_candidates: std.ArrayListUnmanaged([:0]u8) = .empty;
+    defer {
+        for (exec_candidates.items) |candidate| allocator.free(candidate);
+        exec_candidates.deinit(allocator);
+    }
+    try appendExecCandidates(allocator, command, &exec_candidates);
 
     const argv = try allocator.allocSentinel(?[*:0]const u8, command.arguments.len, null);
     defer allocator.free(argv);
@@ -378,8 +375,7 @@ fn runCommandChroot(
         for (argv_strings.items) |arg| allocator.free(arg);
         argv_strings.deinit(allocator);
     }
-    argv[0] = exec_z.ptr;
-    for (command.arguments[1..], 1..) |arg, i| {
+    for (command.arguments, 0..) |arg, i| {
         const value = try allocator.dupeZ(u8, arg);
         try argv_strings.append(allocator, value);
         argv[i] = value.ptr;
@@ -415,7 +411,7 @@ fn runCommandChroot(
         .setup_pipe = setup_pipe,
         .chroot_dir = chroot_z,
         .cwd = cwd_z,
-        .exec_path = exec_z,
+        .exec_candidates = exec_candidates.items,
         .argv = argv.ptr,
         .envp = envp.ptr,
         .bind_mounts = options.bind_mounts,
@@ -483,7 +479,7 @@ const ForkAction = struct {
     setup_pipe: [2]std.posix.fd_t,
     chroot_dir: [:0]const u8,
     cwd: [:0]const u8,
-    exec_path: [:0]const u8,
+    exec_candidates: []const [:0]u8,
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
     bind_mounts: []const BindMount,
@@ -539,9 +535,24 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
     childWriteSetupComplete();
-    const execve_rc = linux.execve(action.exec_path.ptr, action.argv, action.envp);
+    var exec_errno: std.posix.E = .NOENT;
+    var saw_access_denied = false;
+    for (action.exec_candidates) |candidate| {
+        const execve_rc = linux.execve(candidate.ptr, action.argv, action.envp);
+        exec_errno = std.posix.errno(execve_rc);
+        switch (exec_errno) {
+            .NOENT, .NOTDIR => continue,
+            .ACCES => {
+                saw_access_denied = true;
+                continue;
+            },
+            else => break,
+        }
+    }
+    if (saw_access_denied and (exec_errno == .NOENT or exec_errno == .NOTDIR))
+        exec_errno = .ACCES;
     childWriteLiteral("actiond child setup failed: execve ");
-    childWriteBytes(@tagName(std.posix.errno(execve_rc)));
+    childWriteBytes(@tagName(exec_errno));
     childWriteLiteral("\n");
     linux.exit(127);
 }
@@ -928,37 +939,27 @@ fn statusFromRawWait(raw_status: u32) Status {
     return .unknown;
 }
 
-fn resolveExecPath(
-    io: std.Io,
+fn appendExecCandidates(
     allocator: std.mem.Allocator,
     command: reapi.Command,
-    chroot_dir: []const u8,
-) ![]u8 {
+    candidates: *std.ArrayListUnmanaged([:0]u8),
+) !void {
     const argv0 = command.arguments[0];
-    if (std.mem.indexOfScalar(u8, argv0, '/') != null) return allocator.dupe(u8, argv0);
+    if (std.mem.indexOfScalar(u8, argv0, '/') != null) {
+        try candidates.append(allocator, try allocator.dupeZ(u8, argv0));
+        return;
+    }
 
     const path_value = commandPath(command) orelse "/usr/local/bin:/usr/bin:/bin";
     var parts = std.mem.splitScalar(u8, path_value, ':');
     while (parts.next()) |part| {
-        const prefix = if (part.len == 0) "/" else part;
-        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, argv0 });
-        errdefer allocator.free(candidate);
-        const host_candidate = if (std.fs.path.isAbsolute(candidate))
-            try std.fmt.allocPrint(allocator, "{s}{s}", .{ chroot_dir, candidate })
+        const candidate = if (part.len == 0)
+            try allocator.dupeZ(u8, argv0)
         else
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ chroot_dir, candidate });
-        defer allocator.free(host_candidate);
-
-        std.Io.Dir.cwd().access(io, host_candidate, .{}) catch |err| switch (err) {
-            error.FileNotFound => {
-                allocator.free(candidate);
-                continue;
-            },
-            else => |e| return e,
-        };
-        return candidate;
+            try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ part, argv0 }, 0);
+        errdefer allocator.free(candidate);
+        try candidates.append(allocator, candidate);
     }
-    return allocator.dupe(u8, argv0);
 }
 
 fn commandPath(command: reapi.Command) ?[]const u8 {
@@ -966,6 +967,39 @@ fn commandPath(command: reapi.Command) ?[]const u8 {
         if (std.mem.eql(u8, variable.name, "PATH")) return variable.value;
     }
     return null;
+}
+
+test "appendExecCandidates preserves explicit executable path" {
+    var candidates: std.ArrayListUnmanaged([:0]u8) = .empty;
+    defer {
+        for (candidates.items) |candidate| std.testing.allocator.free(candidate);
+        candidates.deinit(std.testing.allocator);
+    }
+
+    try appendExecCandidates(std.testing.allocator, .{
+        .arguments = &.{"external/tool/bin/tool"},
+    }, &candidates);
+
+    try std.testing.expectEqual(@as(usize, 1), candidates.items.len);
+    try std.testing.expectEqualStrings("external/tool/bin/tool", candidates.items[0]);
+}
+
+test "appendExecCandidates preserves relative and empty PATH entries" {
+    var candidates: std.ArrayListUnmanaged([:0]u8) = .empty;
+    defer {
+        for (candidates.items) |candidate| std.testing.allocator.free(candidate);
+        candidates.deinit(std.testing.allocator);
+    }
+
+    try appendExecCandidates(std.testing.allocator, .{
+        .arguments = &.{"tool"},
+        .environment_variables = &.{.{ .name = "PATH", .value = ":tools:/bin" }},
+    }, &candidates);
+
+    try std.testing.expectEqual(@as(usize, 3), candidates.items.len);
+    try std.testing.expectEqualStrings("tool", candidates.items[0]);
+    try std.testing.expectEqualStrings("tools/tool", candidates.items[1]);
+    try std.testing.expectEqualStrings("/bin/tool", candidates.items[2]);
 }
 
 test "CgroupLimits parses REAPI platform execution properties" {

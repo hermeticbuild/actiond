@@ -427,8 +427,6 @@ pub fn executeDecodedActionWithOptions(
     defer if (workspace_dir) |*dir| dir.close(io);
     var actiondfs_stage_dir: ?std.Io.Dir = null;
     defer if (actiondfs_stage_dir) |*dir| dir.close(io);
-    var actiondfs_exec_path_override: ?[]u8 = null;
-    defer if (actiondfs_exec_path_override) |path| allocator.free(path);
 
     var exec_root_path_owned: ?[]u8 = null;
     defer if (exec_root_path_owned) |path| allocator.free(path);
@@ -468,19 +466,6 @@ pub fn executeDecodedActionWithOptions(
         );
         actiondfs_stage_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.?.stagePath(), .{ .iterate = true });
         exec_root_dir = actiondfs_stage_dir.?;
-        actiondfs_exec_path_override = resolveActiondfsExecutablePath(
-            io,
-            allocator,
-            store,
-            read_roots,
-            input_root_digest,
-            action_digest,
-            command,
-            if (use_workspace_chroot) "/workspace" else "",
-        ) catch |err| {
-            logExecuteSetupError("resolve actiondfs executable", action_digest, err);
-            return err;
-        };
     }
 
     const materializer = execroot.Materializer.init(store, exec_root_dir);
@@ -570,7 +555,6 @@ pub fn executeDecodedActionWithOptions(
     var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, .{
         .chroot_dir = work_root_path,
         .chroot_cwd = chroot_cwd,
-        .exec_path_override = actiondfs_exec_path_override,
         .bind_mounts = bind_mounts.items,
         .actiondfs_mounts = if (actiondfs_workspace) |*workspace| workspace.mounts[0..] else &.{},
         .cgroup_limits = action_runner.CgroupLimits.fromPlatform(platform),
@@ -709,103 +693,6 @@ fn selectExecutableInputCandidatePaths(
     }
 }
 
-const LookupInputFile = struct {
-    digest: cas.Digest,
-    is_executable: bool,
-};
-
-fn resolveActiondfsExecutablePath(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    read_roots: CasReadRoots,
-    input_root_digest: cas.Digest,
-    action_digest: cas.Digest,
-    command: reapi.Command,
-    workspace_prefix: []const u8,
-) !?[]u8 {
-    var candidates: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (candidates.items) |path| allocator.free(path);
-        candidates.deinit(allocator);
-    }
-    try selectExecutableInputCandidatePaths(allocator, command, workspace_prefix, &candidates);
-
-    for (candidates.items) |candidate| {
-        const input = lookupInputFile(io, allocator, store, read_roots, input_root_digest, candidate) catch |err| {
-            logExecuteSetupError("lookup actiondfs executable", action_digest, err);
-            return err;
-        } orelse continue;
-        if (!input.is_executable) return null;
-        return try execPathForWorkspaceInput(allocator, candidate, workspace_prefix);
-    }
-    return null;
-}
-
-fn lookupInputFile(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    read_roots: CasReadRoots,
-    root_digest: cas.Digest,
-    path: []const u8,
-) !?LookupInputFile {
-    try execroot.validatePath(path);
-    var components = std.mem.splitScalar(u8, path, '/');
-    return lookupInputFileComponent(io, allocator, store, read_roots, root_digest, &components);
-}
-
-fn lookupInputFileComponent(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    read_roots: CasReadRoots,
-    directory_digest: cas.Digest,
-    components: *std.mem.SplitIterator(u8, .scalar),
-) !?LookupInputFile {
-    const component = components.next() orelse return null;
-    if (component.len == 0) return null;
-    try validateEntryName(component);
-
-    const directory_bytes = readCasBlobAlloc(io, allocator, store, read_roots, directory_digest) catch |err| switch (err) {
-        error.FileNotFound => return error.MissingDirectoryBlob,
-        else => return err,
-    };
-    defer allocator.free(directory_bytes);
-
-    var reader = protobuf.Reader.init(directory_bytes);
-    var directory = try reapi.Directory.decodeOwned(allocator, &reader);
-    defer directory.deinit(allocator);
-
-    if (components.peek() == null) {
-        for (directory.files) |file| {
-            try validateEntryName(file.name);
-            if (!std.mem.eql(u8, file.name, component)) continue;
-            return .{
-                .digest = try cas.Digest.fromReapi(file.digest orelse return error.MissingFileDigest),
-                .is_executable = file.is_executable,
-            };
-        }
-        return null;
-    }
-
-    for (directory.directories) |child| {
-        try validateEntryName(child.name);
-        if (!std.mem.eql(u8, child.name, component)) continue;
-        const digest = try cas.Digest.fromReapi(child.digest orelse return error.MissingDirectoryDigest);
-        return lookupInputFileComponent(io, allocator, store, read_roots, digest, components);
-    }
-    return null;
-}
-
-fn execPathForWorkspaceInput(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    workspace_prefix: []const u8,
-) ![]u8 {
-    if (workspace_prefix.len != 0) return std.fmt.allocPrint(allocator, "{s}/{s}", .{ workspace_prefix, path });
-    return std.fmt.allocPrint(allocator, "/{s}", .{path});
-}
 
 fn execArgToInputPath(
     allocator: std.mem.Allocator,
@@ -2146,62 +2033,6 @@ test "selectExecutableInputCopyPaths searches input PATH candidates" {
 
     try std.testing.expectEqual(@as(usize, 1), paths.items.len);
     try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
-}
-
-test "resolveActiondfsExecutablePath resolves executable input from input root" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(std.testing.io, "cas", .default_dir);
-
-    var cas_dir = try tmp.dir.openDir(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-    const store = cas.Store.initReady(cas_dir);
-    try store.ensureLayout(std.testing.io);
-
-    const tool_digest = try store.putBytes(std.testing.io, "tool bytes");
-    var tool_hash: [64]u8 = undefined;
-    const bin_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .files = &.{.{
-            .name = "llvm-ar",
-            .digest = tool_digest.toReapi(&tool_hash),
-            .is_executable = true,
-        }},
-    });
-    var bin_hash: [64]u8 = undefined;
-    const toolchain_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{.{
-            .name = "bin",
-            .digest = bin_digest.toReapi(&bin_hash),
-        }},
-    });
-    var toolchain_hash: [64]u8 = undefined;
-    const external_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{.{
-            .name = "llvm-toolchain",
-            .digest = toolchain_digest.toReapi(&toolchain_hash),
-        }},
-    });
-    var external_hash: [64]u8 = undefined;
-    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{.{
-            .name = "external",
-            .digest = external_digest.toReapi(&external_hash),
-        }},
-    });
-
-    const exec_path = try resolveActiondfsExecutablePath(
-        std.testing.io,
-        std.testing.allocator,
-        store,
-        .{},
-        root_digest,
-        root_digest,
-        .{ .arguments = &.{"external/llvm-toolchain/bin/llvm-ar"} },
-        "/workspace",
-    );
-    defer if (exec_path) |path| std.testing.allocator.free(path);
-
-    try std.testing.expectEqualStrings("/workspace/external/llvm-toolchain/bin/llvm-ar", exec_path.?);
 }
 
 test "appendLibcRuntimeMounts maps runtime directories into chroot" {
