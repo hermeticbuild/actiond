@@ -3102,6 +3102,7 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	struct inode *inode = d_inode(dentry);
 	struct actiondfs_node *node = inode->i_private;
 	struct path real_path;
+	struct iattr real_attr;
 	int err;
 
 	if (node->origin != ACTIONDFS_NODE_STAGED)
@@ -3123,6 +3124,27 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		node->size = attr->ia_size;
 		i_size_write(inode, attr->ia_size);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SETATTR_SIZE_SUCCESS);
+	}
+	if (attr->ia_valid & ATTR_MODE) {
+		err = actiondfs_stage_node_path(actiondfs_sbi(inode->i_sb), node,
+					       &real_path);
+		if (err)
+			return err;
+		err = mnt_want_write(real_path.mnt);
+		if (err) {
+			path_put(&real_path);
+			return err;
+		}
+		real_attr = *attr;
+		real_attr.ia_valid &= ATTR_MODE | ATTR_KILL_SUID | ATTR_KILL_SGID;
+		inode_lock(d_inode(real_path.dentry));
+		err = notify_change(mnt_idmap(real_path.mnt), real_path.dentry,
+				    &real_attr, NULL);
+		inode_unlock(d_inode(real_path.dentry));
+		mnt_drop_write(real_path.mnt);
+		path_put(&real_path);
+		if (err)
+			return err;
 	}
 	setattr_copy(&nop_mnt_idmap, inode, attr);
 	mark_inode_dirty(inode);
