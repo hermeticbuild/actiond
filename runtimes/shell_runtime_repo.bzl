@@ -26,11 +26,30 @@ def _shell_deb_runtime_impl(rctx):
     if not bash_static.exists:
         fail("expected static bash payload at root/bin/bash-static")
     rctx.symlink(bash_static, "root/bin/bash")
+    rctx.file(
+        "root/usr/bin/env",
+        """#!/bin/bash
+case "$1" in
+  bash|sh)
+    shift
+    exec /bin/bash "$@"
+    ;;
+  *)
+    printf 'actiond /usr/bin/env only supports "bash" or "sh"; got %q\\n' "$1" >&2
+    exit 127
+    ;;
+esac
+""",
+        executable = True,
+    )
 
     rctx.file("squashfs_entries.txt", "\n".join([
         "d\tbin\t",
         "f\tbin/bash-static\t",
         "s\tbin/bash\t/bin/bash-static",
+        "d\tusr\t",
+        "d\tusr/bin\t",
+        "f\tusr/bin/env\t",
         "",
     ]), executable = False)
 
@@ -39,7 +58,8 @@ def _shell_deb_runtime_impl(rctx):
   "arch": %s,
   "debs": [%s],
   "mounts": [
-    ["root/bin", "/bin"]
+    ["root/bin", "/bin"],
+    ["root/usr/bin", "/usr/bin"]
   ]
 }
 """ % (
@@ -55,6 +75,7 @@ filegroup(
     srcs = [
         "root/bin/bash",
         "root/bin/bash-static",
+        "root/usr/bin/env",
     ],
     visibility = ["//visibility:public"],
 )
