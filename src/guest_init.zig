@@ -42,7 +42,8 @@ pub const cas_mkfs_path = "/sbin/mkfs.ext4";
 pub const cas_format_device = block_devices[0];
 const cas_mount_flags = std.os.linux.MS.NOSUID |
     std.os.linux.MS.NODEV |
-    std.os.linux.MS.NOATIME;
+    std.os.linux.MS.NOATIME |
+    std.os.linux.MS.LAZYTIME;
 pub const worker_argv = [_][]const u8{ "/actiond", "--guest-worker" };
 
 const CasMountAttempt = enum {
@@ -336,6 +337,7 @@ test "guest init mount plan stays minimal" {
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOSUID) != 0);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NODEV) != 0);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOATIME) != 0);
+    try std.testing.expect((cas_mount_flags & std.os.linux.MS.LAZYTIME) != 0);
     try std.testing.expectEqualStrings("/actiond", worker_argv[0]);
     try std.testing.expectEqualStrings("--guest-worker", worker_argv[1]);
 
