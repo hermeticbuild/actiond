@@ -1,6 +1,9 @@
 load("@bazel_lib//lib:copy_file.bzl", "copy_file")
 load("@bazel_lib//lib:expand_template.bzl", "expand_template")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@actiond//tools:e2fsprogs_generate.bzl", "e2fsprogs_generate")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -218,6 +221,40 @@ expand_template(
     template = "lib/uuid/uuid_types.h.in",
 )
 
+write_file(
+    name = "generate_script",
+    out = "generate.sh",
+    content = [
+        "#!/bin/sh",
+        "set -eu",
+        "mode=\"$1\"",
+        "output=\"$2\"",
+        "gawk=\"$3\"",
+        "case \"${mode}\" in",
+        "  crc32c-table)",
+        "    \"$4\" > \"${output}\"",
+        "    ;;",
+        "  error-table)",
+        "    \"${gawk}\" -f \"$4\" \"outfile=${output}\" \"outfn=$5\" \"$6\"",
+        "    ;;",
+        "  default-profile)",
+        "    \"${gawk}\" -f \"$4\" < \"$5\" > \"${output}\"",
+        "    ;;",
+        "  *)",
+        "    echo \"unknown generation mode: ${mode}\" >&2",
+        "    exit 2",
+        "    ;;",
+        "esac",
+    ],
+    is_executable = True,
+)
+
+sh_binary(
+    name = "generate",
+    srcs = [":generate_script"],
+    use_bash_launcher = False,
+)
+
 cc_binary(
     name = "gen_crc32ctable",
     srcs = [
@@ -227,11 +264,12 @@ cc_binary(
     includes = ["lib/ext2fs"],
 )
 
-genrule(
+e2fsprogs_generate(
     name = "crc32c_table_h",
-    outs = ["generated/lib/ext2fs/crc32c_table.h"],
-    cmd = "$(execpath :gen_crc32ctable) > $@",
-    tools = [":gen_crc32ctable"],
+    crc32c_generator = ":gen_crc32ctable",
+    mode = "crc32c-table",
+    out = "generated/lib/ext2fs/crc32c_table.h",
+    runner = ":generate",
 )
 
 expand_template(
@@ -243,54 +281,53 @@ expand_template(
     template = "lib/ext2fs/ext2_err.et.in",
 )
 
-genrule(
+e2fsprogs_generate(
     name = "ext2_err_h",
-    srcs = [
-        ":ext2_err_et",
-        "lib/et/et_h.awk",
-    ],
-    outs = ["generated/lib/ext2fs/ext2_err.h"],
-    cmd = "awk -f $(location lib/et/et_h.awk) 'outfile=$@' 'outfn=ext2_err.h' $(location :ext2_err_et)",
+    awk = "lib/et/et_h.awk",
+    input = ":ext2_err_et",
+    mode = "error-table",
+    out = "generated/lib/ext2fs/ext2_err.h",
+    output_function = "ext2_err.h",
+    runner = ":generate",
 )
 
-genrule(
+e2fsprogs_generate(
     name = "ext2_err_c",
-    srcs = [
-        ":ext2_err_et",
-        "lib/et/et_c.awk",
-    ],
-    outs = ["generated/lib/ext2fs/ext2_err.c"],
-    cmd = "awk -f $(location lib/et/et_c.awk) 'outfile=$@' 'outfn=ext2_err.c' $(location :ext2_err_et)",
+    awk = "lib/et/et_c.awk",
+    input = ":ext2_err_et",
+    mode = "error-table",
+    out = "generated/lib/ext2fs/ext2_err.c",
+    output_function = "ext2_err.c",
+    runner = ":generate",
 )
 
-genrule(
+e2fsprogs_generate(
     name = "prof_err_h",
-    srcs = [
-        "lib/et/et_h.awk",
-        "lib/support/prof_err.et",
-    ],
-    outs = ["generated/lib/support/prof_err.h"],
-    cmd = "awk -f $(location lib/et/et_h.awk) 'outfile=$@' 'outfn=prof_err.h' $(location lib/support/prof_err.et)",
+    awk = "lib/et/et_h.awk",
+    input = "lib/support/prof_err.et",
+    mode = "error-table",
+    out = "generated/lib/support/prof_err.h",
+    output_function = "prof_err.h",
+    runner = ":generate",
 )
 
-genrule(
+e2fsprogs_generate(
     name = "prof_err_c",
-    srcs = [
-        "lib/et/et_c.awk",
-        "lib/support/prof_err.et",
-    ],
-    outs = ["generated/lib/support/prof_err.c"],
-    cmd = "awk -f $(location lib/et/et_c.awk) 'outfile=$@' 'outfn=prof_err.c' $(location lib/support/prof_err.et)",
+    awk = "lib/et/et_c.awk",
+    input = "lib/support/prof_err.et",
+    mode = "error-table",
+    out = "generated/lib/support/prof_err.c",
+    output_function = "prof_err.c",
+    runner = ":generate",
 )
 
-genrule(
+e2fsprogs_generate(
     name = "default_profile_c",
-    srcs = [
-        "misc/mke2fs.conf.in",
-        "misc/profile-to-c.awk",
-    ],
-    outs = ["generated/misc/default_profile.c"],
-    cmd = "awk -f $(location misc/profile-to-c.awk) < $(location misc/mke2fs.conf.in) > $@",
+    awk = "misc/profile-to-c.awk",
+    input = "misc/mke2fs.conf.in",
+    mode = "default-profile",
+    out = "generated/misc/default_profile.c",
+    runner = ":generate",
 )
 
 cc_library(

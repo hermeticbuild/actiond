@@ -1,9 +1,1 @@
-load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
-
-platform_transition_binary(
-    name = "mkfs_ext4_linux_aarch64",
-    basename = "mkfs.ext4",
-    binary = "@e2fsprogs//:mkfs_ext4.stripped",
-    target_platform = "@llvm//platforms:linux_arm64_musl",
-    visibility = ["//visibility:public"],
-)
+exports_files(["e2fsprogs.BUILD.bazel"])
