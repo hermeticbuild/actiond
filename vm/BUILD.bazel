@@ -3,7 +3,7 @@ load("@bazel_lib//lib:run_binary.bzl", "run_binary")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 
 run_binary(
-    name = "initramfs_target",
+    name = "initramfs",
     args = [
         "$(location initramfs.cpio.zst)",
         "$(location //cmd/linux_actiond_guest:linux-actiond-guest)",
@@ -20,35 +20,51 @@ run_binary(
 
 platform_transition_filegroup(
     name = "initramfs_aarch64",
-    srcs = [":initramfs_target"],
+    srcs = [":initramfs"],
     target_platform = "//platforms:linux_aarch64_musl",
     visibility = ["//visibility:public"],
 )
 
+platform_transition_filegroup(
+    name = "initramfs_x86_64",
+    srcs = [":initramfs"],
+    tags = ["manual"],
+    target_platform = "//platforms:linux_x86_64_musl",
+    visibility = ["//visibility:public"],
+)
+
 linux(
-    name = "linux_kernel_aarch64",
+    name = "linux_kernel",
+    config = {
+        "aarch64": "@actiond_vm_aarch64_kconfig//:kconfig",
+        "x86_64": "@actiond_vm_x86_64_kconfig//:kconfig",
+    },
     compact_repos = {
         "aarch64": "@actiond_vm_aarch64_compact",
+        "x86_64": "@actiond_vm_x86_64_compact",
     },
-    config = "@actiond_vm_aarch64_kconfig//:kconfig",
     config_mode = "allnoconfig",
     extra_kconfigs = {
         "//kernel/actiondfs:Kconfig": "fs/actiondfs",
     },
     extra_srcs = ["//kernel/actiondfs:srcs"],
-    image_format = "Image",
     source_repo = "@linux_6_18_2",
     visibility = ["//visibility:public"],
 )
 
 run_binary(
-    name = "linux_kernel_aarch64_zst",
+    name = "linux_kernel.image_zst",
     args = [
-        "$(location :linux_kernel_aarch64)",
-        "$(location Image.zst)",
+        "-q",
+        "--ultra",
+        "-22",
+        "-f",
+        "$(location :linux_kernel.image)",
+        "-o",
+        "$(location :Image.zst)",
     ],
     outs = ["Image.zst"],
-    srcs = [":linux_kernel_aarch64"],
-    tool = "//tools:zstd_file",
+    srcs = [":linux_kernel.image"],
+    tool = "@zstd//:zstd_cli",
     visibility = ["//visibility:public"],
 )

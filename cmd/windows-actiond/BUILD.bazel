@@ -1,0 +1,33 @@
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "windows-actiond",
+    linkopts = [
+        "-lcomputecore",
+        "-lntdll",
+        "-lole32",
+        "-lws2_32",
+    ],
+    main = "main.zig",
+    strip_debug_symbols = True,
+    target_compatible_with = ["@platforms//os:windows"],
+    visibility = ["//visibility:public"],
+    deps = ["//src:actiond"],
+)
+
+platform_transition_binary(
+    name = "windows-actiond_windows_arm64",
+    basename = "windows-actiond_windows_arm64.exe",
+    binary = ":windows-actiond",
+    target_platform = "@llvm//platforms:windows_arm64",
+    visibility = ["//visibility:public"],
+)
+
+platform_transition_binary(
+    name = "windows-actiond_windows_x86_64",
+    basename = "windows-actiond_windows_x86_64.exe",
+    binary = ":windows-actiond",
+    target_platform = "@llvm//platforms:windows_x86_64",
+    visibility = ["//visibility:public"],
+)

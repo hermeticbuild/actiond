@@ -84,3 +84,19 @@ mostly from Linux-musl exec-configuration actions needed by the VM build. The
 2,403 action keys as the Linux exec-config subset of `llvm-tblgen`. As a split
 warmup, `resource_directory` also exposes Bazel TreeArtifact materialization
 differences that can make the later link miss `libclang_rt.builtins.a`.
+
+## Windows LLVM Smoke Runner
+
+`run_llvm_windows_vm_smoke.ps1` builds `@llvm-project//llvm:llvm-tblgen`
+once through `windows-actiond` and once directly on the Windows host. Both
+measurements use fresh Bazel output bases, the same `-Jobs` value, and
+`//e2e:llvm_exec_warmup` before the measured build. The runner stops the
+Hyper-V VM before starting the Windows-host measurement and requires equal
+total and executed process counts. It writes `windows-llvm-smoke-timings.md`
+with Bazel elapsed time, wall time, process counts, and the actiond-to-host
+ratio. Pass `-Architecture arm64` on Windows ARM64; x86_64 is the default.
+
+GitHub's `windows-11-arm` runner does not provide Hyper-V, so CI passes
+`-BuildOnly` there to build all ARM64 artifacts in one Bazel command and run
+the ARM64 `windows-actiond` executable. The x86_64 matrix entry runs the full
+Hyper-V LLVM comparison.

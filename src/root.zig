@@ -31,7 +31,9 @@ pub const runtime_mount = @import("runtime_mount.zig");
 pub const staged_cas_index = @import("staged_cas_index.zig");
 pub const tree_service = @import("tree_service.zig");
 pub const version = @import("version.zig");
+pub const vm_host = @import("vm_host.zig");
 pub const vsock = @import("vsock.zig");
+pub const windows_vm_host = @import("windows_vm_host.zig");
 
 test {
     _ = action_executor;
@@ -67,5 +69,7 @@ test {
     _ = staged_cas_index;
     _ = tree_service;
     _ = version;
+    _ = vm_host;
     _ = vsock;
+    _ = windows_vm_host;
 }

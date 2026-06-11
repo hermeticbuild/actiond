@@ -10,8 +10,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  macos-release-binary:
-    name: macOS release binary
+  release-binaries:
+    name: Release binaries
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -22,4 +22,41 @@ jobs:
       - name: Build
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: .github/workflows/build_macos_release.sh release
+        run: .github/workflows/build_release.sh release
+
+  windows-llvm-smoke:
+    name: Windows ${{ matrix.mode }} (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            mode: artifact-build
+            runner: windows-11-arm
+            extra_arguments: -BuildOnly
+          - architecture: x86_64
+            mode: llvm-smoke
+            runner: windows-2025
+            extra_arguments: -Jobs 8
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build artifacts and run the configured Windows test
+        shell: pwsh
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        run: e2e/run_llvm_windows_vm_smoke.ps1 -OutputDirectory "$env:RUNNER_TEMP\actiond-windows-llvm" -Architecture ${{ matrix.architecture }} ${{ matrix.extra_arguments }}
+
+      - name: Upload Windows test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.mode }}-${{ matrix.architecture }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}\actiond-windows-llvm\*.md
+            ${{ runner.temp }}\actiond-windows-llvm\*.log

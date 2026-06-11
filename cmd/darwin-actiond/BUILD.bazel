@@ -1,4 +1,5 @@
 load("@codesign.bzl", "codesign")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
@@ -35,10 +36,10 @@ cc_library(
     additional_linker_inputs = [
         "//runtimes:runtimes_squashfs_aarch64",
         "//vm:initramfs_aarch64",
-        "//vm:linux_kernel_aarch64_zst",
+        "//vm:linux_kernel.image_zst",
     ],
     linkopts = [
-        "-Wl,-sectcreate,__ACTIOND,__kernel,$(location //vm:linux_kernel_aarch64_zst)",
+        "-Wl,-sectcreate,__ACTIOND,__kernel,$(location //vm:linux_kernel.image_zst)",
         "-Wl,-sectcreate,__ACTIOND,__initramfs,$(location //vm:initramfs_aarch64)",
         "-Wl,-sectcreate,__ACTIOND,__runtimes,$(location //runtimes:runtimes_squashfs_aarch64)",
     ],
@@ -51,5 +52,13 @@ codesign(
     binary_identifier = "darwin-actiond",
     entitlements = "darwin-actiond.entitlements",
     target_compatible_with = ["@platforms//os:macos"],
+    visibility = ["//visibility:public"],
+)
+
+platform_transition_binary(
+    name = "darwin-actiond_macos_arm64",
+    basename = "darwin-actiond_macos_arm64",
+    binary = ":darwin-actiond",
+    target_platform = "@llvm//platforms:macos_arm64",
     visibility = ["//visibility:public"],
 )

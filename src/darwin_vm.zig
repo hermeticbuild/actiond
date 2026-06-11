@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const control_transport_fd = @import("control_transport_fd.zig");
+const vm_host = @import("vm_host.zig");
 const vsock = @import("vsock.zig");
 
 pub const Error = error{
@@ -119,17 +120,9 @@ pub const Machine = struct {
 };
 
 fn absolutePathZ(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
-    if (std.fs.path.isAbsolute(path)) {
-        return std.Io.Dir.realPathFileAbsoluteAlloc(io, path, allocator) catch allocator.dupeZ(u8, path);
-    }
-
-    if (std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator)) |absolute_path| {
-        return absolute_path;
-    } else |_| {}
-
-    var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.Io.Dir.cwd().realPath(io, &cwd_buffer);
-    return std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ cwd_buffer[0..cwd_len], path }, 0);
+    const absolute_path = try vm_host.absolutePath(io, allocator, path);
+    defer allocator.free(absolute_path);
+    return allocator.dupeZ(u8, absolute_path);
 }
 
 fn sleepMilliseconds(milliseconds: u32) void {

@@ -596,7 +596,7 @@
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
         "bzlTransitiveDigest": "YjUUtw/8pOHj6NHtiyeVvpfylXbZ4Py/evZINMUCpyE=",
-        "usagesDigest": "ibGc20hPwghzZRHwdEWfEHMoKXTAypv8XScqsWSxBrI=",
+        "usagesDigest": "uR75+8AnFDq+vE6OZXCfutpDHiDraBuaj6xElfohAR0=",
         "recordedInputs": [
           "REPO_MAPPING:rules_zig+,bazel_skylib bazel_skylib+",
           "REPO_MAPPING:rules_zig+,bazel_tools bazel_tools",
@@ -775,32 +775,26 @@
                 "0.16.0"
               ],
               "exec_lengths": [
-                3,
-                3,
-                3,
-                3,
-                3,
-                3
+                2,
+                2,
+                2,
+                2,
+                2,
+                2
               ],
               "exec_constraints": [
                 "@platforms//os:linux",
                 "@platforms//cpu:aarch64",
-                "'@@//platforms:local_execution'",
                 "@platforms//os:macos",
                 "@platforms//cpu:aarch64",
-                "'@@//platforms:local_execution'",
                 "@platforms//os:windows",
                 "@platforms//cpu:aarch64",
-                "'@@//platforms:local_execution'",
                 "@platforms//os:linux",
                 "@platforms//cpu:x86_64",
-                "'@@//platforms:local_execution'",
                 "@platforms//os:macos",
                 "@platforms//cpu:x86_64",
-                "'@@//platforms:local_execution'",
                 "@platforms//os:windows",
-                "@platforms//cpu:x86_64",
-                "'@@//platforms:local_execution'"
+                "@platforms//cpu:x86_64"
               ],
               "target_compatible_lengths": [
                 0,

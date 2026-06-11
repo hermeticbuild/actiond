@@ -44,7 +44,7 @@ pointing at `/Users/dzbarsky/linux.bzl` and verify the kernel with the remote
 Bazel config:
 
 ```bash
-bazel build --config=remote //vm:linux_kernel_aarch64_zst
+bazel build --config=remote //vm:linux_kernel.image_zst
 ```
 
 Use `--config=remote` for large kernel/package Bazel builds from this repo
