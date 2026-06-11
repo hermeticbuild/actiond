@@ -34,12 +34,12 @@ cc_library(
     name = "darwin-payload-sections",
     additional_linker_inputs = [
         "//runtimes:runtimes_squashfs_aarch64",
-        "//vm:initramfs",
-        "//vm:linux_kernel_zst",
+        "//vm:initramfs_aarch64",
+        "//vm:linux_kernel_aarch64_zst",
     ],
     linkopts = [
-        "-Wl,-sectcreate,__ACTIOND,__kernel,$(location //vm:linux_kernel_zst)",
-        "-Wl,-sectcreate,__ACTIOND,__initramfs,$(location //vm:initramfs)",
+        "-Wl,-sectcreate,__ACTIOND,__kernel,$(location //vm:linux_kernel_aarch64_zst)",
+        "-Wl,-sectcreate,__ACTIOND,__initramfs,$(location //vm:initramfs_aarch64)",
         "-Wl,-sectcreate,__ACTIOND,__runtimes,$(location //runtimes:runtimes_squashfs_aarch64)",
     ],
     target_compatible_with = ["@platforms//os:macos"],

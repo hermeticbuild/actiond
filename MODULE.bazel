@@ -14,6 +14,7 @@ bazel_dep(name = "linux.bzl", version = "0.0.0")
 bazel_dep(name = "squashfs-tools", version = "4.7.5")
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
 bazel_dep(name = "codesign.bzl", version = "0.0.13")
+bazel_dep(name = "gawk", version = "5.3.2.bcr.3")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
@@ -27,9 +28,9 @@ http_archive(
 
 archive_override(
     module_name = "linux.bzl",
-    integrity = "sha256-HvmX1dVoB4AL5Xh7ueNUq6ibi/o9DSIdUrHYFyrsF/4=",
-    strip_prefix = "linux.bzl-7fc0e206a0147d878e6e18ae7b71e5567d1756c9",
-    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/7fc0e206a0147d878e6e18ae7b71e5567d1756c9.tar.gz"],
+    integrity = "sha256-5viG+cB4AYYHnjPPmTIy2De3L0fqj+DdcaloVrmTr0k=",
+    strip_prefix = "linux.bzl-d6b1b37708be6d285941d5e1b62725b792686bcd",
+    urls = ["https://github.com/hermeticbuild/linux.bzl/archive/d6b1b37708be6d285941d5e1b62725b792686bcd.tar.gz"],
 )
 
 single_version_override(
@@ -112,23 +113,23 @@ linux_kernel.extra_source(
     source_dir = "fs/actiondfs",
 )
 linux_kernel.kconfig(
-    name = "actiond_vm_kconfig",
+    name = "actiond_vm_aarch64_kconfig",
     config = "//vm:linux.config",
 )
 linux_kernel.compact(
-    name = "actiond_vm_compact",
+    name = "actiond_vm_aarch64_compact",
     config = "//vm:linux.config",
     config_mode = "allnoconfig",
     config_name = "aarch64",
     extra_sources = ["actiondfs"],
-    kernel_name = "linux_kernel",
+    kernel_name = "linux_kernel_aarch64",
     kernel_package = "vm",
     source_repo = "linux_6_18_2",
 )
 use_repo(
     linux_kernel,
-    "actiond_vm_compact",
-    "actiond_vm_kconfig",
+    "actiond_vm_aarch64_compact",
+    "actiond_vm_aarch64_kconfig",
     "linux_6_18_2",
 )
 

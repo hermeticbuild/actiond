@@ -35,7 +35,7 @@ platform_transition_binary(
     name = "e2e_action_tool_linux_aarch64",
     basename = "e2e_action_tool_linux_aarch64",
     binary = ":e2e_action_tool",
-    target_platform = "//platforms:linux_aarch64",
+    target_platform = "//platforms:linux_aarch64_musl",
     visibility = ["//visibility:public"],
 )
 
@@ -43,7 +43,7 @@ platform_transition_binary(
     name = "e2e_action_tool_linux_x86_64",
     basename = "e2e_action_tool_linux_x86_64",
     binary = ":e2e_action_tool",
-    target_platform = "//platforms:linux_x86_64",
+    target_platform = "//platforms:linux_x86_64_musl",
     visibility = ["//visibility:public"],
 )
 
