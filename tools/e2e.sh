@@ -176,16 +176,24 @@ run_vm_e2e() {
       server_name="darwin-actiond"
       ;;
     Linux)
-      if [[ "$(uname -m)" != "x86_64" ]]; then
-        echo "QEMU VM e2e currently requires Linux x86_64" >&2
-        return 1
-      fi
-      architecture="x86_64"
-      server_label="//cmd/linux-actiond:linux-actiond_linux_x86_64"
+      case "$(uname -m)" in
+        aarch64|arm64)
+          architecture="aarch64"
+          server_label="//cmd/linux-actiond:linux-actiond_linux_arm64"
+          ;;
+        x86_64)
+          architecture="x86_64"
+          server_label="//cmd/linux-actiond:linux-actiond_linux_x86_64"
+          ;;
+        *)
+          echo "QEMU VM e2e does not support Linux architecture $(uname -m)" >&2
+          return 1
+          ;;
+      esac
       server_name="linux-actiond"
       ;;
     *)
-      echo "VM e2e requires macOS or Linux x86_64" >&2
+      echo "VM e2e requires macOS or Linux" >&2
       return 1
       ;;
   esac

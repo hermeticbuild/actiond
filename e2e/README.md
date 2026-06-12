@@ -104,9 +104,9 @@ LLVM comparison.
 ## Linux QEMU LLVM Smoke Runner
 
 `run_llvm_linux_vm_smoke.sh` builds `@llvm-project//llvm:llvm-tblgen` once
-through `linux-actiond` and once directly on the Linux x86_64 host. Both
-measurements use fresh Bazel output bases, the Linux x86_64 musl target and
-host platforms, and `//e2e:llvm_exec_warmup` before the measured build. The
+through `linux-actiond` and once directly on the Linux ARM64 or x86_64 host.
+Both measurements use fresh Bazel output bases, the matching Linux musl target
+and host platforms, and `//e2e:llvm_exec_warmup` before the measured build. The
 runner stops QEMU before the Linux-host measurement, passes no `--jobs` value
 by default, and requires equal total and executed process counts. It writes
 `linux-llvm-smoke-timings.md` with Bazel elapsed time, wall time, process

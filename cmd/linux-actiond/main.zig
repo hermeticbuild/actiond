@@ -4,14 +4,12 @@ const actiond = @import("actiond");
 const embedded_assets = @import("actiond_embedded_assets");
 const embedded_qemu = @import("actiond_embedded_qemu");
 
-const fexec_qemu_argument = "--actiond-internal-fexec-qemu";
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
 
-    if (args.len > 1 and std.mem.eql(u8, args[1], fexec_qemu_argument)) {
+    if (args.len > 1 and std.mem.eql(u8, args[1], actiond.qemu_vm.fexec_argument)) {
         if (args.len < 3) return error.MissingQemuArguments;
         try actiond.qemu_vm.fexecEmbedded(
             io,
@@ -33,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print(
         \\linux-actiond zig={s} bazel={s}
         \\usage:
-        \\  linux-actiond serve-vm [--kernel=/path/bzImage] [--initramfs=/path/initramfs.cpio[.zst]] [--runtime-image=/path/runtimes.sqfs] [--cas-image=/path/cas.ext4] [--listen=127.0.0.1:8980] [--root=/tmp/actiond-vm] [--actiondfs-stats-path=/path/stats.txt]
+        \\  linux-actiond serve-vm [--kernel=/path/kernel] [--initramfs=/path/initramfs.cpio[.zst]] [--runtime-image=/path/runtimes.sqfs] [--cas-image=/path/cas.ext4] [--listen=127.0.0.1:8980] [--root=/tmp/actiond-vm] [--actiondfs-stats-path=/path/stats.txt]
         \\
     , .{ actiond.version.zig, actiond.version.bazel });
     try stdout.flush();

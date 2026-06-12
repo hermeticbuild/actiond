@@ -64,6 +64,10 @@ register_toolchains("@codesign.bzl//toolchain:all")
 
 qemu = use_extension("@rules_qemu//qemu/extension:qemu.bzl", "qemu")
 qemu.system_toolchain(
+    system_target = "aarch64-softmmu",
+    target_settings = ["//platforms:qemu_system_aarch64"],
+)
+qemu.system_toolchain(
     system_target = "x86_64-softmmu",
     target_settings = ["//platforms:qemu_system_x86_64"],
 )

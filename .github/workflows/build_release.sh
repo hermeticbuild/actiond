@@ -18,12 +18,14 @@ fi
 
 bazel build "${bazel_flags[@]}" -c opt \
   //cmd/darwin-actiond:darwin-actiond_macos_arm64 \
+  //cmd/linux-actiond:linux-actiond_linux_arm64 \
   //cmd/linux-actiond:linux-actiond_linux_x86_64 \
   //cmd/windows-actiond:windows-actiond_windows_arm64 \
   //cmd/windows-actiond:windows-actiond_windows_x86_64
 
 cp -f \
   bazel-bin/cmd/darwin-actiond/darwin-actiond_macos_arm64/darwin-actiond_macos_arm64 \
+  bazel-bin/cmd/linux-actiond/linux-actiond_linux_arm64/linux-actiond_linux_arm64 \
   bazel-bin/cmd/linux-actiond/linux-actiond_linux_x86_64/linux-actiond_linux_x86_64 \
   bazel-bin/cmd/windows-actiond/windows-actiond_windows_arm64/windows-actiond_windows_arm64.exe \
   bazel-bin/cmd/windows-actiond/windows-actiond_windows_x86_64/windows-actiond_windows_x86_64.exe \
@@ -32,6 +34,7 @@ cp -f \
 cd "${artifact_dir}"
 shasum -a 256 \
   darwin-actiond_macos_arm64 \
+  linux-actiond_linux_arm64 \
   linux-actiond_linux_x86_64 \
   windows-actiond_windows_arm64.exe \
   windows-actiond_windows_x86_64.exe \

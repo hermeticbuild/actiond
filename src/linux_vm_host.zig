@@ -1,7 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const control_transport_fd = @import("control_transport_fd.zig");
-const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
 const qemu_vm = @import("qemu_vm.zig");
 const vm_host = @import("vm_host.zig");
 
@@ -12,64 +10,40 @@ pub fn serve(
     comptime embedded_assets: type,
     comptime embedded_qemu: type,
 ) !void {
-    if (comptime builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) {
+    if (comptime builtin.os.tag != .linux or (builtin.cpu.arch != .aarch64 and builtin.cpu.arch != .x86_64)) {
         return error.UnsupportedHost;
     }
+    if (!std.mem.eql(u8, embedded_qemu.target_arch, @tagName(builtin.cpu.arch))) return error.UnsupportedHost;
 
-    var root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{});
-    defer root_dir.close(io);
+    var prepared = try vm_host.prepareVm(io, allocator, options, embedded_assets);
+    defer prepared.deinit(io, allocator);
 
-    const owned_cas_image_path = if (options.cas_image == null)
-        try std.fs.path.join(allocator, &.{ options.root, "cas.ext4" })
+    if ((embedded_qemu.bios_256k == null) != (embedded_qemu.linuxboot_dma == null)) return error.InvalidQemuAssets;
+    try materializeQemuFile(io, allocator, prepared.root_dir, "qemu/bios-256k.bin", embedded_qemu.bios_256k);
+    try materializeQemuFile(io, allocator, prepared.root_dir, "qemu/linuxboot_dma.bin", embedded_qemu.linuxboot_dma);
+    const qemu_data_path: ?[]u8 = if (embedded_qemu.bios_256k != null)
+        try vm_host.absoluteSubPath(io, allocator, prepared.root_dir, "qemu")
     else
-        "";
-    defer if (options.cas_image == null) allocator.free(owned_cas_image_path);
-    const cas_image_path = options.cas_image orelse owned_cas_image_path;
-    const format_cas_image = try vm_host.ensureCasImageFile(io, cas_image_path, options.cas_image_size_mib);
-
-    var assets = try vm_host.resolveAssets(io, allocator, root_dir, options, embedded_assets);
-    defer assets.deinit(allocator);
-
-    const raw_kernel = try vm_host.prepareBootKernel(io, allocator, root_dir, assets.kernel);
-    defer if (raw_kernel) |path| allocator.free(path);
-    const boot_kernel_path = raw_kernel orelse assets.kernel;
-
-    const raw_initramfs = try vm_host.prepareBootInitramfs(io, allocator, root_dir, assets.initramfs);
-    defer if (raw_initramfs) |path| allocator.free(path);
-    const boot_initramfs_path = raw_initramfs orelse assets.initramfs;
-
-    const bios_256k_path = try vm_host.materializeEmbeddedFile(
-        io,
-        allocator,
-        root_dir,
-        "qemu/bios-256k.bin",
-        embedded_qemu.bios_256k,
-    );
-    defer allocator.free(bios_256k_path);
-    const linuxboot_dma_path = try vm_host.materializeEmbeddedFile(
-        io,
-        allocator,
-        root_dir,
-        "qemu/linuxboot_dma.bin",
-        embedded_qemu.linuxboot_dma,
-    );
-    defer allocator.free(linuxboot_dma_path);
-    const qemu_data_path = try vm_host.absoluteSubPath(io, allocator, root_dir, "qemu");
-    defer allocator.free(qemu_data_path);
+        null;
+    defer if (qemu_data_path) |path| allocator.free(path);
 
     std.log.info("starting QEMU VM kernel={s} initramfs={s} runtimes={s} cas={s}", .{
-        boot_kernel_path,
-        boot_initramfs_path,
-        assets.runtime_image,
-        cas_image_path,
+        prepared.boot_kernel_path,
+        prepared.boot_initramfs_path,
+        prepared.assets.runtime_image,
+        prepared.cas_image_path,
     });
     var machine = try qemu_vm.Machine.start(io, allocator, .{
-        .kernel_path = boot_kernel_path,
-        .initramfs_path = boot_initramfs_path,
-        .runtime_image_path = assets.runtime_image,
-        .cas_image_path = cas_image_path,
+        .qemu_system_name = embedded_qemu.qemu_system_name,
+        .accel = embedded_qemu.accel,
+        .machine = embedded_qemu.machine,
+        .target_arch = embedded_qemu.target_arch,
+        .kernel_path = prepared.boot_kernel_path,
+        .initramfs_path = prepared.boot_initramfs_path,
+        .runtime_image_path = prepared.assets.runtime_image,
+        .cas_image_path = prepared.cas_image_path,
         .qemu_data_path = qemu_data_path,
-        .format_cas_image = format_cas_image,
+        .format_cas_image = prepared.format_cas_image,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
         .start_timeout_ms = options.start_timeout_ms,
@@ -78,14 +52,17 @@ pub fn serve(
     defer machine.deinit();
 
     std.log.info("actiond QEMU VM started; proxying gRPC to linux-actiond-guest", .{});
-    var fd_client = control_transport_fd.Client{ .opener = machine.opener() };
-    defer fd_client.deinit(io);
-    var background_tasks: std.Io.Group = .init;
-    defer background_tasks.cancel(io);
-    if (options.actiondfs_stats_path) |path| {
-        const stats_path = try allocator.dupe(u8, path);
-        errdefer allocator.free(stats_path);
-        try background_tasks.concurrent(io, vm_host.actiondfsStatsTask, .{ io, allocator, &fd_client, stats_path });
-    }
-    return grpc_vsock_bridge.serve(io, options.listen, &machine);
+    return vm_host.serveGrpcBridge(io, allocator, options, &machine);
+}
+
+fn materializeQemuFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    path: []const u8,
+    bytes: ?[]const u8,
+) !void {
+    const contents = bytes orelse return;
+    const absolute_path = try vm_host.materializeEmbeddedFile(io, allocator, root_dir, path, contents);
+    allocator.free(absolute_path);
 }

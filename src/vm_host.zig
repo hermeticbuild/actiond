@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const control_protocol = @import("control_protocol.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
+const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
 const zstd_test = if (builtin.is_test) @import("c") else struct {};
 
 const max_compressed_initramfs_bytes = 128 * 1024 * 1024;
@@ -26,6 +27,54 @@ pub const ResolvedAssets = struct {
         self.* = undefined;
     }
 };
+
+pub const PreparedVm = struct {
+    root_dir: std.Io.Dir,
+    assets: ResolvedAssets = .{},
+    cas_image_path: []const u8 = "",
+    owned_cas_image_path: ?[]u8 = null,
+    boot_kernel_path: []const u8 = "",
+    owned_boot_kernel_path: ?[]u8 = null,
+    boot_initramfs_path: []const u8 = "",
+    owned_boot_initramfs_path: ?[]u8 = null,
+    format_cas_image: bool = false,
+
+    pub fn deinit(self: *PreparedVm, io: std.Io, allocator: std.mem.Allocator) void {
+        if (self.owned_boot_initramfs_path) |path| allocator.free(path);
+        if (self.owned_boot_kernel_path) |path| allocator.free(path);
+        self.assets.deinit(allocator);
+        if (self.owned_cas_image_path) |path| allocator.free(path);
+        self.root_dir.close(io);
+        self.* = undefined;
+    }
+};
+
+pub fn prepareVm(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: ServeVmOptions,
+    comptime embedded_assets: type,
+) !PreparedVm {
+    var prepared: PreparedVm = .{
+        .root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{}),
+    };
+    errdefer prepared.deinit(io, allocator);
+
+    if (options.cas_image) |path| {
+        prepared.cas_image_path = path;
+    } else {
+        prepared.owned_cas_image_path = try std.fs.path.join(allocator, &.{ options.root, "cas.ext4" });
+        prepared.cas_image_path = prepared.owned_cas_image_path.?;
+    }
+    prepared.format_cas_image = try ensureCasImageFile(io, prepared.cas_image_path, options.cas_image_size_mib);
+
+    prepared.assets = try resolveAssets(io, allocator, prepared.root_dir, options, embedded_assets);
+    prepared.owned_boot_kernel_path = try prepareBootKernel(io, allocator, prepared.root_dir, prepared.assets.kernel);
+    prepared.boot_kernel_path = prepared.owned_boot_kernel_path orelse prepared.assets.kernel;
+    prepared.owned_boot_initramfs_path = try prepareBootInitramfs(io, allocator, prepared.root_dir, prepared.assets.initramfs);
+    prepared.boot_initramfs_path = prepared.owned_boot_initramfs_path orelse prepared.assets.initramfs;
+    return prepared;
+}
 
 pub fn resolveAssets(
     io: std.Io,
@@ -70,7 +119,7 @@ fn materializeEmbeddedAsset(
     const output_rel = try std.fmt.allocPrint(allocator, "embedded/{s}-{s}", .{ name, std.fmt.bytesToHex(hash, .lower) });
     defer allocator.free(output_rel);
 
-    return materializeEmbeddedFile(io, allocator, root_dir, output_rel, bytes);
+    return materializeEmbeddedFileWithHash(io, allocator, root_dir, output_rel, bytes, &hash);
 }
 
 pub fn materializeEmbeddedFile(
@@ -80,14 +129,24 @@ pub fn materializeEmbeddedFile(
     output_rel: []const u8,
     bytes: []const u8,
 ) ![]u8 {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    return materializeEmbeddedFileWithHash(io, allocator, root_dir, output_rel, bytes, &hash);
+}
+
+fn materializeEmbeddedFileWithHash(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    output_rel: []const u8,
+    bytes: []const u8,
+    hash: *const [32]u8,
+) ![]u8 {
     const parent = std.fs.path.dirname(output_rel) orelse ".";
     if (!std.mem.eql(u8, parent, ".")) try root_dir.createDirPath(io, parent);
 
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
-
     if (root_dir.statFile(io, output_rel, .{})) |stat| {
-        if (stat.kind == .file and stat.size == bytes.len and try embeddedAssetMatches(io, root_dir, output_rel, &hash)) {
+        if (stat.kind == .file and stat.size == bytes.len and try embeddedAssetMatches(io, root_dir, output_rel, hash)) {
             return absoluteSubPath(io, allocator, root_dir, output_rel);
         }
     } else |err| switch (err) {
@@ -128,7 +187,7 @@ pub fn materializeEmbeddedFile(
     output_open = false;
     root_dir.renamePreserve(temp_path, root_dir, output_rel, io) catch |err| switch (err) {
         error.PathAlreadyExists => {
-            if (try embeddedAssetMatches(io, root_dir, output_rel, &hash)) {
+            if (try embeddedAssetMatches(io, root_dir, output_rel, hash)) {
                 try root_dir.deleteFile(io, temp_path);
             } else {
                 try root_dir.rename(temp_path, root_dir, output_rel, io);
@@ -379,7 +438,7 @@ pub fn absoluteSubPath(
     return std.fs.path.join(allocator, &.{ root_buffer[0..root_len], sub_path });
 }
 
-pub fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !bool {
+fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !bool {
     if (std.Io.Dir.cwd().statFile(io, path, .{})) |stat| {
         if (stat.kind != .file) return error.InvalidCasImage;
         return false;
@@ -396,7 +455,25 @@ pub fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !bool {
     return true;
 }
 
-pub fn actiondfsStatsTask(
+pub fn serveGrpcBridge(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: ServeVmOptions,
+    machine: anytype,
+) !void {
+    var fd_client = control_transport_fd.Client{ .opener = machine.opener() };
+    defer fd_client.deinit(io);
+    var background_tasks: std.Io.Group = .init;
+    defer background_tasks.cancel(io);
+    if (options.actiondfs_stats_path) |path| {
+        const stats_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(stats_path);
+        try background_tasks.concurrent(io, actiondfsStatsTask, .{ io, allocator, &fd_client, stats_path });
+    }
+    return grpc_vsock_bridge.serve(io, options.listen, machine);
+}
+
+fn actiondfsStatsTask(
     io: std.Io,
     allocator: std.mem.Allocator,
     client: *control_transport_fd.Client,

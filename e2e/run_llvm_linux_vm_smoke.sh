@@ -4,10 +4,30 @@ set -euo pipefail
 export LC_ALL=C
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
-  echo "Linux LLVM VM smoke requires a Linux x86_64 host" >&2
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "Linux LLVM VM smoke requires Linux" >&2
   exit 1
 fi
+case "$(uname -m)" in
+  aarch64|arm64)
+    architecture="arm64"
+    qemu_machine="virt"
+    default_llvm_platform="@llvm//platforms:linux_arm64_musl"
+    default_execution_platform="//e2e:actiond_linux_arm64_musl_exec"
+    server_target="//cmd/linux-actiond:linux-actiond_linux_arm64"
+    ;;
+  x86_64)
+    architecture="x86_64"
+    qemu_machine="q35"
+    default_llvm_platform="@llvm//platforms:linux_x86_64_musl"
+    default_execution_platform="//e2e:actiond_linux_x86_64_musl_exec"
+    server_target="//cmd/linux-actiond:linux-actiond_linux_x86_64"
+    ;;
+  *)
+    echo "Linux LLVM VM smoke does not support host architecture $(uname -m)" >&2
+    exit 1
+    ;;
+esac
 if [[ "$#" -gt 1 ]]; then
   echo "usage: e2e/run_llvm_linux_vm_smoke.sh [output-directory]" >&2
   exit 1
@@ -15,10 +35,9 @@ fi
 output_root="${1:-${ACTIOND_LLVM_LINUX_SMOKE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-linux-llvm.XXXXXX")}}"
 target="${ACTIOND_LLVM_SMOKE_TARGET:-@llvm-project//llvm:llvm-tblgen}"
 warmup_target="${ACTIOND_LLVM_SMOKE_WARMUP_TARGET-//e2e:llvm_exec_warmup}"
-llvm_platform="${ACTIOND_LLVM_SMOKE_PLATFORM:-@llvm//platforms:linux_x86_64_musl}"
-execution_platform="${ACTIOND_LLVM_SMOKE_EXEC_PLATFORM:-//e2e:actiond_linux_x86_64_musl_exec}"
+llvm_platform="${ACTIOND_LLVM_SMOKE_TARGET_PLATFORM:-${default_llvm_platform}}"
+execution_platform="${ACTIOND_LLVM_SMOKE_EXEC_PLATFORM:-${default_execution_platform}}"
 endpoint="${ACTIOND_LLVM_SMOKE_ENDPOINT:-127.0.0.1:8998}"
-server_target="//cmd/linux-actiond:linux-actiond_linux_x86_64"
 vm_cpus="${ACTIOND_VM_CPUS:-$(nproc)}"
 vm_memory_mib="${ACTIOND_VM_MEMORY_MIB:-4096}"
 cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
@@ -42,7 +61,7 @@ server_pid=""
 
 stop_server() {
   if [[ -n "${server_pid}" ]]; then
-    kill "${server_pid}" >/dev/null 2>&1 || true
+    kill -- "-${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
     server_pid=""
   fi
@@ -59,9 +78,7 @@ cleanup() {
 
 trap 'cleanup $?' EXIT
 
-wait_for_port() {
-  local host="${endpoint%:*}"
-  local port="${endpoint##*:}"
+wait_for_server() {
   local start
   start="$(date +%s)"
   while true; do
@@ -69,10 +86,10 @@ wait_for_port() {
       echo "linux-actiond exited before ${endpoint} became ready" >&2
       return 1
     fi
-    if (echo >"/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
+    if grep -Fq "actiond VM raw gRPC bridge listening on ${endpoint}" "${server_log}"; then
       return 0
     fi
-    if (( "$(date +%s)" - start >= 180 )); then
+    if (( "$(date +%s)" - start >= 240 )); then
       echo "timed out waiting for ${endpoint}" >&2
       return 1
     fi
@@ -123,16 +140,16 @@ setup_server() {
     bazel shutdown
   ) >>"${build_log}" 2>&1
 
-  "${server}" serve-vm \
+  setsid "${server}" serve-vm \
     --listen="${endpoint}" \
     --root="${server_root}" \
     --cas-image-size-mib="${cas_image_size_mib}" \
     --memory-mib="${vm_memory_mib}" \
     --cpus="${vm_cpus}" \
-    --connect-timeout-ms=900000 \
+    --start-timeout-ms=180000 \
     >"${server_log}" 2>&1 &
   server_pid="$!"
-  wait_for_port
+  wait_for_server
 }
 
 process_total() {
@@ -297,19 +314,20 @@ if [[ "${actiond_total}" -ne "${host_total}" || "${actiond_executed}" -ne "${hos
 fi
 
 ratio="$(awk -v actiond="${actiond_bazel_elapsed}" -v host="${host_bazel_elapsed}" 'BEGIN { printf "%.3f", actiond / host }')"
-revision="$(git -C "${repo_root}" rev-parse HEAD)"
+revision="${ACTIOND_REVISION:-$(git -C "${repo_root}" rev-parse HEAD)}"
 cat >"${summary_path}" <<EOF
-# Linux QEMU LLVM Performance Comparison
+# Linux QEMU LLVM Performance Comparison (${architecture})
 
 - Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 - Revision: ${revision}
 - Workload: \`${target}\`, warmup=\`${warmup_target}\`
 - Target and host platform: \`${llvm_platform}\`
 - Execution platform: \`${execution_platform}\`
+- Host architecture: \`${architecture}\`
 - Build mode: \`-c opt --strip=always --stripopt=--strip-all\`
 - Jobs: ${jobs_label}
-- VM: q35 with TCG, CPUs=${vm_cpus}, memory=${vm_memory_mib} MiB
-- Comparison: actiond uses Linux x86_64 musl tools in QEMU; the Linux host runs the same tools natively. This is an end-to-end comparison, not an executor-only comparison.
+- VM: ${qemu_machine} with TCG, CPUs=${vm_cpus}, memory=${vm_memory_mib} MiB
+- Comparison: actiond uses Linux ${architecture} musl tools in QEMU; the Linux host runs the same tools natively. This is an end-to-end comparison, not an executor-only comparison.
 
 | Execution | Bazel elapsed | Wall elapsed | Total processes | Executed processes | Process summary |
 | --- | ---: | ---: | ---: | ---: | --- |

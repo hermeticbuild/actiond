@@ -4,23 +4,20 @@ const control_transport_fd = @import("control_transport_fd.zig");
 const vsock = @import("vsock.zig");
 
 const linux = std.os.linux;
-const fexec_qemu_argument = "--actiond-internal-fexec-qemu";
 const mfd_exec = 0x0010;
 
-pub const Error = error{
-    ConnectFailed,
-    ConnectTimedOut,
-    FexecFailed,
-    StartFailed,
-    UnsupportedHost,
-};
+pub const fexec_argument = "--actiond-internal-fexec-qemu";
 
 pub const Options = struct {
+    qemu_system_name: []const u8,
+    accel: []const u8,
+    machine: []const u8,
+    target_arch: []const u8,
     kernel_path: []const u8,
     initramfs_path: []const u8,
     runtime_image_path: []const u8,
     cas_image_path: []const u8,
-    qemu_data_path: []const u8,
+    qemu_data_path: ?[]const u8,
     format_cas_image: bool = false,
     memory_mib: u64 = 512,
     cpu_count: u32 = 2,
@@ -38,9 +35,10 @@ pub const Machine = struct {
     connect_attempt_timeout_ms: u32,
 
     pub fn start(io: std.Io, allocator: std.mem.Allocator, options: Options) !Machine {
-        if (comptime builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) {
+        if (comptime builtin.os.tag != .linux or (builtin.cpu.arch != .aarch64 and builtin.cpu.arch != .x86_64)) {
             return error.UnsupportedHost;
         }
+        if (!std.mem.eql(u8, options.target_arch, @tagName(builtin.cpu.arch))) return error.UnsupportedHost;
 
         const guest_cid = options.guest_cid orelse try randomGuestCid(io);
         const memory = try std.fmt.allocPrint(allocator, "{d}M", .{options.memory_mib});
@@ -53,21 +51,28 @@ pub const Machine = struct {
         defer allocator.free(cas_drive);
         const runtime_drive = try driveArg(allocator, "runtimes", options.runtime_image_path, true);
         defer allocator.free(runtime_drive);
-        const kernel_append = try kernelAppendArg(allocator, options.format_cas_image);
+        const kernel_append = try kernelAppendArg(allocator, options.target_arch, options.format_cas_image);
         defer allocator.free(kernel_append);
+        const machine_option = try std.fmt.allocPrint(allocator, "{s},accel={s}", .{ options.machine, options.accel });
+        defer allocator.free(machine_option);
 
         // TODO: Use KVM after the rules_qemu QEMU prebuilt is verified with
         // /dev/kvm on the Linux runner.
-        const argv = [_][]const u8{
+        var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer argv.deinit(allocator);
+        try argv.appendSlice(allocator, &.{
             "/proc/self/exe",
-            fexec_qemu_argument,
-            "qemu-system-x86_64",
+            fexec_argument,
+            options.qemu_system_name,
             "-machine",
-            "q35,accel=tcg",
+            machine_option,
             "-cpu",
             "max",
-            "-L",
-            options.qemu_data_path,
+        });
+        if (options.qemu_data_path) |path| {
+            try argv.appendSlice(allocator, &.{ "-L", path });
+        }
+        try argv.appendSlice(allocator, &.{
             "-smp",
             cpus,
             "-m",
@@ -97,11 +102,11 @@ pub const Machine = struct {
             runtime_drive,
             "-device",
             "virtio-blk-pci,drive=runtimes",
-        };
+        });
 
-        std.log.info("starting embedded qemu-system-x86_64 guest_cid={d}", .{guest_cid});
+        std.log.info("starting embedded {s} guest_cid={d}", .{ options.qemu_system_name, guest_cid });
         var child = try std.process.spawn(io, .{
-            .argv = &argv,
+            .argv = argv.items,
             .stdin = .ignore,
             .stdout = .inherit,
             .stderr = .inherit,
@@ -139,24 +144,31 @@ pub const Machine = struct {
     pub fn connectControlPort(self: *Machine, port: u32) !std.posix.fd_t {
         if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
-        var remaining_ms = if (self.connect_timeout_ms == 0)
+        const timeout_ms = if (self.connect_timeout_ms == 0)
             self.connect_attempt_timeout_ms
         else
             self.connect_timeout_ms;
+        const started = std.Io.Clock.awake.now(self.io);
         while (true) {
-            if (connectVsock(self.guest_cid, port)) |fd| return fd else |err| {
+            const elapsed_ms = started.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+            if (elapsed_ms >= @as(i64, timeout_ms)) return error.ConnectTimedOut;
+            const remaining_ms: u32 = timeout_ms - @as(u32, @intCast(elapsed_ms));
+            const attempt_timeout_ms = @min(self.connect_attempt_timeout_ms, remaining_ms);
+            if (connectVsock(self.guest_cid, port, attempt_timeout_ms)) |fd| return fd else |err| {
                 if (try self.reapExitedChild()) |status| {
                     std.log.err("QEMU exited before guest vsock became ready status=0x{x}", .{status});
                     return error.StartFailed;
                 }
-                if (remaining_ms <= self.connect_attempt_timeout_ms) {
+                const updated_elapsed_ms = started.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+                if (updated_elapsed_ms >= @as(i64, timeout_ms)) {
                     std.log.err("timed out connecting to guest cid={d} vsock:{d}: {s}", .{ self.guest_cid, port, @errorName(err) });
                     return error.ConnectTimedOut;
                 }
             }
-            const sleep_ms = @min(@as(u32, 100), remaining_ms);
+            const before_sleep_ms = started.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+            if (before_sleep_ms >= @as(i64, timeout_ms)) return error.ConnectTimedOut;
+            const sleep_ms = @min(@as(u32, 100), timeout_ms - @as(u32, @intCast(before_sleep_ms)));
             try self.io.sleep(.fromMilliseconds(sleep_ms), .awake);
-            remaining_ms -= sleep_ms;
         }
     }
 
@@ -235,7 +247,7 @@ pub fn fexecEmbedded(
     for (environment, envp) |entry, *output| output.* = entry;
 
     const result = linux.execveat(fd, "", argv.ptr, envp.ptr, .{ .SYMLINK_NOFOLLOW = false, .EMPTY_PATH = true });
-    std.log.err("execveat for embedded qemu-system-x86_64 failed: {s}", .{@tagName(linux.errno(result))});
+    std.log.err("execveat for embedded QEMU failed: {s}", .{@tagName(linux.errno(result))});
     return error.FexecFailed;
 }
 
@@ -272,15 +284,21 @@ fn randomGuestCid(io: std.Io) !u32 {
     return 3 + random % (std.math.maxInt(u32) - 3);
 }
 
-fn kernelAppendArg(allocator: std.mem.Allocator, format_cas_image: bool) ![]u8 {
-    return allocator.dupe(u8, if (format_cas_image)
-        "init=/init console=ttyS0 panic=-1 actiond.cas_device=/dev/vda actiond.format_cas=1"
+fn kernelAppendArg(allocator: std.mem.Allocator, target_arch: []const u8, format_cas_image: bool) ![]u8 {
+    const console = if (std.mem.eql(u8, target_arch, "aarch64"))
+        "ttyAMA0"
+    else if (std.mem.eql(u8, target_arch, "x86_64"))
+        "ttyS0"
     else
-        "init=/init console=ttyS0 panic=-1 actiond.cas_device=/dev/vda");
+        return error.UnsupportedHost;
+    return std.fmt.allocPrint(allocator, "init=/init console={s} panic=-1 actiond.cas_device=/dev/vda{s}", .{
+        console,
+        if (format_cas_image) " actiond.format_cas=1" else "",
+    });
 }
 
-fn connectVsock(cid: u32, port: u32) !std.posix.fd_t {
-    const socket_result = linux.socket(linux.AF.VSOCK, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+fn connectVsock(cid: u32, port: u32, timeout_ms: u32) !std.posix.fd_t {
+    const socket_result = linux.socket(linux.AF.VSOCK, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0);
     if (linux.errno(socket_result) != .SUCCESS) return error.ConnectFailed;
     const fd: std.posix.fd_t = @intCast(socket_result);
     errdefer closeFd(fd);
@@ -298,7 +316,30 @@ fn connectVsock(cid: u32, port: u32) !std.posix.fd_t {
         @ptrCast(&address),
         @sizeOf(linux.sockaddr.vm),
     );
-    if (linux.errno(connect_result) != .SUCCESS) return error.ConnectFailed;
+    switch (linux.errno(connect_result)) {
+        .SUCCESS => {},
+        .AGAIN, .INPROGRESS => {
+            var poll_fds = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.OUT, .revents = 0 }};
+            const poll_result = linux.poll(poll_fds[0..].ptr, poll_fds.len, @intCast(timeout_ms));
+            if (linux.errno(poll_result) != .SUCCESS or poll_result == 0) return error.ConnectFailed;
+
+            var socket_error: i32 = 0;
+            var socket_error_len: linux.socklen_t = @sizeOf(@TypeOf(socket_error));
+            const socket_error_result = linux.getsockopt(
+                fd,
+                linux.SOL.SOCKET,
+                linux.SO.ERROR,
+                std.mem.asBytes(&socket_error).ptr,
+                &socket_error_len,
+            );
+            if (linux.errno(socket_error_result) != .SUCCESS or socket_error != 0) return error.ConnectFailed;
+        },
+        else => return error.ConnectFailed,
+    }
+    const flags_result = linux.fcntl(fd, linux.F.GETFL, 0);
+    if (linux.errno(flags_result) != .SUCCESS) return error.ConnectFailed;
+    const blocking_result = linux.fcntl(fd, linux.F.SETFL, flags_result & ~@as(usize, linux.SOCK.NONBLOCK));
+    if (linux.errno(blocking_result) != .SUCCESS) return error.ConnectFailed;
     return fd;
 }
 
@@ -322,11 +363,20 @@ test "driveArg escapes commas in paths" {
     try std.testing.expectEqualStrings("if=none,id=cas,file=/tmp/actiond,,vm/cas.ext4,format=raw,cache=none", drive);
 }
 
-test "kernelAppendArg identifies the CAS block device" {
-    const argument = try kernelAppendArg(std.testing.allocator, true);
+test "kernelAppendArg selects the x86 console and CAS block device" {
+    const argument = try kernelAppendArg(std.testing.allocator, "x86_64", true);
     defer std.testing.allocator.free(argument);
     try std.testing.expectEqualStrings(
         "init=/init console=ttyS0 panic=-1 actiond.cas_device=/dev/vda actiond.format_cas=1",
+        argument,
+    );
+}
+
+test "kernelAppendArg selects the aarch64 console" {
+    const argument = try kernelAppendArg(std.testing.allocator, "aarch64", false);
+    defer std.testing.allocator.free(argument);
+    try std.testing.expectEqualStrings(
+        "init=/init console=ttyAMA0 panic=-1 actiond.cas_device=/dev/vda",
         argument,
     );
 }

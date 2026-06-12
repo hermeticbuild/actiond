@@ -9,6 +9,10 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release-binaries:
     name: Release binaries
@@ -25,8 +29,16 @@ jobs:
         run: .github/workflows/build_release.sh release
 
   linux-qemu-llvm-smoke:
-    name: Linux QEMU LLVM smoke
-    runs-on: ubuntu-latest
+    name: Linux QEMU LLVM smoke (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+          - architecture: x86_64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
 
     steps:
@@ -44,19 +56,20 @@ jobs:
       - name: Compare actiond and Linux host
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          ACTIOND_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
           ACTIOND_VM_CAS_IMAGE_SIZE_MIB: 8192
           ACTIOND_VM_MEMORY_MIB: 4096
-        run: e2e/run_llvm_linux_vm_smoke.sh "$RUNNER_TEMP/actiond-linux-llvm"
+        run: e2e/run_llvm_linux_vm_smoke.sh "$RUNNER_TEMP/actiond-linux-llvm-${{ matrix.architecture }}"
 
       - name: Upload Linux LLVM smoke results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-qemu-llvm-smoke
+          name: linux-qemu-llvm-smoke-${{ matrix.architecture }}
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/actiond-linux-llvm/*.md
-            ${{ runner.temp }}/actiond-linux-llvm/*.log
+            ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.md
+            ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.log
 
   windows-llvm-smoke:
     name: Windows ${{ matrix.mode }} (${{ matrix.architecture }})
