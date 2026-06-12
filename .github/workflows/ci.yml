@@ -24,10 +24,10 @@ jobs:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: .github/workflows/build_release.sh release
 
-  linux-qemu-e2e:
-    name: Linux QEMU e2e
+  linux-qemu-llvm-smoke:
+    name: Linux QEMU LLVM smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
 
     steps:
       - name: Checkout
@@ -41,17 +41,22 @@ jobs:
           test -c /dev/vhost-vsock
           sudo chmod a+rw /dev/vhost-vsock
 
-      - name: Run QEMU e2e
+      - name: Compare actiond and Linux host
         env:
-          ACTIOND_E2E_BARE_COUNT: 16
-          ACTIOND_E2E_NESTED_FILES_PER_GROUP: 8
-          ACTIOND_E2E_SOURCE_DIRS: 2
-          ACTIOND_E2E_SOURCE_FILES_PER_DIR: 8
-          ACTIOND_REPO_BAZEL_FLAGS: --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
-          ACTIOND_VM_CAS_IMAGE_SIZE_MIB: 1024
-          ACTIOND_VM_CPUS: 2
-          ACTIOND_VM_MEMORY_MIB: 1024
-        run: tools/e2e.sh vm
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          ACTIOND_VM_CAS_IMAGE_SIZE_MIB: 8192
+          ACTIOND_VM_MEMORY_MIB: 4096
+        run: e2e/run_llvm_linux_vm_smoke.sh "$RUNNER_TEMP/actiond-linux-llvm"
+
+      - name: Upload Linux LLVM smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-qemu-llvm-smoke
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/actiond-linux-llvm/*.md
+            ${{ runner.temp }}/actiond-linux-llvm/*.log
 
   windows-llvm-smoke:
     name: Windows ${{ matrix.mode }} (${{ matrix.architecture }})
