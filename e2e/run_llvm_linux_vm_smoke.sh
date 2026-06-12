@@ -139,22 +139,22 @@ process_total() {
   sed -E 's/^([0-9]+) processes:.*/\1/' <<<"$1"
 }
 
-process_executed() {
+process_kind_count() {
   local summary="$1"
-  local total="$2"
-  awk -v total="${total}" -F',' '
+  local kind="$2"
+  awk -v kind="${kind}" -F',' '
     {
-      skipped = 0
+      count = 0
       for (i = 1; i <= NF; i++) {
         part = $i
         sub(/^[^:]*: /, "", part)
         gsub(/^[[:space:]]+|[[:space:].]+$/, "", part)
-        if (part ~ /^[0-9]+ (action cache hit|disk cache hit|remote cache hit|internal)$/) {
+        if (part ~ ("^[0-9]+ " kind "$")) {
           split(part, fields, " ")
-          skipped += fields[1]
+          count += fields[1]
         }
       }
-      print total - skipped
+      print count
     }
   ' <<<"${summary}"
 }
@@ -186,6 +186,7 @@ measure() {
   local -a mode_flags=()
   local -a warmup_cache_flags=(--noremote_accept_cached)
   local -a measured_cache_flags=()
+  local execution_kind
 
   rm -rf "${output_base}"
   if [[ "${mode}" == "actiond" ]]; then
@@ -199,6 +200,7 @@ measure() {
       --genrule_strategy=remote
     )
     measured_cache_flags=(--remote_accept_cached)
+    execution_kind="remote"
   else
     mode_flags=(
       --remote_executor=
@@ -207,6 +209,7 @@ measure() {
       --genrule_strategy=local
     )
     measured_cache_flags=(--noremote_accept_cached)
+    execution_kind="local"
   fi
 
   echo "Starting ${mode} LLVM warmup" >&2
@@ -253,7 +256,7 @@ measure() {
     return 1
   fi
   total="$(process_total "${process_summary}")"
-  executed="$(process_executed "${process_summary}" "${total}")"
+  executed="$(process_kind_count "${process_summary}" "${execution_kind}")"
   if [[ ! "${total}" =~ ^[0-9]+$ || ! "${executed}" =~ ^[0-9]+$ || "${executed}" -eq 0 ]]; then
     echo "could not parse ${mode} process counts: ${process_summary}" >&2
     return 1
