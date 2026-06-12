@@ -173,7 +173,7 @@ run_build_checks() {
   run_bazel test //src:unit_tests
   run_bazel build //vm:initramfs_aarch64
   run_bazel build //runtimes:runtimes_squashfs
-  run_bazel build //vm:linux_kernel_aarch64 --nobuild
+  run_bazel build //vm:linux_kernel --nobuild
   run_bazel build //tools:e2e_action_tool_linux_aarch64 //tools:e2e_action_tool_linux_x86_64
   run_bazel build //...
   run_bazel test //...
@@ -252,11 +252,11 @@ run_vm_e2e() {
   else
     run_bazel build \
       //cmd/darwin-actiond \
-      //vm:linux_kernel_aarch64_zst \
+      //vm:linux_kernel.image_zst \
       //vm:initramfs_aarch64 \
       //runtimes:runtimes_squashfs
     local kernel initramfs runtimes
-    kernel="$(bazel_output //vm:linux_kernel_aarch64_zst)"
+    kernel="$(bazel_output //vm:linux_kernel.image_zst)"
     initramfs="$(bazel_output //vm:initramfs_aarch64)"
     runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
     server="$(bazel_output //cmd/darwin-actiond)"

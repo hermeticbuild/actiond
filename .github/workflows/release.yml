@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  macos-release-binary:
-    name: macOS release binary
+  release-binaries:
+    name: Release binaries
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -21,7 +21,7 @@ jobs:
       - name: Build
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: .github/workflows/build_macos_release.sh release
+        run: .github/workflows/build_release.sh release
 
       - name: Publish release
         env:
@@ -39,5 +39,7 @@ jobs:
           fi
           gh release upload "${TAG_NAME}" \
             release/darwin-actiond_macos_arm64 \
+            release/windows-actiond_windows_arm64.exe \
+            release/windows-actiond_windows_x86_64.exe \
             release/SHA256.txt \
             --clobber

@@ -38,6 +38,7 @@ pub const runtimes_mount_target: [:0]const u8 = "/runtimes";
 pub const cas_mount_target: [:0]const u8 = "/cas";
 pub const cas_mount_fstype: [:0]const u8 = "ext4";
 pub const cas_format_cmdline_token = "actiond.format_cas=1";
+pub const cas_device_cmdline_prefix = "actiond.cas_device=";
 pub const cas_mkfs_path = "/sbin/mkfs.ext4";
 pub const cas_format_device = block_devices[0];
 const cas_mount_flags = std.os.linux.MS.NOSUID |
@@ -62,7 +63,11 @@ pub fn run(io: std.Io) !void {
     for (mounts) |mount_spec| {
         try mount(stderr, mount_spec);
     }
-    try mountCasStore(io, stderr, readCasFormatFlag(io));
+    var cmdline_buffer: [4096]u8 = undefined;
+    const cmdline = std.Io.Dir.cwd().readFile(io, "/proc/cmdline", &cmdline_buffer) catch "";
+    var cas_device_buffer: [128]u8 = undefined;
+    const cas_device = casDeviceFromCmdline(cmdline, &cas_device_buffer) orelse cas_format_device;
+    try mountCasStore(io, stderr, cmdlineRequestsCasFormat(cmdline), cas_device);
     try mountRuntimeImage(io, stderr);
     stderr.writeAll("linux-actiond guest init mounted filesystems; starting worker\n") catch {};
     stderr.flush() catch {};
@@ -70,18 +75,18 @@ pub fn run(io: std.Io) !void {
     return std.process.replace(io, .{ .argv = &worker_argv });
 }
 
-fn mountCasStore(io: std.Io, stderr: *std.Io.Writer, format_if_needed: bool) !void {
+fn mountCasStore(io: std.Io, stderr: *std.Io.Writer, format_if_needed: bool, cas_device: [:0]const u8) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
     for (0..runtime_device_wait_attempts) |_| {
         if (format_if_needed) {
-            switch (try tryMountCasDevice(stderr, cas_format_device)) {
+            switch (try tryMountCasDevice(stderr, cas_device)) {
                 .mounted => return,
                 .unavailable => {},
                 .rejected => {
-                    try formatCasDevice(io, stderr, cas_format_device);
-                    if (try tryMountCasDevice(stderr, cas_format_device) == .mounted) return;
-                    stderr.print("formatted CAS block device {s} did not mount as ext4\n", .{cas_format_device}) catch {};
+                    try formatCasDevice(io, stderr, cas_device);
+                    if (try tryMountCasDevice(stderr, cas_device) == .mounted) return;
+                    stderr.print("formatted CAS block device {s} did not mount as ext4\n", .{cas_device}) catch {};
                     stderr.flush() catch {};
                     return error.MountFailed;
                 },
@@ -279,10 +284,12 @@ fn formatCasDevice(io: std.Io, stderr: *std.Io.Writer, device: [:0]const u8) !vo
     return error.MountFailed;
 }
 
-fn readCasFormatFlag(io: std.Io) bool {
-    var buffer: [4096]u8 = undefined;
-    const cmdline = std.Io.Dir.cwd().readFile(io, "/proc/cmdline", &buffer) catch return false;
-    return cmdlineRequestsCasFormat(cmdline);
+fn casDeviceFromCmdline(cmdline: []const u8, buffer: []u8) ?[:0]const u8 {
+    const device = cmdlineValue(cmdline, cas_device_cmdline_prefix) orelse return null;
+    if (device.len == 0 or device.len + 1 > buffer.len) return null;
+    @memcpy(buffer[0..device.len], device);
+    buffer[device.len] = 0;
+    return buffer[0..device.len :0];
 }
 
 fn cmdlineRequestsCasFormat(cmdline: []const u8) bool {
@@ -292,6 +299,15 @@ fn cmdlineRequestsCasFormat(cmdline: []const u8) bool {
         if (std.mem.eql(u8, token, cas_format_cmdline_token)) return true;
     }
     return false;
+}
+
+fn cmdlineValue(cmdline: []const u8, prefix: []const u8) ?[]const u8 {
+    var tokens = std.mem.splitScalar(u8, cmdline, ' ');
+    while (tokens.next()) |raw_token| {
+        const token = std.mem.trim(u8, raw_token, " \t\r\n");
+        if (std.mem.startsWith(u8, token, prefix)) return token[prefix.len..];
+    }
+    return null;
 }
 
 fn sleepRuntimeDevicePollInterval() void {
@@ -345,6 +361,15 @@ test "guest init mount plan stays minimal" {
         try std.testing.expect(!std.mem.eql(u8, mount_spec.fstype, "nfs"));
         try std.testing.expect(!std.mem.eql(u8, mount_spec.fstype, "cifs"));
     }
+}
+
+test "cmdlineValue reads HCS CAS device" {
+    try std.testing.expectEqualStrings(
+        "/dev/sda",
+        cmdlineValue("init=/init actiond.cas_device=/dev/sda actiond.format_cas=1", cas_device_cmdline_prefix).?,
+    );
+    var buffer: [128]u8 = undefined;
+    try std.testing.expect(casDeviceFromCmdline("actiond.cas_device=", &buffer) == null);
 }
 
 test "guest init parses CAS format kernel flag as a token" {

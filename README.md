@@ -1,12 +1,13 @@
 # actiond
 
 `actiond` is a local Remote Execution API worker and cache for Bazel. On macOS
-it starts a small Linux VM and runs Bazel actions inside that VM, so a Mac can
-act like a local Linux remote-execution worker.
+and Windows it starts a small Linux VM and runs Bazel actions inside that VM,
+so the host can act like a local Linux remote-execution worker.
 
-The main user-facing binary is `darwin-actiond`. It includes the VM kernel,
-initramfs, and Linux runtime image, so you do not need to build this repository
-from source to use it.
+The macOS release includes the VM kernel, initramfs, and Linux runtime image.
+Windows release binaries are available for ARM64 and x86_64. The Windows
+binaries do not embed the matching guest artifacts; build those artifacts from
+this repository before running `windows-actiond`.
 
 ## Why Use It?
 
@@ -33,7 +34,7 @@ curl -L \
 curl -L \
   https://github.com/hermeticbuild/actiond/releases/latest/download/SHA256.txt \
   -o SHA256.txt
-shasum -a 256 -c SHA256.txt
+grep ' darwin-actiond_macos_arm64$' SHA256.txt | shasum -a 256 -c -
 chmod +x darwin-actiond_macos_arm64
 ```
 
@@ -50,6 +51,18 @@ You can also download the binary from the
 
 `--root` stores the VM state, including the guest-owned CAS and ActionCache.
 Reusing the same root keeps the local cache warm across worker restarts.
+
+The Windows ARM64 and x86_64 release binaries use Host Compute System and
+Hyper-V sockets. The Windows smoke builds the matching guest artifacts and
+passes their resolved Bazel output paths to `windows-actiond`:
+
+```powershell
+e2e\run_llvm_windows_vm_smoke.ps1
+```
+
+Windows requires Hyper-V. `windows-actiond` wraps the runtime SquashFS and
+guest-owned ext4 CAS in fixed VHD files. The default VHD paths are under
+`--root`; `--cas-image` can select another CAS VHD path.
 
 ## Point Bazel At actiond
 

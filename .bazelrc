@@ -1,4 +1,5 @@
 common --enable_platform_specific_config
+common --downloader_config=bazel_downloader.cfg
 common --@rules_zig//zig/settings:use_cc_common_link=true
 common --@rules_zig//zig/settings:mode=release_fast
 common --stripopt=--strip-all
@@ -15,6 +16,7 @@ common:remote --noexperimental_throttle_remote_action_building
 common:remote --remote_cache=grpcs://remote.buildbuddy.io
 common:remote --remote_executor=grpcs://remote.buildbuddy.io
 common:remote --remote_timeout=120
+common:remote --shell_executable=/bin/bash
 
 common:executor_timing_logs --//:executor_timing_logs=true
 
