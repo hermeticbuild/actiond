@@ -2,7 +2,6 @@ const std = @import("std");
 const control_protocol = @import("control_protocol.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const darwin_vm = @import("darwin_vm.zig");
-const embedded_payload = @import("embedded_payload.zig");
 const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
 const vm_host = @import("vm_host.zig");
 
@@ -10,6 +9,7 @@ pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
     options: vm_host.ServeVmOptions,
+    comptime embedded_assets: type,
 ) !void {
     var root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{});
     defer root_dir.close(io);
@@ -22,32 +22,16 @@ pub fn serve(
     const cas_image_path = options.cas_image orelse owned_cas_image_path;
     const format_cas_image = try ensureCasImageFile(io, cas_image_path, options.cas_image_size_mib);
 
-    const embedded_kernel = if (options.kernel == null)
-        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.kernel_name)
-    else
-        null;
-    defer if (embedded_kernel) |path| allocator.free(path);
-    const kernel_path = options.kernel orelse embedded_kernel orelse return error.MissingVmKernel;
-    const raw_kernel = try vm_host.prepareBootKernel(io, allocator, root_dir, kernel_path);
+    var assets = try vm_host.resolveAssets(io, allocator, root_dir, options, embedded_assets);
+    defer assets.deinit(allocator);
+
+    const raw_kernel = try vm_host.prepareBootKernel(io, allocator, root_dir, assets.kernel);
     defer if (raw_kernel) |path| allocator.free(path);
-    const boot_kernel_path = raw_kernel orelse kernel_path;
+    const boot_kernel_path = raw_kernel orelse assets.kernel;
 
-    const embedded_initramfs = if (options.initramfs == null)
-        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.initramfs_name)
-    else
-        null;
-    defer if (embedded_initramfs) |path| allocator.free(path);
-    const initramfs_path = options.initramfs orelse embedded_initramfs orelse return error.MissingVmInitramfs;
-    const raw_initramfs = try vm_host.prepareBootInitramfs(io, allocator, root_dir, initramfs_path);
+    const raw_initramfs = try vm_host.prepareBootInitramfs(io, allocator, root_dir, assets.initramfs);
     defer if (raw_initramfs) |path| allocator.free(path);
-    const boot_initramfs_path = raw_initramfs orelse initramfs_path;
-
-    const embedded_runtime_image = if (options.runtime_image == null)
-        try embedded_payload.extractFromSelf(io, allocator, root_dir, embedded_payload.runtimes_name)
-    else
-        null;
-    defer if (embedded_runtime_image) |path| allocator.free(path);
-    const runtime_image_path = options.runtime_image orelse embedded_runtime_image;
+    const boot_initramfs_path = raw_initramfs orelse assets.initramfs;
 
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
@@ -55,7 +39,7 @@ pub fn serve(
     try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas_image={s} format_cas_image={}\n", .{
         boot_kernel_path,
         boot_initramfs_path,
-        runtime_image_path orelse "<none>",
+        assets.runtime_image,
         cas_image_path,
         format_cas_image,
     });
@@ -64,7 +48,7 @@ pub fn serve(
     var vm = try darwin_vm.Machine.start(io, allocator, .{
         .kernel_path = boot_kernel_path,
         .initramfs_path = boot_initramfs_path,
-        .runtime_image_path = runtime_image_path,
+        .runtime_image_path = assets.runtime_image,
         .cas_image_path = cas_image_path,
         .format_cas_image = format_cas_image,
         .memory_mib = options.memory_mib,
@@ -74,7 +58,7 @@ pub fn serve(
     });
     defer vm.deinit();
 
-    try stderr.print("actiond VM started; proxying gRPC to guest linux-actiond\n", .{});
+    try stderr.print("actiond VM started; proxying gRPC to linux-actiond-guest\n", .{});
     try stderr.flush();
 
     var fd_client = control_transport_fd.Client{ .opener = vm.opener() };

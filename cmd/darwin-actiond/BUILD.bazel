@@ -1,8 +1,8 @@
-load("@codesign.bzl", "codesign")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@codesign.bzl", "codesign")
 load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("//tools:zig_embedded_assets.bzl", "zig_embedded_assets")
 
 objc_library(
     name = "vz_bridge",
@@ -24,26 +24,17 @@ zig_binary(
     strip_debug_symbols = True,
     target_compatible_with = ["@platforms//os:macos"],
     deps = [
-        ":darwin-payload-sections",
+        ":embedded_assets",
         ":vz_bridge",
         "//src:actiond",
-        "@zstd",
     ],
 )
 
-cc_library(
-    name = "darwin-payload-sections",
-    additional_linker_inputs = [
-        "//runtimes:runtimes_squashfs_aarch64",
-        "//vm:initramfs_aarch64",
-        "//vm:linux_kernel.image_zst",
-    ],
-    linkopts = [
-        "-Wl,-sectcreate,__ACTIOND,__kernel,$(location //vm:linux_kernel.image_zst)",
-        "-Wl,-sectcreate,__ACTIOND,__initramfs,$(location //vm:initramfs_aarch64)",
-        "-Wl,-sectcreate,__ACTIOND,__runtimes,$(location //runtimes:runtimes_squashfs_aarch64)",
-    ],
-    target_compatible_with = ["@platforms//os:macos"],
+zig_embedded_assets(
+    name = "embedded_assets",
+    initramfs = "//vm:initramfs_aarch64",
+    kernel = "//vm:linux_kernel.image_zst",
+    runtime_image = "//runtimes:runtimes_squashfs_aarch64",
 )
 
 codesign(
