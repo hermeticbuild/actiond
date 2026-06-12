@@ -26,7 +26,6 @@ pub const RuntimeMountSources = struct {
     lib64: ?[:0]const u8 = null,
     usr_bin: ?[:0]const u8 = null,
     usr_lib: ?[:0]const u8 = null,
-    etc: ?[:0]const u8 = null,
 
     fn deinit(self: *RuntimeMountSources, allocator: std.mem.Allocator) void {
         if (self.bin) |path| allocator.free(path);
@@ -34,20 +33,19 @@ pub const RuntimeMountSources = struct {
         if (self.lib64) |path| allocator.free(path);
         if (self.usr_bin) |path| allocator.free(path);
         if (self.usr_lib) |path| allocator.free(path);
-        if (self.etc) |path| allocator.free(path);
         self.* = .{};
     }
 };
 
 pub const RuntimeMountCache = struct {
-    common: RuntimeMountSources = .{},
+    common_etc: [:0]const u8,
     glibc2_31: RuntimeMountSources = .{},
     glibc2_35: RuntimeMountSources = .{},
     glibc2_39: RuntimeMountSources = .{},
     bash: RuntimeMountSources = .{},
 
     fn deinit(self: *RuntimeMountCache, allocator: std.mem.Allocator) void {
-        self.common.deinit(allocator);
+        allocator.free(self.common_etc);
         self.glibc2_31.deinit(allocator);
         self.glibc2_35.deinit(allocator);
         self.glibc2_39.deinit(allocator);
@@ -289,18 +287,17 @@ pub fn executeDecodedActionWithOptions(
     }
     if (options.runtime_mount_cache) |cache| {
         borrowed_source_count = std.math.maxInt(usize);
+        try appendCachedRuntimeMount(io, allocator, work_root, work_root_path, cache.common_etc, "etc", &bind_mounts);
         if (libc_runtime) |libc| {
             const sources = cache.forLibc(libc) orelse return error.UnsupportedLibcRuntime;
             try appendCachedLibcRuntimeMounts(io, allocator, work_root, work_root_path, sources, &bind_mounts);
-        } else {
-            try appendCachedCommonRuntimeMounts(io, allocator, work_root, work_root_path, &cache.common, &bind_mounts);
         }
         if (shell_runtime) |shell| {
             const sources = cache.forShell(shell) orelse return error.UnsupportedShellRuntime;
             try appendCachedShellRuntimeMounts(io, allocator, work_root, work_root_path, sources, &bind_mounts);
         }
         borrowed_source_count = bind_mounts.items.len;
-    } else if (libc_runtime != null or shell_runtime != null) {
+    } else {
         return error.MissingRuntimeMountCache;
     }
     try appendDevNullMount(io, allocator, work_root, work_root_path, &bind_mounts);
@@ -612,12 +609,12 @@ fn discoverRuntimeMounts(
     allocator: std.mem.Allocator,
     runtime_root_path: []const u8,
 ) !RuntimeMountCache {
-    var cache: RuntimeMountCache = .{};
-    errdefer cache.deinit(allocator);
-
     const common_root = try std.fmt.allocPrint(allocator, "{s}/common/root", .{runtime_root_path});
     defer allocator.free(common_root);
-    cache.common.etc = try runtimePathIfExists(io, allocator, common_root, "etc");
+    var cache: RuntimeMountCache = .{
+        .common_etc = try requiredRuntimePath(io, allocator, common_root, "etc"),
+    };
+    errdefer cache.deinit(allocator);
 
     cache.glibc2_31 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.31");
     cache.glibc2_35 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.35");
@@ -642,7 +639,6 @@ fn discoverLibcRuntimeMounts(
     sources.lib = try firstRuntimePathIfExists(io, allocator, runtime_root, &.{ "lib", "usr/lib" });
     sources.lib64 = try firstRuntimePathIfExists(io, allocator, runtime_root, &.{ "lib64", "usr/lib64" });
     sources.usr_lib = try runtimePathIfExists(io, allocator, runtime_root, "usr/lib");
-    sources.etc = try runtimePathIfExists(io, allocator, runtime_root, "etc");
     return sources;
 }
 
@@ -693,15 +689,13 @@ fn runtimePathIfExists(
     return source;
 }
 
-fn appendCachedCommonRuntimeMounts(
+fn requiredRuntimePath(
     io: std.Io,
     allocator: std.mem.Allocator,
-    chroot_dir: std.Io.Dir,
-    chroot_path: []const u8,
-    sources: *const RuntimeMountSources,
-    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
-) !void {
-    if (sources.etc) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "etc", bind_mounts);
+    runtime_root: []const u8,
+    source_rel: []const u8,
+) ![:0]const u8 {
+    return (try runtimePathIfExists(io, allocator, runtime_root, source_rel)) orelse error.MissingRuntimePath;
 }
 
 fn appendCachedLibcRuntimeMounts(
@@ -715,7 +709,6 @@ fn appendCachedLibcRuntimeMounts(
     if (sources.lib) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "lib", bind_mounts);
     if (sources.lib64) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "lib64", bind_mounts);
     if (sources.usr_lib) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "usr/lib", bind_mounts);
-    if (sources.etc) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "etc", bind_mounts);
 }
 
 fn appendCachedShellRuntimeMounts(
@@ -1402,10 +1395,32 @@ test "prepareExecuteOptions caches CAS and runtime mount sources" {
     try std.testing.expect(std.mem.endsWith(u8, prepared.options.cas_blob_root_path.?, "/cas/blobs/sha256"));
 
     const cache = prepared.options.runtime_mount_cache.?;
-    try std.testing.expect(cache.common.etc != null);
+    try std.testing.expect(std.mem.endsWith(u8, cache.common_etc, "/runtimes/common/root/etc"));
     try std.testing.expect(cache.glibc2_35.lib != null);
     try std.testing.expect(cache.glibc2_35.usr_lib != null);
     try std.testing.expect(cache.glibc2_31.lib == null);
+}
+
+test "prepareExecuteOptions requires common runtime etc" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    try cas.Store.init(cas_dir).ensureLayout(std.testing.io);
+    try tmp.dir.createDirPath(std.testing.io, "runtimes");
+
+    var base_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buffer);
+    const runtime_root_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/runtimes", .{base_buffer[0..base_len]});
+    defer std.testing.allocator.free(runtime_root_path);
+
+    try std.testing.expectError(error.MissingRuntimePath, prepareExecuteOptions(
+        std.testing.io,
+        std.testing.allocator,
+        cas.Store.initReady(cas_dir),
+        .{ .runtime_root_path = runtime_root_path },
+    ));
 }
 
 test "prepareExecuteOptions places actiondfs stage beside CAS" {
