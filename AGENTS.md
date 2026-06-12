@@ -9,31 +9,15 @@ bazel build //...
 bazel test //...
 ```
 
-For execution changes, also run the e2e harness:
-
-```bash
-tools/e2e.sh linux
-```
-
-On macOS, use Docker for the Linux chroot path:
-
-```bash
-tools/docker/run_linux_e2e.sh
-```
-
-For the Virtualization.framework path on macOS, run:
+For execution changes, run the Virtualization.framework path on macOS:
 
 ```bash
 tools/e2e.sh vm
 ```
 
-To exercise single-binary embedded artifacts instead of passing the runtime,
-kernel, and initramfs paths explicitly, set:
-
-```bash
-ACTIOND_E2E_STANDALONE=1 tools/docker/run_linux_e2e.sh
-ACTIOND_E2E_STANDALONE=1 tools/e2e.sh vm
-```
+The macOS and Windows binaries always embed the kernel, initramfs, and runtime
+image with Zig `@embedFile`. The e2e harness must not pass explicit artifact
+paths unless it is testing the override flags.
 
 Do not claim the VM path was tested unless `tools/e2e.sh vm` completed.
 
@@ -58,9 +42,9 @@ ACTIOND_REPO_BAZEL_FLAGS=--config=remote tools/e2e.sh vm
 The VM guest owns the REAPI CAS and ActionCache on a writable ext4 disk image
 attached as a virtio block device and mounted at `/cas`. In VM mode there is a
 single guest-owned CAS; `darwin-actiond serve-vm` forwards CAS, ByteStream,
-ActionCache, Capabilities, and Execute traffic over vsock to `linux-actiond` in
-the guest. VM e2e therefore validates API-visible execution behavior for one
-running VM and a native guest filesystem.
+ActionCache, Capabilities, and Execute traffic over vsock to
+`linux-actiond-guest`. VM e2e therefore validates API-visible execution
+behavior for one running VM and a native guest filesystem.
 
 ## Stress Workspace
 

@@ -8,25 +8,30 @@ const windows_hcs = @import("windows_hcs.zig");
 
 const scsi_controller_id = "df6d0690-79e5-55b6-a5ec-c1e2f77f580a";
 
-pub fn serve(io: std.Io, allocator: std.mem.Allocator, options: vm_host.ServeVmOptions) !void {
+pub fn serve(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: vm_host.ServeVmOptions,
+    comptime embedded_assets: type,
+) !void {
     if (comptime builtin.os.tag != .windows) return error.UnsupportedHost;
     if (options.actiondfs_stats_path != null) return error.UnsupportedActiondfsStats;
 
     var root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{});
     defer root_dir.close(io);
 
-    const kernel_path = options.kernel orelse return error.MissingVmKernel;
-    const boot_kernel_path = try vm_host.absolutePath(io, allocator, kernel_path);
+    var assets = try vm_host.resolveAssets(io, allocator, root_dir, options, embedded_assets);
+    defer assets.deinit(allocator);
+
+    const boot_kernel_path = try vm_host.absolutePath(io, allocator, assets.kernel);
     defer allocator.free(boot_kernel_path);
 
-    const initramfs_path = options.initramfs orelse return error.MissingVmInitramfs;
-    const raw_initramfs_path = try vm_host.prepareBootInitramfs(io, allocator, root_dir, initramfs_path);
+    const raw_initramfs_path = try vm_host.prepareBootInitramfs(io, allocator, root_dir, assets.initramfs);
     defer if (raw_initramfs_path) |path| allocator.free(path);
-    const boot_initramfs_path = raw_initramfs_path orelse try vm_host.absolutePath(io, allocator, initramfs_path);
+    const boot_initramfs_path = raw_initramfs_path orelse try vm_host.absolutePath(io, allocator, assets.initramfs);
     defer if (raw_initramfs_path == null) allocator.free(boot_initramfs_path);
 
-    const runtime_image_path = options.runtime_image orelse return error.MissingVmRuntimeImage;
-    const absolute_runtime_image_path = try vm_host.absolutePath(io, allocator, runtime_image_path);
+    const absolute_runtime_image_path = try vm_host.absolutePath(io, allocator, assets.runtime_image);
     defer allocator.free(absolute_runtime_image_path);
     const runtime_vhd_path = try vm_host.absoluteSubPath(io, allocator, root_dir, "runtimes.vhd");
     defer allocator.free(runtime_vhd_path);

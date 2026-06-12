@@ -11,9 +11,6 @@ The design centers on three ideas:
 - make sandbox setup independent of input-tree size
 - keep CAS, ActionCache, and output storage local to the machine
 
-There is also a direct Linux mode, `linux-actiond serve`, that uses the same
-executor code on a Linux host. The macOS VM path is the primary product path.
-
 ## Topology
 
 ```text
@@ -44,23 +41,20 @@ native Linux filesystem.
 
 ## Components
 
-`darwin-actiond` is the released macOS binary. It embeds the Linux kernel,
-initramfs, and aarch64 runtime SquashFS in Mach-O `__ACTIOND` sections. At
-startup it extracts those payloads under `--root`, inflates the kernel and
-initramfs to raw boot files, starts the VM with Virtualization.framework, and
-bridges public gRPC traffic to the guest.
+`darwin-actiond` is the released macOS binary. Zig `@embedFile` includes the
+Linux kernel, initramfs, and ARM64 runtime SquashFS. At startup it materializes
+those bytes under `--root`, inflates the kernel and initramfs to raw boot files,
+starts the VM with Virtualization.framework, and bridges public gRPC traffic to
+the guest.
 
-`windows-actiond` is released for ARM64 and x86_64. It starts the matching
-Linux kernel with Host Compute System and passes the runtime and CAS as fixed
-VHD files instead of embedding them in the executable.
+`windows-actiond` is released for ARM64 and x86_64. Zig `@embedFile` includes
+the matching Linux kernel, initramfs, and runtime SquashFS. At startup it
+materializes those bytes under `--root`, wraps the runtime and CAS as fixed VHD
+files, and starts the VM with Host Compute System.
 
 `linux-actiond-guest` lives in the initramfs. It runs as guest init, mounts the
 minimal guest filesystems, mounts `/cas` and `/runtimes`, then execs itself as
 the guest REAPI worker.
-
-`linux-actiond` is the direct Linux host worker. It is useful for Linux hosts
-and e2e coverage, but it does not use actiondfs because it must run on ordinary
-host kernels.
 
 ## VM Shape
 
@@ -100,8 +94,8 @@ avoiding an extra full-blob userspace buffer for large reads.
 
 ## CAS and ActionCache
 
-The CAS stores blobs and tree protos under sharded SHA-256 paths. In VM mode,
-the same `/cas` filesystem also holds ActionCache entries and the
+The CAS stores blobs, including REAPI tree protos, under sharded SHA-256 paths.
+The same `/cas` filesystem also holds ActionCache entries and the
 `actiondfs-stage` tree used for action-created files.
 
 `linux-actiond-guest` maintains an in-memory presence index while running. It
@@ -145,22 +139,21 @@ lifetime. The default filesystem is built with stats compiled out; builds with
 
 ## Output Collection
 
-In VM/actiondfs mode, action-created files live under `/cas/actiondfs-stage`.
+Action-created files live under `/cas/actiondfs-stage`.
 Output collection hashes declared outputs, writes output Directory protos, and
 records digests in the `ActionResult`.
 
 Because the stage tree and CAS live on the same ext4 filesystem, file outputs
-can usually be finalized with hash plus rename into `blobs/sha256`, not copy. If
-a direct Linux path or unusual filesystem makes rename impossible, the CAS store
-has a copy fallback.
+can usually be finalized with hash plus rename into `blobs/sha256`, not copy.
+The CAS store retains a copy fallback for cross-device or permission failures.
 
 ## Execution Sandbox
 
 For each action, the executor reads `Action` and `Command` protos from CAS,
-checks ActionCache when allowed, creates a per-action work root, prepares
-actiondfs or Linux-direct inputs, mounts any selected runtime, runs the command,
-captures stdout/stderr/status, stores declared outputs, and updates ActionCache
-when allowed.
+checks ActionCache when allowed, creates a per-action work root, mounts the
+actiondfs input root and any selected runtime, runs the command, captures
+stdout/stderr/status, stores declared outputs, and updates ActionCache when
+allowed.
 
 The child process runs in a chroot with private mount and network namespaces,
 `PR_SET_NO_NEW_PRIVS`, dropped uid/gid, closed extra file descriptors, and a
@@ -170,7 +163,7 @@ mode there is no external guest network device.
 ## Runtime Images
 
 Runtime libraries are packaged in SquashFS, separate from the initramfs. The
-same format is used by VM execution and direct Linux execution.
+guest mounts the runtime SquashFS read-only at `/runtimes`.
 
 Current runtime names:
 
@@ -178,8 +171,9 @@ Current runtime names:
 - `glibc2.35`
 - `glibc2.39`
 
-Actions select a runtime with the REAPI platform property `libc`. In Bazel this
-can be set with:
+Every action bind-mounts `/runtimes/common/root/etc` at `/etc`. Actions select
+additional runtime libraries with the REAPI platform property `libc`. In Bazel
+this can be set with:
 
 ```python
 execution_requirements = {"libc": "glibc2.35"}
@@ -188,17 +182,6 @@ execution_requirements = {"libc": "glibc2.35"}
 When selected, actiond bind-mounts the matching runtime paths into the action
 chroot. Runtime-backed actions run with their execroot at `/workspace` so
 runtime root paths such as `/etc` do not hide user input paths.
-
-## Direct Linux Mode
-
-`linux-actiond serve` keeps CAS, ActionCache, and work directories under
-`--root` on the host filesystem. Input materialization differs from VM mode:
-file inputs become read-only bind mounts from CAS, tree directories can be
-bind-mounted at directory granularity, and writable output directories live in
-the action work root.
-
-Direct Linux mode is not a VM boundary. It relies on Linux kernel sandboxing
-primitives and should be treated as a constrained local executor.
 
 ## Performance Model
 

@@ -7,6 +7,148 @@ const max_raw_initramfs_bytes = 512 * 1024 * 1024;
 const max_compressed_kernel_bytes = 128 * 1024 * 1024;
 const max_raw_kernel_bytes = 512 * 1024 * 1024;
 const zstd_magic = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd };
+var next_embedded_asset_temp_id = std.atomic.Value(u64).init(0);
+
+pub const ResolvedAssets = struct {
+    kernel: []const u8 = "",
+    initramfs: []const u8 = "",
+    runtime_image: []const u8 = "",
+    owned_kernel: ?[]u8 = null,
+    owned_initramfs: ?[]u8 = null,
+    owned_runtime_image: ?[]u8 = null,
+
+    pub fn deinit(self: *ResolvedAssets, allocator: std.mem.Allocator) void {
+        if (self.owned_kernel) |path| allocator.free(path);
+        if (self.owned_initramfs) |path| allocator.free(path);
+        if (self.owned_runtime_image) |path| allocator.free(path);
+        self.* = undefined;
+    }
+};
+
+pub fn resolveAssets(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    options: ServeVmOptions,
+    comptime embedded: type,
+) !ResolvedAssets {
+    var resolved: ResolvedAssets = .{};
+    errdefer resolved.deinit(allocator);
+
+    if (options.kernel) |path| {
+        resolved.kernel = path;
+    } else {
+        resolved.owned_kernel = try materializeEmbeddedAsset(io, allocator, root_dir, "linux_kernel", embedded.kernel);
+        resolved.kernel = resolved.owned_kernel.?;
+    }
+    if (options.initramfs) |path| {
+        resolved.initramfs = path;
+    } else {
+        resolved.owned_initramfs = try materializeEmbeddedAsset(io, allocator, root_dir, "initramfs.cpio.zst", embedded.initramfs);
+        resolved.initramfs = resolved.owned_initramfs.?;
+    }
+    if (options.runtime_image) |path| {
+        resolved.runtime_image = path;
+    } else {
+        resolved.owned_runtime_image = try materializeEmbeddedAsset(io, allocator, root_dir, "runtimes.sqfs", embedded.runtime_image);
+        resolved.runtime_image = resolved.owned_runtime_image.?;
+    }
+    return resolved;
+}
+
+fn materializeEmbeddedAsset(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    name: []const u8,
+    bytes: []const u8,
+) ![]u8 {
+    try root_dir.createDirPath(io, "embedded");
+
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    const output_rel = try std.fmt.allocPrint(allocator, "embedded/{s}-{s}", .{ name, std.fmt.bytesToHex(hash, .lower) });
+    defer allocator.free(output_rel);
+
+    if (root_dir.statFile(io, output_rel, .{})) |stat| {
+        if (stat.kind == .file and stat.size == bytes.len and try embeddedAssetMatches(io, root_dir, output_rel, &hash)) {
+            return absoluteSubPath(io, allocator, root_dir, output_rel);
+        }
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    if (comptime builtin.os.tag == .windows) {
+        var output = try root_dir.createFile(io, output_rel, .{ .truncate = true });
+        defer output.close(io);
+        try writeEmbeddedAsset(io, output, bytes);
+        return absoluteSubPath(io, allocator, root_dir, output_rel);
+    }
+
+    var temp_path_buffer: [64]u8 = undefined;
+    var output: std.Io.File = undefined;
+    const temp_path = while (true) {
+        const id = next_embedded_asset_temp_id.fetchAdd(1, .monotonic);
+        const path = try std.fmt.bufPrint(&temp_path_buffer, "embedded/.asset-{d}", .{id});
+        output = root_dir.createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => |e| return e,
+        };
+        break path;
+    };
+    errdefer root_dir.deleteFile(io, temp_path) catch {};
+    var output_open = true;
+    defer if (output_open) output.close(io);
+    try writeEmbeddedAsset(io, output, bytes);
+    try output.sync(io);
+    output.close(io);
+    output_open = false;
+    root_dir.renamePreserve(temp_path, root_dir, output_rel, io) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            if (try embeddedAssetMatches(io, root_dir, output_rel, &hash)) {
+                try root_dir.deleteFile(io, temp_path);
+            } else {
+                try root_dir.rename(temp_path, root_dir, output_rel, io);
+            }
+        },
+        else => |e| return e,
+    };
+    return absoluteSubPath(io, allocator, root_dir, output_rel);
+}
+
+fn writeEmbeddedAsset(io: std.Io, file: std.Io.File, bytes: []const u8) !void {
+    const chunk_size = 64 * 1024;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(offset + chunk_size, bytes.len);
+        try file.writePositionalAll(io, bytes[offset..end], offset);
+        offset = end;
+    }
+}
+
+fn embeddedAssetMatches(
+    io: std.Io,
+    root_dir: std.Io.Dir,
+    path: []const u8,
+    expected_hash: *const [32]u8,
+) !bool {
+    var file = try root_dir.openFile(io, path, .{});
+    defer file.close(io);
+
+    var read_buffer: [64 * 1024]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    var hash_buffer: [64 * 1024]u8 = undefined;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    while (true) {
+        const len = try file_reader.interface.readSliceShort(&hash_buffer);
+        hasher.update(hash_buffer[0..len]);
+        if (len != hash_buffer.len) break;
+    }
+    var actual_hash: [32]u8 = undefined;
+    hasher.final(&actual_hash);
+    return std.mem.eql(u8, &actual_hash, expected_hash);
+}
 
 pub const ServeVmOptions = struct {
     listen: []const u8 = "127.0.0.1:8980",
@@ -256,6 +398,61 @@ test "parseServeVmArgs permits embedded VM artifacts" {
     try std.testing.expectEqual(@as(?[]const u8, null), options.initramfs);
     try std.testing.expectError(error.MissingServeArgumentValue, parseServeVmArgs(&.{ "--kernel", "/tmp/Image", "--initramfs" }));
     try std.testing.expectError(error.UnknownServeArgument, parseServeVmArgs(&.{ "--kernel=/tmp/Image", "--initramfs=/tmp/initramfs", "--bad" }));
+}
+
+test "materializeEmbeddedAsset caches bytes by digest" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const first = try materializeEmbeddedAsset(std.testing.io, std.testing.allocator, tmp.dir, "kernel", "payload");
+    defer std.testing.allocator.free(first);
+    const second = try materializeEmbeddedAsset(std.testing.io, std.testing.allocator, tmp.dir, "kernel", "payload");
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, first, std.testing.allocator, .limited(16));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("payload", bytes);
+}
+
+test "materializeEmbeddedAsset replaces corrupt cached bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const first = try materializeEmbeddedAsset(std.testing.io, std.testing.allocator, tmp.dir, "kernel", "payload");
+    defer std.testing.allocator.free(first);
+    var file = try std.Io.Dir.createFileAbsolute(std.testing.io, first, .{ .truncate = true });
+    try file.writePositionalAll(std.testing.io, "corrupt", 0);
+    file.close(std.testing.io);
+
+    const second = try materializeEmbeddedAsset(std.testing.io, std.testing.allocator, tmp.dir, "kernel", "payload");
+    defer std.testing.allocator.free(second);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, second, std.testing.allocator, .limited(16));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("payload", bytes);
+}
+
+test "resolveAssets preserves explicit paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const embedded = struct {
+        const kernel = "embedded kernel";
+        const initramfs = "embedded initramfs";
+        const runtime_image = "embedded runtimes";
+    };
+
+    var resolved = try resolveAssets(std.testing.io, std.testing.allocator, tmp.dir, .{
+        .kernel = "/tmp/kernel",
+        .initramfs = "/tmp/initramfs",
+        .runtime_image = "/tmp/runtimes",
+    }, embedded);
+    defer resolved.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("/tmp/kernel", resolved.kernel);
+    try std.testing.expectEqualStrings("/tmp/initramfs", resolved.initramfs);
+    try std.testing.expectEqualStrings("/tmp/runtimes", resolved.runtime_image);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "embedded", .{}));
 }
 
 test "prepareBootInitramfs leaves raw initramfs paths unchanged" {

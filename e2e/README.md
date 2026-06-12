@@ -54,7 +54,7 @@ warmup, or point it at another label to test a different pre-measure build. The
 current checked-in timing summary is in `LLVM_VM_SMOKE_TIMINGS.md`.
 
 Use this LLVM runner as the primary performance comparison for actiondfs changes
-to lookup, readdir, read, splice, caching, or execroot materialization.
+to lookup, readdir, read, splice, caching, or input setup.
 The standalone stress workspace is still useful for focused synthetic coverage,
 but LLVM timing is the repo's canonical actiondfs before/after signal.
 When `darwin-actiond serve-vm` logs `vm bridge timing` lines, the parser also
@@ -97,6 +97,6 @@ with Bazel elapsed time, wall time, process counts, and the actiond-to-host
 ratio. Pass `-Architecture arm64` on Windows ARM64; x86_64 is the default.
 
 GitHub's `windows-11-arm` runner does not provide Hyper-V, so CI passes
-`-BuildOnly` there to build all ARM64 artifacts in one Bazel command and run
-the ARM64 `windows-actiond` executable. The x86_64 matrix entry runs the full
-Hyper-V LLVM comparison.
+`-BuildOnly` there to build the standalone ARM64 `windows-actiond` executable
+in one Bazel command and run it. The x86_64 matrix entry runs the full Hyper-V
+LLVM comparison.

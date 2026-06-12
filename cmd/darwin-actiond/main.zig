@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const actiond = @import("actiond");
+const embedded_assets = @import("actiond_embedded_assets");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -9,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len > 1 and std.mem.eql(u8, args[1], "serve-vm")) {
         const options = try actiond.vm_host.parseServeVmArgs(args[2..]);
-        return actiond.darwin_vm_host.serve(io, std.heap.smp_allocator, options);
+        return actiond.darwin_vm_host.serve(io, std.heap.smp_allocator, options, embedded_assets);
     }
 
     var stdout_buffer: [256]u8 = undefined;

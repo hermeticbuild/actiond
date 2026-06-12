@@ -19,10 +19,9 @@ TIMING_RE = re.compile(
     r"input_fetch_ns=(?P<input_fetch_ns>\d+) "
     r"execution_ns=(?P<execution_ns>\d+) "
     r"output_upload_ns=(?P<output_upload_ns>\d+) "
-    r"file_inputs=(?P<file_inputs>\d+) "
-    r"directory_inputs=(?P<directory_inputs>\d+) "
+    r"(?:file_inputs=\d+ directory_inputs=\d+ )?"
     r"bind_mounts=(?P<bind_mounts>\d+) "
-    r"(?:actiondfs_mounts=(?P<actiondfs_mounts>\d+) )?"
+    r"(?:actiondfs_mounts=\d+ )?"
     r"output_files=(?P<output_files>\d+) "
     r"output_directories=(?P<output_directories>\d+)"
     r"(?: stress_case=(?P<stress_case>\S+))?"
@@ -74,10 +73,7 @@ class Timing:
     input_fetch_ns: int
     execution_ns: int
     output_upload_ns: int
-    file_inputs: int
-    directory_inputs: int
     bind_mounts: int
-    actiondfs_mounts: int
     output_files: int
     output_directories: int
     stress_case: str = "unknown"
@@ -113,10 +109,7 @@ def parse_timings(log_path: pathlib.Path) -> list[Timing]:
                     input_fetch_ns=int(groups["input_fetch_ns"]),
                     execution_ns=int(groups["execution_ns"]),
                     output_upload_ns=int(groups["output_upload_ns"]),
-                    file_inputs=int(groups["file_inputs"]),
-                    directory_inputs=int(groups["directory_inputs"]),
                     bind_mounts=int(groups["bind_mounts"]),
-                    actiondfs_mounts=int(groups["actiondfs_mounts"] or 0),
                     output_files=int(groups["output_files"]),
                     output_directories=int(groups["output_directories"]),
                     stress_case=groups["stress_case"] or "unknown",
@@ -302,7 +295,7 @@ def case_rows(timings: list[Timing]) -> list[str]:
         input_ms = [ns_to_ms(item.input_fetch_ns) for item in items]
         execute_ms = [ns_to_ms(item.execution_ns) for item in items]
         output_ms = [ns_to_ms(item.output_upload_ns) for item in items]
-        mounts = [float(item.bind_mounts + item.actiondfs_mounts) for item in items]
+        mounts = [float(item.bind_mounts) for item in items]
         table_rows.append(
             [
                 name,
@@ -391,7 +384,7 @@ def runner_rows(timings: list[Timing]) -> list[str]:
             fmt_ms(ns_to_ms(item.runner.stdio_digest_ns)),
             str(item.runner.setup_signaled),
         ]
-        for item in sorted(with_runner, key=lambda value: (value.stress_case, value.file_inputs, value.directory_inputs, value.digest))
+        for item in sorted(with_runner, key=lambda value: (value.stress_case, value.digest))
         if item.runner is not None
     ]
 
@@ -473,15 +466,12 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing], bridge_timi
 
     stage_table = [
         stat_cells("total", [item.total_ns for item in timings], total_ns),
-        stat_cells("input fetch/materialize", [item.input_fetch_ns for item in timings], total_ns),
+        stat_cells("input fetch/setup", [item.input_fetch_ns for item in timings], total_ns),
         stat_cells("execute", [item.execution_ns for item in timings], total_ns),
         stat_cells("output upload/collect", [item.output_upload_ns for item in timings], total_ns),
     ]
     count_table = [
-        int_stat_cells("file inputs", [item.file_inputs for item in timings]),
-        int_stat_cells("directory inputs", [item.directory_inputs for item in timings]),
         int_stat_cells("bind mounts", [item.bind_mounts for item in timings]),
-        int_stat_cells("actiondfs mounts", [item.actiondfs_mounts for item in timings]),
         int_stat_cells("output files", [item.output_files for item in timings]),
         int_stat_cells("output directories", [item.output_directories for item in timings]),
     ]
@@ -499,7 +489,7 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing], bridge_timi
                 {1, 2, 3, 4, 5, 6, 7, 8},
             ),
             "",
-            "## Input And Mount Counts",
+            "## Mount And Output Counts",
             "",
             *markdown_table(
                 ["Metric", "Min", "p25", "p50", "p75", "p95", "Mean", "Max"],
@@ -520,7 +510,7 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing], bridge_timi
         ]
     )
     per_action_table = []
-    for item in sorted(timings, key=lambda value: (value.stress_case, value.file_inputs, value.directory_inputs, value.digest)):
+    for item in sorted(timings, key=lambda value: (value.stress_case, value.digest)):
         per_action_table.append(
             [
                 item.stress_case,
@@ -529,41 +519,27 @@ def render_markdown(args: argparse.Namespace, timings: list[Timing], bridge_timi
                 fmt_ms(ns_to_ms(item.input_fetch_ns)),
                 fmt_ms(ns_to_ms(item.execution_ns)),
                 fmt_ms(ns_to_ms(item.output_upload_ns)),
-                str(item.file_inputs),
-                str(item.directory_inputs),
-                str(item.bind_mounts + item.actiondfs_mounts),
+                str(item.bind_mounts),
                 f"{item.output_files} file, {item.output_directories} dir",
             ]
         )
     lines.extend(
         markdown_table(
-            ["Stress Case", "Digest", "Total", "Input", "Execute", "Output", "File Inputs", "Dir Inputs", "Bind Mounts", "Outputs"],
+            ["Stress Case", "Digest", "Total", "Input", "Execute", "Output", "Bind Mounts", "Outputs"],
             per_action_table,
-            {2, 3, 4, 5, 6, 7, 8},
+            {2, 3, 4, 5, 6, 7},
         )
     )
 
-    if all(item.directory_inputs == 0 for item in timings):
-        if any(item.actiondfs_mounts > 0 for item in timings):
-            lines.extend(
-                [
-                    "",
-                    "## Notes",
-                    "",
-                    "- This run observed `directory_inputs=0` for every action. Actions with `actiondfs_mounts>0` are using the lazy actiondfs input-root path, so their input tree is represented by the mounted REAPI root digest rather than by flattened file or directory counters.",
-                    "- For actiondfs actions, some CAS directory/file read cost moves from input fetch/materialization into the action `process/io` bucket because metadata and pages are loaded lazily.",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    "",
-                    "## Notes",
-                    "",
-                    "- This run observed `directory_inputs=0` for every action. The stress graph declares tree artifacts, but this execution path expanded them into file inputs rather than using directory bind mounts.",
-                    "- Input fetch/materialization dominates this run, so execroot construction remains the next performance target.",
-                ]
-            )
+    lines.extend(
+        [
+            "",
+            "## Notes",
+            "",
+            "- Every action uses actiondfs, so input trees are represented by mounted REAPI root digests rather than flattened input counters.",
+            "- Some CAS metadata and file read cost appears in the action `process/io` bucket because actiondfs loads inputs lazily.",
+        ]
+    )
 
     return "\n".join(lines) + "\n"
 
@@ -572,7 +548,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=pathlib.Path, help="actiond log containing execute timing lines")
     parser.add_argument("--output", type=pathlib.Path, help="markdown file to write")
-    parser.add_argument("--mode", default="unknown", help="execution mode label, such as vm or linux")
+    parser.add_argument("--mode", default="unknown", help="execution mode label, such as vm")
     parser.add_argument("--command", default="", help="command used to produce the run")
     parser.add_argument("--bazel-elapsed", default="", help="Bazel elapsed time reported for the workload")
     parser.add_argument("--workload", default="", help="short workload description")

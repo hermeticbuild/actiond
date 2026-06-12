@@ -3,28 +3,9 @@ const std = @import("std");
 const action_runner = @import("action_runner.zig");
 const build_options = @import("actiond_build_options");
 const cas = @import("cas.zig");
-const execroot = @import("execroot.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
 const staged_cas_index = @import("staged_cas_index.zig");
-
-pub const Error = error{
-    MissingActionBlob,
-    MissingCommandDigest,
-    MissingCommandBlob,
-    MissingDirectoryBlob,
-    MissingDirectoryDigest,
-    MissingFileDigest,
-    MissingInputBlob,
-    MissingInputRootDigest,
-    MissingRuntimeRoot,
-    OutputParentCreateFailed,
-    InvalidDirectoryEntryName,
-    UnsupportedLibcRuntime,
-    UnsupportedShellRuntime,
-    UnsupportedOutputDirectoryEntry,
-    UnsupportedRuntimeArch,
-};
 
 const max_output_file_bytes = 1024 * 1024 * 1024;
 const chroot_execroot_prefix = "/workspace/";
@@ -45,7 +26,6 @@ pub const RuntimeMountSources = struct {
     lib64: ?[:0]const u8 = null,
     usr_bin: ?[:0]const u8 = null,
     usr_lib: ?[:0]const u8 = null,
-    etc: ?[:0]const u8 = null,
 
     fn deinit(self: *RuntimeMountSources, allocator: std.mem.Allocator) void {
         if (self.bin) |path| allocator.free(path);
@@ -53,20 +33,19 @@ pub const RuntimeMountSources = struct {
         if (self.lib64) |path| allocator.free(path);
         if (self.usr_bin) |path| allocator.free(path);
         if (self.usr_lib) |path| allocator.free(path);
-        if (self.etc) |path| allocator.free(path);
         self.* = .{};
     }
 };
 
 pub const RuntimeMountCache = struct {
-    common: RuntimeMountSources = .{},
+    common_etc: [:0]const u8,
     glibc2_31: RuntimeMountSources = .{},
     glibc2_35: RuntimeMountSources = .{},
     glibc2_39: RuntimeMountSources = .{},
     bash: RuntimeMountSources = .{},
 
     fn deinit(self: *RuntimeMountCache, allocator: std.mem.Allocator) void {
-        self.common.deinit(allocator);
+        allocator.free(self.common_etc);
         self.glibc2_31.deinit(allocator);
         self.glibc2_35.deinit(allocator);
         self.glibc2_39.deinit(allocator);
@@ -89,11 +68,8 @@ pub const RuntimeMountCache = struct {
 
 pub const ExecuteOptions = struct {
     runtime_root_path: ?[]const u8 = null,
-    use_actiondfs: bool = false,
     cas_blob_root_path: ?[]const u8 = null,
-    input_cas_blob_root_path: ?[]const u8 = null,
     actiondfs_stage_root_path: ?[]const u8 = null,
-    staged_cas_blob_root_path: ?[]const u8 = null,
     staged_cas_index: ?*staged_cas_index.Index = null,
     runtime_mount_cache: ?RuntimeMountCache = null,
 };
@@ -125,20 +101,12 @@ pub const LoadedAction = struct {
     }
 };
 
-const CasReadRoots = struct {
-    primary_blob_root_path: ?[]const u8 = null,
-    staged_blob_root_path: ?[]const u8 = null,
-    staged_index: ?*staged_cas_index.Index = null,
-};
-
-const ActionInputMode = enum {
-    materialized,
+const ActiondfsMode = enum {
     actiondfs_strict,
     actiondfs_overlay,
 
-    fn label(self: ActionInputMode) []const u8 {
+    fn label(self: ActiondfsMode) []const u8 {
         return switch (self) {
-            .materialized => "materialized",
             .actiondfs_strict => "actiondfs_strict",
             .actiondfs_overlay => "actiondfs_overlay",
         };
@@ -161,10 +129,7 @@ pub fn prepareExecuteOptions(
         prepared.owned_cas_blob_root_path = path;
         prepared.options.cas_blob_root_path = path;
     }
-    if (prepared.options.input_cas_blob_root_path == null) {
-        prepared.options.input_cas_blob_root_path = prepared.options.cas_blob_root_path;
-    }
-    if (prepared.options.use_actiondfs and prepared.options.actiondfs_stage_root_path == null) {
+    if (prepared.options.actiondfs_stage_root_path == null) {
         var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
         const path = try std.fmt.allocPrint(allocator, "{s}/actiondfs-stage", .{cas_root_buffer[0..cas_root_len]});
@@ -179,18 +144,6 @@ pub fn prepareExecuteOptions(
     }
 
     return prepared;
-}
-
-fn casReadRoots(options: ExecuteOptions) CasReadRoots {
-    return .{
-        .primary_blob_root_path = options.input_cas_blob_root_path orelse options.cas_blob_root_path,
-        .staged_blob_root_path = options.staged_cas_blob_root_path,
-        .staged_index = options.staged_cas_index,
-    };
-}
-
-fn actiondfsInputBlobRootPath(options: ExecuteOptions) ?[]const u8 {
-    return options.input_cas_blob_root_path orelse options.cas_blob_root_path;
 }
 
 fn executionPlatform(action: reapi.Action, command: reapi.Command) ?reapi.Platform {
@@ -222,128 +175,13 @@ fn actionMutatesInputs(platform: ?reapi.Platform) bool {
     return false;
 }
 
-fn readCasBlobAlloc(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    read_roots: CasReadRoots,
-    digest: cas.Digest,
-) ![]u8 {
-    if (digest.isEmpty()) return allocator.alloc(u8, 0);
-
-    if (read_roots.staged_blob_root_path) |root| {
-        if (read_roots.staged_index == null or read_roots.staged_index.?.contains(io, digest)) {
-            if (readCasBlobFromRootAlloc(io, allocator, root, digest)) |bytes| return bytes else |err| switch (err) {
-                error.FileNotFound => {},
-                else => |e| return e,
-            }
-        }
-    }
-    if (read_roots.primary_blob_root_path) |root| {
-        if (readCasBlobFromRootAlloc(io, allocator, root, digest)) |bytes| return bytes else |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| return e,
-        }
-    }
-    return store.readAlloc(io, allocator, digest);
-}
-
-fn readCasBlobFromRootAlloc(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    blob_root_path: []const u8,
-    digest: cas.Digest,
-) ![]u8 {
-    const len = std.math.cast(usize, digest.size_bytes) orelse return error.FileTooBig;
-    var sharded_path_buffer: [cas.digest_sharded_path_len]u8 = undefined;
-    const sharded_path = cas.digestShardedSubPath(digest, &sharded_path_buffer);
-    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ blob_root_path, sharded_path }, 0);
-    defer allocator.free(path);
-
-    var file = try openAbsoluteBlobPath(io, path);
-    defer file.close(io);
-
-    const bytes = try allocator.alloc(u8, len);
-    errdefer allocator.free(bytes);
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const n = try readFdRetry(file.handle, bytes[offset..]);
-        if (n == 0) return error.ReadFailed;
-        offset += n;
-    }
-    return bytes;
-}
-
-fn openAbsoluteBlobPath(io: std.Io, path: [:0]const u8) !std.Io.File {
-    if (comptime builtin.os.tag == .linux) return openAbsoluteBlobPathLinuxRetry(path);
-    return std.Io.Dir.openFileAbsolute(io, path, .{});
-}
-
-fn openAbsoluteBlobPathLinuxRetry(path: [:0]const u8) !std.Io.File {
-    const linux = std.os.linux;
-    var stale_attempts: usize = 0;
-    while (true) {
-        const rc = linux.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
-            .INTR => continue,
-            .STALE => {
-                if (stale_attempts >= 128) return error.FileNotFound;
-                stale_attempts += 1;
-                sleepShortRetry();
-                continue;
-            },
-            .NOENT, .SRCH => return error.FileNotFound,
-            .ACCES => return error.AccessDenied,
-            .ISDIR => return error.IsDir,
-            .NOTDIR => return error.NotDir,
-            .NAMETOOLONG => return error.NameTooLong,
-            .MFILE => return error.ProcessFdQuotaExceeded,
-            .NFILE => return error.SystemFdQuotaExceeded,
-            .NOMEM => return error.SystemResources,
-            .LOOP => return error.SymLinkLoop,
-            .FBIG, .OVERFLOW => return error.FileTooBig,
-            else => return error.Unexpected,
-        }
-    }
-}
-
-fn readFdRetry(fd: std.Io.File.Handle, buffer: []u8) !usize {
-    var stale_attempts: usize = 0;
-    while (true) {
-        const rc = std.posix.system.read(fd, buffer.ptr, buffer.len);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            .STALE => {
-                if (stale_attempts >= 128) return error.ReadFailed;
-                stale_attempts += 1;
-                sleepShortRetry();
-                continue;
-            },
-            else => return error.ReadFailed,
-        }
-    }
-}
-
-fn sleepShortRetry() void {
-    if (comptime builtin.os.tag != .linux) return;
-    var request: std.os.linux.timespec = .{
-        .sec = 0,
-        .nsec = 2 * std.time.ns_per_ms,
-    };
-    while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
-}
-
 pub fn loadAction(
     io: std.Io,
     allocator: std.mem.Allocator,
     store: cas.Store,
     action_digest: cas.Digest,
-    options: ExecuteOptions,
 ) !LoadedAction {
-    const read_roots = casReadRoots(options);
-    const action_bytes = readCasBlobAlloc(io, allocator, store, read_roots, action_digest) catch |err| switch (err) {
+    const action_bytes = store.readAlloc(io, allocator, action_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingActionBlob,
         else => return err,
     };
@@ -369,10 +207,8 @@ pub fn executeDecodedActionWithOptions(
     const total_start = executorTimingNow(io);
     const input_fetch_start = total_start;
 
-    const read_roots = casReadRoots(options);
-
     const command_digest = try cas.Digest.fromReapi(action.command_digest orelse return error.MissingCommandDigest);
-    const command_bytes = readCasBlobAlloc(io, allocator, store, read_roots, command_digest) catch |err| switch (err) {
+    const command_bytes = store.readAlloc(io, allocator, command_digest) catch |err| switch (err) {
         error.FileNotFound => return error.MissingCommandBlob,
         else => return err,
     };
@@ -383,111 +219,43 @@ pub fn executeDecodedActionWithOptions(
     const platform = executionPlatform(action, command);
 
     const input_root_digest = try cas.Digest.fromReapi(action.input_root_digest orelse return error.MissingInputRootDigest);
-    var inputs: std.ArrayListUnmanaged(execroot.Input) = .empty;
-    defer inputs.deinit(allocator);
-    defer freeInputs(allocator, inputs.items);
-    var directory_inputs: std.ArrayListUnmanaged(execroot.DirectoryInput) = .empty;
-    defer directory_inputs.deinit(allocator);
-    defer freeDirectoryInputs(allocator, directory_inputs.items);
-    const use_workspace_chroot = options.runtime_root_path != null;
-    const use_actiondfs_inputs = use_workspace_chroot and options.use_actiondfs;
-    const input_mode: ActionInputMode = if (!use_actiondfs_inputs)
-        .materialized
-    else if (actionMutatesInputs(platform))
+    const actiondfs_mode: ActiondfsMode = if (actionMutatesInputs(platform))
         .actiondfs_overlay
     else
         .actiondfs_strict;
-    if (!use_actiondfs_inputs) {
-        const allow_directory_inputs = use_workspace_chroot;
-        try collectInputs(io, allocator, store, read_roots, input_root_digest, "", command, allow_directory_inputs, &inputs, &directory_inputs);
-    }
-    var executable_copy_paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (executable_copy_paths.items) |path| allocator.free(path);
-        executable_copy_paths.deinit(allocator);
-    }
-    if (!use_actiondfs_inputs) {
-        try selectExecutableInputCopyPaths(
-            allocator,
-            command,
-            inputs.items,
-            if (use_workspace_chroot) "/workspace" else "",
-            &executable_copy_paths,
-        );
-    }
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
     const work_root_path = cwd_buffer[0..cwd_len];
-
-    const libc_runtime = try libcRuntimeFromPlatform(platform);
-    const shell_runtime = try shellRuntimeFromPlatform(platform);
-    var exec_root_dir = work_root;
-    var workspace_dir: ?std.Io.Dir = null;
-    defer if (workspace_dir) |*dir| dir.close(io);
-    var actiondfs_stage_dir: ?std.Io.Dir = null;
-    defer if (actiondfs_stage_dir) |*dir| dir.close(io);
-
-    var exec_root_path_owned: ?[]u8 = null;
-    defer if (exec_root_path_owned) |path| allocator.free(path);
-    const exec_root_path = if (use_workspace_chroot) path: {
-        try work_root.createDirPath(io, "workspace");
-        const value = try std.fmt.allocPrint(allocator, "{s}/workspace", .{work_root_path});
-        exec_root_path_owned = value;
-        if (!use_actiondfs_inputs) {
-            workspace_dir = try work_root.openDir(io, "workspace", .{});
-            exec_root_dir = workspace_dir.?;
-        }
-        break :path value;
-    } else work_root_path;
+    try work_root.createDirPath(io, "workspace");
+    const workspace_path = try std.fmt.allocPrint(allocator, "{s}/workspace", .{work_root_path});
+    defer allocator.free(workspace_path);
     try prepareChrootBaseDirs(io, work_root);
 
-    var actiondfs_workspace: ?ActiondfsWorkspace = null;
-    defer if (actiondfs_workspace) |*workspace| workspace.deinit(io, allocator);
     var owned_cas_blob_root_path: ?[]u8 = null;
     defer if (owned_cas_blob_root_path) |path| allocator.free(path);
-    if (use_actiondfs_inputs) {
-        const cas_blob_root_path = actiondfsInputBlobRootPath(options) orelse path: {
-            var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
-            const value = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
-            owned_cas_blob_root_path = value;
-            break :path value;
-        };
-        actiondfs_workspace = try ActiondfsWorkspace.init(
-            io,
-            allocator,
-            cas_blob_root_path,
-            options.actiondfs_stage_root_path,
-            work_root_path,
-            exec_root_path,
-            input_root_digest,
-            input_mode,
-        );
-        actiondfs_stage_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.?.stagePath(), .{ .iterate = true });
-        exec_root_dir = actiondfs_stage_dir.?;
-    }
+    const cas_blob_root_path = options.cas_blob_root_path orelse path: {
+        var cas_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const cas_root_len = try store.root.realPath(io, &cas_root_buffer);
+        const value = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256", .{cas_root_buffer[0..cas_root_len]});
+        owned_cas_blob_root_path = value;
+        break :path value;
+    };
+    var actiondfs_workspace = try ActiondfsWorkspace.init(
+        io,
+        allocator,
+        cas_blob_root_path,
+        options.actiondfs_stage_root_path,
+        work_root_path,
+        workspace_path,
+        input_root_digest,
+        actiondfs_mode,
+    );
+    defer actiondfs_workspace.deinit(io, allocator);
 
-    const materializer = execroot.Materializer.init(store, exec_root_dir);
-    var materialization: execroot.Materialization = .{};
-    if (!use_actiondfs_inputs) {
-        materialization = materializer.materializeInputs(io, allocator, inputs.items, .{
-            .chroot_root_path = exec_root_path,
-            .cas_blob_root_path = options.input_cas_blob_root_path orelse options.cas_blob_root_path,
-            .staged_cas_blob_root_path = options.staged_cas_blob_root_path,
-            .staged_cas_index = options.staged_cas_index,
-            .directory_inputs = directory_inputs.items,
-            .copy_executable_inputs = executable_copy_paths.items,
-        }) catch |err| switch (err) {
-            error.FileNotFound, error.MissingInputTree => return error.MissingInputBlob,
-            else => {
-                logExecuteSetupError("materialize inputs", action_digest, err);
-                return err;
-            },
-        };
-    }
-    defer materialization.deinit(allocator);
-    prepareOutputParents(io, exec_root_dir, command) catch |err| switch (err) {
+    var actiondfs_stage_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.stagePath(), .{ .iterate = true });
+    defer actiondfs_stage_dir.close(io);
+    prepareOutputParents(io, actiondfs_stage_dir, command) catch |err| switch (err) {
         error.FileNotFound => return error.OutputParentCreateFailed,
         else => {
             logExecuteSetupError("prepare output parents", action_digest, err);
@@ -495,57 +263,43 @@ pub fn executeDecodedActionWithOptions(
         },
     };
 
-    const chroot_cwd_prefix = if (use_workspace_chroot) "/workspace" else "";
     var chroot_cwd_owned: ?[]u8 = null;
     defer if (chroot_cwd_owned) |path| allocator.free(path);
-    const chroot_cwd = if (command.working_directory.len == 0) cwd: {
-        break :cwd if (use_workspace_chroot) "/workspace" else "/";
-    } else cwd: {
-        try execroot.validatePath(command.working_directory);
-        const value = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ chroot_cwd_prefix, command.working_directory });
+    const chroot_cwd = if (command.working_directory.len == 0)
+        "/workspace"
+    else cwd: {
+        try validatePath(command.working_directory);
+        const value = try std.fmt.allocPrint(allocator, "/workspace/{s}", .{command.working_directory});
         chroot_cwd_owned = value;
         break :cwd value;
     };
 
+    const libc_runtime = try libcRuntimeFromPlatform(platform);
+    const shell_runtime = try shellRuntimeFromPlatform(platform);
     var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
-    const borrowed_bind_mount_count = materialization.bind_mounts.len;
-    var runtime_mount_sources_are_borrowed = false;
+    var borrowed_source_count: usize = 0;
     defer {
-        for (bind_mounts.items[borrowed_bind_mount_count..]) |mount| {
-            if (!runtime_mount_sources_are_borrowed) allocator.free(mount.source);
+        for (bind_mounts.items, 0..) |mount, i| {
+            if (i >= borrowed_source_count) allocator.free(mount.source);
             allocator.free(mount.target);
         }
         bind_mounts.deinit(allocator);
     }
-    try bind_mounts.appendSlice(allocator, materialization.bind_mounts);
     if (options.runtime_mount_cache) |cache| {
-        runtime_mount_sources_are_borrowed = true;
+        borrowed_source_count = std.math.maxInt(usize);
+        try appendCachedRuntimeMount(io, allocator, work_root, work_root_path, cache.common_etc, "etc", &bind_mounts);
         if (libc_runtime) |libc| {
             const sources = cache.forLibc(libc) orelse return error.UnsupportedLibcRuntime;
             try appendCachedLibcRuntimeMounts(io, allocator, work_root, work_root_path, sources, &bind_mounts);
-        } else {
-            try appendCachedCommonRuntimeMounts(io, allocator, work_root, work_root_path, &cache.common, &bind_mounts);
         }
         if (shell_runtime) |shell| {
             const sources = cache.forShell(shell) orelse return error.UnsupportedShellRuntime;
             try appendCachedShellRuntimeMounts(io, allocator, work_root, work_root_path, sources, &bind_mounts);
         }
+        borrowed_source_count = bind_mounts.items.len;
     } else {
-        if (options.runtime_root_path) |runtime_root| {
-            if (libc_runtime == null) {
-                try appendCommonRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, &bind_mounts);
-            }
-        }
-        if (libc_runtime) |libc| {
-            const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
-            try appendLibcRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, libc, &bind_mounts);
-        }
-        if (shell_runtime) |shell| {
-            const runtime_root = options.runtime_root_path orelse return error.MissingRuntimeRoot;
-            try appendShellRuntimeMounts(io, allocator, work_root, work_root_path, runtime_root, shell, &bind_mounts);
-        }
+        return error.MissingRuntimeMountCache;
     }
-
     try appendDevNullMount(io, allocator, work_root, work_root_path, &bind_mounts);
 
     const input_fetch_completed_wall = timestampNow(io);
@@ -556,7 +310,7 @@ pub fn executeDecodedActionWithOptions(
         .chroot_dir = work_root_path,
         .chroot_cwd = chroot_cwd,
         .bind_mounts = bind_mounts.items,
-        .actiondfs_mounts = if (actiondfs_workspace) |*workspace| workspace.mounts[0..] else &.{},
+        .actiondfs_mounts = actiondfs_workspace.mounts[0..],
         .cgroup_limits = action_runner.CgroupLimits.fromPlatform(platform),
     });
     errdefer outcome.deinit(allocator);
@@ -568,14 +322,10 @@ pub fn executeDecodedActionWithOptions(
         if (outcome.stdout_digest) |digest| try index.add(io, allocator, digest);
         if (outcome.stderr_digest) |digest| try index.add(io, allocator, digest);
     }
-    if (actiondfs_workspace) |*workspace| {
-        try workspace.mountForCollection();
-        var output_dir = try std.Io.Dir.openDirAbsolute(io, workspace.collectionPath(), .{ .iterate = true });
-        defer output_dir.close(io);
-        try collectOutputFiles(io, allocator, store, options.staged_cas_index, output_dir, command, &outcome);
-    } else {
-        try collectOutputFiles(io, allocator, store, options.staged_cas_index, exec_root_dir, command, &outcome);
-    }
+    try actiondfs_workspace.mountForCollection();
+    var output_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.collectionPath(), .{ .iterate = true });
+    defer output_dir.close(io);
+    try collectOutputFiles(io, allocator, store, options.staged_cas_index, output_dir, command, &outcome);
     const output_upload_completed_wall = timestampNow(io);
     const output_upload_completed = executorTimingNow(io);
 
@@ -601,18 +351,13 @@ pub fn executeDecodedActionWithOptions(
             execution_completed,
             output_upload_start,
             output_upload_completed,
-            inputs.items.len,
-            directory_inputs.items.len,
             bind_mounts.items.len,
-            if (actiondfs_workspace != null) @as(usize, 1) else 0,
             outcome.output_files.len,
             outcome.output_directories.len,
             stressCaseFromCommand(command),
-            input_mode,
+            actiondfs_mode,
         );
-        if (outcome.runner_timing) |timing| {
-            logRunnerTiming(action_digest, timing);
-        }
+        if (outcome.runner_timing) |timing| logRunnerTiming(action_digest, timing);
     }
     return outcome;
 }
@@ -647,137 +392,9 @@ fn stressCaseFromCommand(command: reapi.Command) []const u8 {
     return "unknown";
 }
 
-fn selectExecutableInputCopyPaths(
-    allocator: std.mem.Allocator,
-    command: reapi.Command,
-    inputs: []const execroot.Input,
-    workspace_prefix: []const u8,
-    out: *std.ArrayListUnmanaged([]const u8),
-) !void {
-    var candidates: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (candidates.items) |path| allocator.free(path);
-        candidates.deinit(allocator);
-    }
-    try selectExecutableInputCandidatePaths(allocator, command, workspace_prefix, &candidates);
-
-    for (candidates.items) |candidate| {
-        _ = try appendExecutableInputPath(allocator, inputs, candidate, out);
-    }
-}
-
-fn selectExecutableInputCandidatePaths(
-    allocator: std.mem.Allocator,
-    command: reapi.Command,
-    workspace_prefix: []const u8,
-    out: *std.ArrayListUnmanaged([]const u8),
-) !void {
-    if (command.arguments.len == 0) return;
-    const argv0 = command.arguments[0];
-    if (std.mem.indexOfScalar(u8, argv0, '/') != null) {
-        if (try execArgToInputPath(allocator, command.working_directory, argv0, workspace_prefix)) |candidate| {
-            try out.append(allocator, candidate);
-        }
-        return;
-    }
-
-    const path_value = commandPath(command) orelse "/usr/local/bin:/usr/bin:/bin";
-    var parts = std.mem.splitScalar(u8, path_value, ':');
-    while (parts.next()) |part| {
-        const prefix = if (part.len == 0) "/" else part;
-        const exec_candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, argv0 });
-        defer allocator.free(exec_candidate);
-        if (try execArgToInputPath(allocator, command.working_directory, exec_candidate, workspace_prefix)) |candidate| {
-            try out.append(allocator, candidate);
-        }
-    }
-}
-
-
-fn execArgToInputPath(
-    allocator: std.mem.Allocator,
-    working_directory: []const u8,
-    exec_arg: []const u8,
-    workspace_prefix: []const u8,
-) !?[]u8 {
-    if (exec_arg.len == 0) return null;
-    if (std.mem.indexOfScalar(u8, exec_arg, 0) != null) return null;
-
-    if (std.fs.path.isAbsolute(exec_arg)) {
-        if (workspace_prefix.len != 0) {
-            if (!std.mem.startsWith(u8, exec_arg, workspace_prefix)) return null;
-            if (exec_arg.len == workspace_prefix.len or exec_arg[workspace_prefix.len] != '/') return null;
-            return normalizeRelativeInputPath(allocator, exec_arg[workspace_prefix.len + 1 ..]);
-        }
-        return normalizeRelativeInputPath(allocator, exec_arg[1..]);
-    }
-
-    if (working_directory.len == 0) return normalizeRelativeInputPath(allocator, exec_arg);
-    const joined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ working_directory, exec_arg });
-    defer allocator.free(joined);
-    return normalizeRelativeInputPath(allocator, joined);
-}
-
-fn normalizeRelativeInputPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    if (path.len == 0) return null;
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |component| {
-        if (component.len == 0 or std.mem.eql(u8, component, ".")) continue;
-        if (std.mem.eql(u8, component, "..")) {
-            out.deinit(allocator);
-            return null;
-        }
-        if (std.mem.indexOfScalar(u8, component, 0) != null) {
-            out.deinit(allocator);
-            return null;
-        }
-        if (out.items.len != 0) try out.append(allocator, '/');
-        try out.appendSlice(allocator, component);
-    }
-
-    if (out.items.len == 0) {
-        out.deinit(allocator);
-        return null;
-    }
-    return try out.toOwnedSlice(allocator);
-}
-
-fn appendExecutableInputPath(
-    allocator: std.mem.Allocator,
-    inputs: []const execroot.Input,
-    candidate: []const u8,
-    out: *std.ArrayListUnmanaged([]const u8),
-) !bool {
-    for (inputs) |input| {
-        if (!std.mem.eql(u8, input.path, candidate)) continue;
-        if (!input.is_executable) return true;
-        if (pathInCopyList(candidate, out.items)) return true;
-        try out.append(allocator, try allocator.dupe(u8, candidate));
-        return true;
-    }
-    return false;
-}
-
-fn pathInCopyList(path: []const u8, paths: []const []const u8) bool {
-    for (paths) |candidate| {
-        if (std.mem.eql(u8, path, candidate)) return true;
-    }
-    return false;
-}
-
-fn commandPath(command: reapi.Command) ?[]const u8 {
-    for (command.environment_variables) |variable| {
-        if (std.mem.eql(u8, variable.name, "PATH")) return variable.value;
-    }
-    return null;
-}
-
 const ActiondfsWorkspace = struct {
     base_path: []u8,
-    mode: ActionInputMode,
+    mode: ActiondfsMode,
     lower_target: ?[:0]u8 = null,
     overlay_target: ?[:0]u8 = null,
     fstype: [:0]const u8,
@@ -795,7 +412,7 @@ const ActiondfsWorkspace = struct {
         work_root_path: []const u8,
         workspace_path: []const u8,
         input_root_digest: cas.Digest,
-        mode: ActionInputMode,
+        mode: ActiondfsMode,
     ) !ActiondfsWorkspace {
         const base_path = try createActiondfsBasePath(io, allocator, stage_root_path, work_root_path);
         errdefer allocator.free(base_path);
@@ -923,7 +540,6 @@ const ActiondfsWorkspace = struct {
         return switch (self.mode) {
             .actiondfs_strict => self.stage_dir,
             .actiondfs_overlay => self.overlay_target.?,
-            .materialized => unreachable,
         };
     }
 
@@ -993,12 +609,12 @@ fn discoverRuntimeMounts(
     allocator: std.mem.Allocator,
     runtime_root_path: []const u8,
 ) !RuntimeMountCache {
-    var cache: RuntimeMountCache = .{};
-    errdefer cache.deinit(allocator);
-
     const common_root = try std.fmt.allocPrint(allocator, "{s}/common/root", .{runtime_root_path});
     defer allocator.free(common_root);
-    cache.common.etc = try runtimePathIfExists(io, allocator, common_root, "etc");
+    var cache: RuntimeMountCache = .{
+        .common_etc = try requiredRuntimePath(io, allocator, common_root, "etc"),
+    };
+    errdefer cache.deinit(allocator);
 
     cache.glibc2_31 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.31");
     cache.glibc2_35 = try discoverLibcRuntimeMounts(io, allocator, runtime_root_path, "glibc2.35");
@@ -1023,7 +639,6 @@ fn discoverLibcRuntimeMounts(
     sources.lib = try firstRuntimePathIfExists(io, allocator, runtime_root, &.{ "lib", "usr/lib" });
     sources.lib64 = try firstRuntimePathIfExists(io, allocator, runtime_root, &.{ "lib64", "usr/lib64" });
     sources.usr_lib = try runtimePathIfExists(io, allocator, runtime_root, "usr/lib");
-    sources.etc = try runtimePathIfExists(io, allocator, runtime_root, "etc");
     return sources;
 }
 
@@ -1074,15 +689,13 @@ fn runtimePathIfExists(
     return source;
 }
 
-fn appendCachedCommonRuntimeMounts(
+fn requiredRuntimePath(
     io: std.Io,
     allocator: std.mem.Allocator,
-    chroot_dir: std.Io.Dir,
-    chroot_path: []const u8,
-    sources: *const RuntimeMountSources,
-    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
-) !void {
-    if (sources.etc) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "etc", bind_mounts);
+    runtime_root: []const u8,
+    source_rel: []const u8,
+) ![:0]const u8 {
+    return (try runtimePathIfExists(io, allocator, runtime_root, source_rel)) orelse error.MissingRuntimePath;
 }
 
 fn appendCachedLibcRuntimeMounts(
@@ -1096,7 +709,6 @@ fn appendCachedLibcRuntimeMounts(
     if (sources.lib) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "lib", bind_mounts);
     if (sources.lib64) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "lib64", bind_mounts);
     if (sources.usr_lib) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "usr/lib", bind_mounts);
-    if (sources.etc) |source| try appendCachedRuntimeMount(io, allocator, chroot_dir, chroot_path, source, "etc", bind_mounts);
 }
 
 fn appendCachedShellRuntimeMounts(
@@ -1127,100 +739,6 @@ fn appendCachedRuntimeMount(
         .source = @constCast(source),
         .target = target,
     });
-}
-
-fn appendCommonRuntimeMounts(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    chroot_dir: std.Io.Dir,
-    chroot_path: []const u8,
-    runtime_root_path: []const u8,
-    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
-) !void {
-    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/common/root", .{runtime_root_path});
-    defer allocator.free(runtime_root);
-    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "etc", "etc", bind_mounts);
-}
-
-fn appendLibcRuntimeMounts(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    chroot_dir: std.Io.Dir,
-    chroot_path: []const u8,
-    runtime_root_path: []const u8,
-    libc: []const u8,
-    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
-) !void {
-    const arch = try runtimeArch();
-    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/libc/{s}/{s}/root", .{ runtime_root_path, libc, arch });
-    defer allocator.free(runtime_root);
-
-    try appendFirstExistingRuntimeMount(io, allocator, chroot_dir, chroot_path, runtime_root, &.{ "lib", "usr/lib" }, "lib", bind_mounts);
-    try appendFirstExistingRuntimeMount(io, allocator, chroot_dir, chroot_path, runtime_root, &.{ "lib64", "usr/lib64" }, "lib64", bind_mounts);
-    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "usr/lib", "usr/lib", bind_mounts);
-    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "etc", "etc", bind_mounts);
-}
-
-fn appendShellRuntimeMounts(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    chroot_dir: std.Io.Dir,
-    chroot_path: []const u8,
-    runtime_root_path: []const u8,
-    shell: []const u8,
-    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
-) !void {
-    const arch = try runtimeArch();
-    const runtime_root = try std.fmt.allocPrint(allocator, "{s}/shell/{s}/{s}/root", .{ runtime_root_path, shell, arch });
-    defer allocator.free(runtime_root);
-
-    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "bin", "bin", bind_mounts);
-    _ = try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, "usr/bin", "usr/bin", bind_mounts);
-}
-
-fn appendFirstExistingRuntimeMount(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    chroot_dir: std.Io.Dir,
-    chroot_path: []const u8,
-    runtime_root: []const u8,
-    source_candidates: []const []const u8,
-    target_rel: []const u8,
-    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
-) !void {
-    for (source_candidates) |source_rel| {
-        if (try appendRuntimeMountIfExists(io, allocator, chroot_dir, chroot_path, runtime_root, source_rel, target_rel, bind_mounts)) return;
-    }
-}
-
-fn appendRuntimeMountIfExists(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    chroot_dir: std.Io.Dir,
-    chroot_path: []const u8,
-    runtime_root: []const u8,
-    source_rel: []const u8,
-    target_rel: []const u8,
-    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
-) !bool {
-    const source = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ runtime_root, source_rel }, 0);
-    errdefer allocator.free(source);
-    std.Io.Dir.cwd().access(io, source, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            allocator.free(source);
-            return false;
-        },
-        else => |e| return e,
-    };
-
-    try chroot_dir.createDirPath(io, target_rel);
-    const target = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ chroot_path, target_rel }, 0);
-    errdefer allocator.free(target);
-    try bind_mounts.append(allocator, .{
-        .source = source,
-        .target = target,
-    });
-    return true;
 }
 
 pub const OwnedActionResult = struct {
@@ -1328,18 +846,15 @@ fn logActionTiming(
     execution_completed: std.Io.Timestamp,
     output_upload_start: std.Io.Timestamp,
     output_upload_completed: std.Io.Timestamp,
-    file_inputs: usize,
-    directory_inputs: usize,
     bind_mounts: usize,
-    actiondfs_mounts: usize,
     output_files: usize,
     output_directories: usize,
     stress_case: []const u8,
-    input_mode: ActionInputMode,
+    actiondfs_mode: ActiondfsMode,
 ) void {
     var hash: [64]u8 = undefined;
     std.log.info(
-        "execute timing {s}/{d}: total_ns={d} input_fetch_ns={d} execution_ns={d} output_upload_ns={d} file_inputs={d} directory_inputs={d} bind_mounts={d} actiondfs_mounts={d} output_files={d} output_directories={d} stress_case={s} input_mode={s}",
+        "execute timing {s}/{d}: total_ns={d} input_fetch_ns={d} execution_ns={d} output_upload_ns={d} bind_mounts={d} output_files={d} output_directories={d} stress_case={s} input_mode={s}",
         .{
             action_digest.formatHex(&hash),
             action_digest.size_bytes,
@@ -1347,14 +862,11 @@ fn logActionTiming(
             elapsedNs(input_fetch_start, input_fetch_completed),
             elapsedNs(execution_start, execution_completed),
             elapsedNs(output_upload_start, output_upload_completed),
-            file_inputs,
-            directory_inputs,
             bind_mounts,
-            actiondfs_mounts,
             output_files,
             output_directories,
             stress_case,
-            input_mode.label(),
+            actiondfs_mode.label(),
         },
     );
 }
@@ -1390,6 +902,33 @@ fn logExecuteSetupError(phase: []const u8, action_digest: cas.Digest, err: anyer
         phase,
         @errorName(err),
     });
+}
+
+fn validatePath(path: []const u8) !void {
+    if (path.len == 0) return error.EmptyExecPath;
+    if (std.fs.path.isAbsolute(path)) return error.EscapingExecPath;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.EscapingExecPath;
+
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or
+            std.mem.eql(u8, component, ".") or
+            std.mem.eql(u8, component, ".."))
+        {
+            return error.EscapingExecPath;
+        }
+    }
+}
+
+fn validateEntryName(name: []const u8) !void {
+    if (name.len == 0 or
+        std.mem.indexOfScalar(u8, name, '/') != null or
+        std.mem.indexOfScalar(u8, name, 0) != null or
+        std.mem.eql(u8, name, ".") or
+        std.mem.eql(u8, name, ".."))
+    {
+        return error.InvalidDirectoryEntryName;
+    }
 }
 
 fn collectOutputFiles(
@@ -1437,7 +976,7 @@ fn collectOutputPath(
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
-    try execroot.validatePath(path);
+    try validatePath(path);
     const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -1458,7 +997,7 @@ fn collectOutputFile(
     path: []const u8,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
 ) !void {
-    try execroot.validatePath(path);
+    try validatePath(path);
     const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -1540,7 +1079,7 @@ fn collectOutputDirectory(
     path: []const u8,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
-    try execroot.validatePath(path);
+    try validatePath(path);
     const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -1591,7 +1130,7 @@ fn prepareOutputParents(
 
 fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void {
     if (path.len == 0) return;
-    try execroot.validatePath(path);
+    try validatePath(path);
     const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
     if (last_slash == 0) return;
     try work_root.createDirPath(io, path[0..last_slash]);
@@ -1770,111 +1309,6 @@ fn putOutputDirectoryTree(
     return digest;
 }
 
-fn collectInputs(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    store: cas.Store,
-    read_roots: CasReadRoots,
-    directory_digest: cas.Digest,
-    prefix: []const u8,
-    command: reapi.Command,
-    allow_directory_inputs: bool,
-    inputs: ?*std.ArrayListUnmanaged(execroot.Input),
-    directory_inputs: ?*std.ArrayListUnmanaged(execroot.DirectoryInput),
-) !void {
-    const directory_bytes = readCasBlobAlloc(io, allocator, store, read_roots, directory_digest) catch |err| switch (err) {
-        error.FileNotFound => return error.MissingDirectoryBlob,
-        else => return err,
-    };
-    defer allocator.free(directory_bytes);
-
-    var reader = protobuf.Reader.init(directory_bytes);
-    var directory = try reapi.Directory.decodeOwned(allocator, &reader);
-    defer directory.deinit(allocator);
-
-    for (directory.files) |file| {
-        try validateEntryName(file.name);
-        if (inputs) |list| {
-            const path = try joinPath(allocator, prefix, file.name);
-            errdefer allocator.free(path);
-            const digest = try cas.Digest.fromReapi(file.digest orelse return error.MissingFileDigest);
-            try list.append(allocator, .{
-                .path = path,
-                .digest = digest,
-                .is_executable = file.is_executable,
-            });
-        }
-    }
-
-    for (directory.directories) |child| {
-        try validateEntryName(child.name);
-        const digest = try cas.Digest.fromReapi(child.digest orelse return error.MissingDirectoryDigest);
-        const child_prefix = try joinPath(allocator, prefix, child.name);
-        errdefer allocator.free(child_prefix);
-        if (allow_directory_inputs and canBindDirectoryInput(child_prefix, command)) {
-            try store.materializeTree(io, allocator, digest);
-            if (directory_inputs) |list| {
-                try list.append(allocator, .{
-                    .path = child_prefix,
-                    .digest = digest,
-                });
-            } else {
-                allocator.free(child_prefix);
-            }
-        } else {
-            try collectInputs(io, allocator, store, read_roots, digest, child_prefix, command, allow_directory_inputs, inputs, directory_inputs);
-            allocator.free(child_prefix);
-        }
-    }
-}
-
-fn canBindDirectoryInput(path: []const u8, command: reapi.Command) bool {
-    if (command.output_paths.len != 0) {
-        return !overlapsAnyOutput(path, command.output_paths);
-    }
-    return !overlapsAnyOutput(path, command.output_files) and
-        !overlapsAnyOutput(path, command.output_directories);
-}
-
-fn overlapsAnyOutput(path: []const u8, output_paths: []const []const u8) bool {
-    for (output_paths) |output_path| {
-        if (pathsOverlap(path, output_path)) return true;
-    }
-    return false;
-}
-
-fn pathsOverlap(lhs: []const u8, rhs: []const u8) bool {
-    return pathContains(lhs, rhs) or pathContains(rhs, lhs);
-}
-
-fn pathContains(parent: []const u8, child: []const u8) bool {
-    if (std.mem.eql(u8, parent, child)) return true;
-    return child.len > parent.len and
-        std.mem.startsWith(u8, child, parent) and
-        child[parent.len] == '/';
-}
-
-fn validateEntryName(name: []const u8) !void {
-    if (name.len == 0) return error.InvalidDirectoryEntryName;
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return error.InvalidDirectoryEntryName;
-    if (std.mem.indexOfScalar(u8, name, 0) != null) return error.InvalidDirectoryEntryName;
-    if (std.mem.eql(u8, name, ".")) return error.InvalidDirectoryEntryName;
-    if (std.mem.eql(u8, name, "..")) return error.InvalidDirectoryEntryName;
-}
-
-fn joinPath(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]u8 {
-    if (prefix.len == 0) return allocator.dupe(u8, name);
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name });
-}
-
-fn freeInputs(allocator: std.mem.Allocator, inputs: []const execroot.Input) void {
-    for (inputs) |input| allocator.free(input.path);
-}
-
-fn freeDirectoryInputs(allocator: std.mem.Allocator, inputs: []const execroot.DirectoryInput) void {
-    for (inputs) |input| allocator.free(input.path);
-}
-
 fn putProto(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1932,199 +1366,6 @@ test "actionMutatesInputs parses platform property" {
     }));
 }
 
-test "selectExecutableInputCopyPaths keeps only the direct command executable" {
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (paths.items) |path| std.testing.allocator.free(path);
-        paths.deinit(std.testing.allocator);
-    }
-
-    try selectExecutableInputCopyPaths(
-        std.testing.allocator,
-        .{ .arguments = &.{"tool/action-tool"} },
-        &.{
-            .{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true },
-            .{ .path = "inputs/data.txt", .digest = cas.Digest.empty(), .is_executable = true },
-        },
-        "/workspace",
-        &paths,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
-    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
-}
-
-test "selectExecutableInputCopyPaths trusts executable metadata" {
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (paths.items) |path| std.testing.allocator.free(path);
-        paths.deinit(std.testing.allocator);
-    }
-
-    try selectExecutableInputCopyPaths(
-        std.testing.allocator,
-        .{ .arguments = &.{"tool/action-tool"} },
-        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = false }},
-        "/workspace",
-        &paths,
-    );
-
-    try std.testing.expectEqual(@as(usize, 0), paths.items.len);
-}
-
-test "selectExecutableInputCopyPaths maps workspace absolute command paths" {
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (paths.items) |path| std.testing.allocator.free(path);
-        paths.deinit(std.testing.allocator);
-    }
-
-    _ = try selectExecutableInputCopyPaths(
-        std.testing.allocator,
-        .{ .arguments = &.{"/workspace/tool/action-tool"} },
-        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true }},
-        "/workspace",
-        &paths,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
-    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
-}
-
-test "selectExecutableInputCopyPaths normalizes relative working directory commands" {
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (paths.items) |path| std.testing.allocator.free(path);
-        paths.deinit(std.testing.allocator);
-    }
-
-    _ = try selectExecutableInputCopyPaths(
-        std.testing.allocator,
-        .{
-            .arguments = &.{"./action-tool"},
-            .working_directory = "tool",
-        },
-        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true }},
-        "/workspace",
-        &paths,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
-    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
-}
-
-test "selectExecutableInputCopyPaths searches input PATH candidates" {
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (paths.items) |path| std.testing.allocator.free(path);
-        paths.deinit(std.testing.allocator);
-    }
-
-    _ = try selectExecutableInputCopyPaths(
-        std.testing.allocator,
-        .{
-            .arguments = &.{"action-tool"},
-            .environment_variables = &.{.{ .name = "PATH", .value = "/usr/bin:/workspace/tool" }},
-        },
-        &.{.{ .path = "tool/action-tool", .digest = cas.Digest.empty(), .is_executable = true }},
-        "/workspace",
-        &paths,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), paths.items.len);
-    try std.testing.expectEqualStrings("tool/action-tool", paths.items[0]);
-}
-
-test "appendLibcRuntimeMounts maps runtime directories into chroot" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const arch = try runtimeArch();
-    const runtime_usr_lib = try std.fmt.allocPrint(std.testing.allocator, "runtimes/libc/glibc2.35/{s}/root/usr/lib", .{arch});
-    defer std.testing.allocator.free(runtime_usr_lib);
-    const runtime_etc = try std.fmt.allocPrint(std.testing.allocator, "runtimes/libc/glibc2.35/{s}/root/etc", .{arch});
-    defer std.testing.allocator.free(runtime_etc);
-    try tmp.dir.createDirPath(std.testing.io, runtime_usr_lib);
-    try tmp.dir.createDirPath(std.testing.io, runtime_etc);
-    try tmp.dir.createDirPath(std.testing.io, "chroot");
-
-    var chroot_dir = try tmp.dir.openDir(std.testing.io, "chroot", .{});
-    defer chroot_dir.close(std.testing.io);
-
-    var base_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base_len = try tmp.dir.realPath(std.testing.io, &base_buffer);
-    const base_path = base_buffer[0..base_len];
-    const runtime_root_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/runtimes", .{base_path});
-    defer std.testing.allocator.free(runtime_root_path);
-    const chroot_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/chroot", .{base_path});
-    defer std.testing.allocator.free(chroot_path);
-
-    var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
-    defer {
-        for (bind_mounts.items) |mount| {
-            std.testing.allocator.free(mount.source);
-            std.testing.allocator.free(mount.target);
-        }
-        bind_mounts.deinit(std.testing.allocator);
-    }
-
-    try appendLibcRuntimeMounts(
-        std.testing.io,
-        std.testing.allocator,
-        chroot_dir,
-        chroot_path,
-        runtime_root_path,
-        "glibc2.35",
-        &bind_mounts,
-    );
-
-    try std.testing.expectEqual(@as(usize, 3), bind_mounts.items.len);
-    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].target, "/chroot/lib"));
-    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[1].target, "/chroot/usr/lib"));
-    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[2].target, "/chroot/etc"));
-}
-
-test "appendCommonRuntimeMounts maps runtime etc into chroot" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.createDirPath(std.testing.io, "runtimes/common/root/etc");
-    try tmp.dir.createDirPath(std.testing.io, "chroot");
-
-    var chroot_dir = try tmp.dir.openDir(std.testing.io, "chroot", .{});
-    defer chroot_dir.close(std.testing.io);
-
-    var base_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base_len = try tmp.dir.realPath(std.testing.io, &base_buffer);
-    const base_path = base_buffer[0..base_len];
-    const runtime_root_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/runtimes", .{base_path});
-    defer std.testing.allocator.free(runtime_root_path);
-    const chroot_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/chroot", .{base_path});
-    defer std.testing.allocator.free(chroot_path);
-
-    var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
-    defer {
-        for (bind_mounts.items) |mount| {
-            std.testing.allocator.free(mount.source);
-            std.testing.allocator.free(mount.target);
-        }
-        bind_mounts.deinit(std.testing.allocator);
-    }
-
-    try appendCommonRuntimeMounts(
-        std.testing.io,
-        std.testing.allocator,
-        chroot_dir,
-        chroot_path,
-        runtime_root_path,
-        &bind_mounts,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), bind_mounts.items.len);
-    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].source, "/runtimes/common/root/etc"));
-    try std.testing.expect(std.mem.endsWith(u8, bind_mounts.items[0].target, "/chroot/etc"));
-}
-
 test "prepareExecuteOptions caches CAS and runtime mount sources" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2150,24 +1391,36 @@ test "prepareExecuteOptions caches CAS and runtime mount sources" {
     });
     defer prepared.deinit(std.testing.allocator);
 
-    try std.testing.expect(!prepared.options.use_actiondfs);
     try std.testing.expect(prepared.options.cas_blob_root_path != null);
     try std.testing.expect(std.mem.endsWith(u8, prepared.options.cas_blob_root_path.?, "/cas/blobs/sha256"));
 
     const cache = prepared.options.runtime_mount_cache.?;
-    try std.testing.expect(cache.common.etc != null);
+    try std.testing.expect(std.mem.endsWith(u8, cache.common_etc, "/runtimes/common/root/etc"));
     try std.testing.expect(cache.glibc2_35.lib != null);
     try std.testing.expect(cache.glibc2_35.usr_lib != null);
     try std.testing.expect(cache.glibc2_31.lib == null);
 }
 
-test "actiondfs uses input CAS root for blob reads" {
-    const options: ExecuteOptions = .{
-        .cas_blob_root_path = "/cas/blobs/sha256",
-        .input_cas_blob_root_path = "/host-cas/blobs/sha256",
-    };
+test "prepareExecuteOptions requires common runtime etc" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    try std.testing.expectEqualStrings("/host-cas/blobs/sha256", actiondfsInputBlobRootPath(options).?);
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    try cas.Store.init(cas_dir).ensureLayout(std.testing.io);
+    try tmp.dir.createDirPath(std.testing.io, "runtimes");
+
+    var base_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buffer);
+    const runtime_root_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/runtimes", .{base_buffer[0..base_len]});
+    defer std.testing.allocator.free(runtime_root_path);
+
+    try std.testing.expectError(error.MissingRuntimePath, prepareExecuteOptions(
+        std.testing.io,
+        std.testing.allocator,
+        cas.Store.initReady(cas_dir),
+        .{ .runtime_root_path = runtime_root_path },
+    ));
 }
 
 test "prepareExecuteOptions places actiondfs stage beside CAS" {
@@ -2178,9 +1431,7 @@ test "prepareExecuteOptions places actiondfs stage beside CAS" {
     defer cas_dir.close(std.testing.io);
     try cas.Store.init(cas_dir).ensureLayout(std.testing.io);
 
-    var prepared = try prepareExecuteOptions(std.testing.io, std.testing.allocator, cas.Store.initReady(cas_dir), .{
-        .use_actiondfs = true,
-    });
+    var prepared = try prepareExecuteOptions(std.testing.io, std.testing.allocator, cas.Store.initReady(cas_dir), .{});
     defer prepared.deinit(std.testing.allocator);
 
     try std.testing.expect(prepared.options.actiondfs_stage_root_path != null);
@@ -2218,156 +1469,14 @@ test "actiondfs workspace uses build-time filesystem name without mount option n
     }
 }
 
-test "collectInputs materializes bindable tree directories" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-
-    const store = cas.Store.init(cas_dir);
-    try store.ensureLayout(std.testing.io);
-
-    const file_digest = try store.putBytes(std.testing.io, "leaf");
-    var file_hash: [64]u8 = undefined;
-    const child_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .files = &.{
-            .{ .name = "leaf.txt", .digest = file_digest.toReapi(&file_hash) },
-        },
-    });
-
-    var child_hash: [64]u8 = undefined;
-    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{
-            .{ .name = "tree", .digest = child_digest.toReapi(&child_hash) },
-        },
-    });
-
-    var files: std.ArrayListUnmanaged(execroot.Input) = .empty;
-    defer files.deinit(std.testing.allocator);
-    defer freeInputs(std.testing.allocator, files.items);
-    var dirs: std.ArrayListUnmanaged(execroot.DirectoryInput) = .empty;
-    defer dirs.deinit(std.testing.allocator);
-    defer freeDirectoryInputs(std.testing.allocator, dirs.items);
-
-    try collectInputs(std.testing.io, std.testing.allocator, store, .{}, root_digest, "", .{}, true, &files, &dirs);
-
-    try std.testing.expectEqual(@as(usize, 0), files.items.len);
-    try std.testing.expectEqual(@as(usize, 1), dirs.items.len);
-    try std.testing.expectEqualStrings("tree", dirs.items[0].path);
-    try std.testing.expect(dirs.items[0].digest.eql(child_digest));
-    try std.testing.expect(try store.hasTree(std.testing.io, child_digest));
-
-    var child_tree_path_buffer: [cas.tree_path_len]u8 = undefined;
-    const child_tree_path = cas.treeSubPath(child_digest, &child_tree_path_buffer);
-    const leaf_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/leaf.txt", .{child_tree_path});
-    defer std.testing.allocator.free(leaf_path);
-    const leaf = try cas_dir.readFileAlloc(std.testing.io, leaf_path, std.testing.allocator, .limited(16));
-    defer std.testing.allocator.free(leaf);
-    try std.testing.expectEqualStrings("leaf", leaf);
-}
-
-test "collectInputs reads directory metadata from staged CAS root" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var store_dir = try tmp.dir.createDirPathOpen(std.testing.io, "store", .{});
-    defer store_dir.close(std.testing.io);
-    var lower_dir = try tmp.dir.createDirPathOpen(std.testing.io, "lower", .{});
-    defer lower_dir.close(std.testing.io);
-    var staged_dir = try tmp.dir.createDirPathOpen(std.testing.io, "staged", .{});
-    defer staged_dir.close(std.testing.io);
-
-    const file_digest = cas.Digest.fromBytes("leaf");
-    var file_hash: [64]u8 = undefined;
-    const root_digest = try putProto(std.testing.io, std.testing.allocator, cas.Store.init(staged_dir), reapi.Directory{
-        .files = &.{.{ .name = "leaf.txt", .digest = file_digest.toReapi(&file_hash) }},
-    });
-
-    var lower_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const lower_root_len = try lower_dir.realPath(std.testing.io, &lower_root_buffer);
-    const lower_blob_root = try std.fmt.allocPrint(std.testing.allocator, "{s}/blobs/sha256", .{lower_root_buffer[0..lower_root_len]});
-    defer std.testing.allocator.free(lower_blob_root);
-
-    var staged_root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const staged_root_len = try staged_dir.realPath(std.testing.io, &staged_root_buffer);
-    const staged_blob_root = try std.fmt.allocPrint(std.testing.allocator, "{s}/blobs/sha256", .{staged_root_buffer[0..staged_root_len]});
-    defer std.testing.allocator.free(staged_blob_root);
-
-    var files: std.ArrayListUnmanaged(execroot.Input) = .empty;
-    defer files.deinit(std.testing.allocator);
-    defer freeInputs(std.testing.allocator, files.items);
-
-    try collectInputs(
-        std.testing.io,
-        std.testing.allocator,
-        cas.Store.init(store_dir),
-        .{
-            .primary_blob_root_path = lower_blob_root,
-            .staged_blob_root_path = staged_blob_root,
-        },
-        root_digest,
-        "",
-        .{},
-        false,
-        &files,
-        null,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), files.items.len);
-    try std.testing.expectEqualStrings("leaf.txt", files.items[0].path);
-    try std.testing.expect(files.items[0].digest.eql(file_digest));
-}
-
-test "collectInputs expands directories that overlap outputs" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
-    defer cas_dir.close(std.testing.io);
-
-    const store = cas.Store.init(cas_dir);
-    try store.ensureLayout(std.testing.io);
-
-    const file_digest = try store.putBytes(std.testing.io, "leaf");
-    var file_hash: [64]u8 = undefined;
-    const child_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .files = &.{
-            .{ .name = "leaf.txt", .digest = file_digest.toReapi(&file_hash) },
-        },
-    });
-
-    var child_hash: [64]u8 = undefined;
-    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
-        .directories = &.{
-            .{ .name = "tree", .digest = child_digest.toReapi(&child_hash) },
-        },
-    });
-
-    var files: std.ArrayListUnmanaged(execroot.Input) = .empty;
-    defer files.deinit(std.testing.allocator);
-    defer freeInputs(std.testing.allocator, files.items);
-    var dirs: std.ArrayListUnmanaged(execroot.DirectoryInput) = .empty;
-    defer dirs.deinit(std.testing.allocator);
-    defer freeDirectoryInputs(std.testing.allocator, dirs.items);
-
-    try collectInputs(
-        std.testing.io,
-        std.testing.allocator,
-        store,
-        .{},
-        root_digest,
-        "",
-        .{ .output_paths = &.{"tree/out.txt"} },
-        true,
-        &files,
-        &dirs,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), files.items.len);
-    try std.testing.expectEqualStrings("tree/leaf.txt", files.items[0].path);
-    try std.testing.expectEqual(@as(usize, 0), dirs.items.len);
-    try std.testing.expect(!try store.hasTree(std.testing.io, child_digest));
+test "validatePath rejects absolute and escaping paths" {
+    try validatePath("src/main.c");
+    try std.testing.expectError(error.EmptyExecPath, validatePath(""));
+    try std.testing.expectError(error.EscapingExecPath, validatePath("/abs"));
+    try std.testing.expectError(error.EscapingExecPath, validatePath("../escape"));
+    try std.testing.expectError(error.EscapingExecPath, validatePath("a/../escape"));
+    try std.testing.expectError(error.EscapingExecPath, validatePath("a//b"));
+    try std.testing.expectError(error.EscapingExecPath, validatePath("./b"));
 }
 
 test "collectOutputFiles uploads requested output files and directories" {
@@ -2446,9 +1555,6 @@ test "collectOutputFiles uploads requested output files and directories" {
     const child_file = try store.readAlloc(std.testing.io, std.testing.allocator, child_file_digest);
     defer std.testing.allocator.free(child_file);
     try std.testing.expectEqualStrings("leaf", child_file);
-
-    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, root);
-    try std.testing.expect(!try store.hasTree(std.testing.io, root_digest));
 
     var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
     defer result.deinit(std.testing.allocator);

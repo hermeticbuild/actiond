@@ -4,10 +4,8 @@
 and Windows it starts a small Linux VM and runs Bazel actions inside that VM,
 so the host can act like a local Linux remote-execution worker.
 
-The macOS release includes the VM kernel, initramfs, and Linux runtime image.
-Windows release binaries are available for ARM64 and x86_64. The Windows
-binaries do not embed the matching guest artifacts; build those artifacts from
-this repository before running `windows-actiond`.
+The macOS ARM64 and Windows ARM64/x86_64 releases include the matching VM
+kernel, initramfs, and Linux runtime image.
 
 ## Why Use It?
 
@@ -53,8 +51,7 @@ You can also download the binary from the
 Reusing the same root keeps the local cache warm across worker restarts.
 
 The Windows ARM64 and x86_64 release binaries use Host Compute System and
-Hyper-V sockets. The Windows smoke builds the matching guest artifacts and
-passes their resolved Bazel output paths to `windows-actiond`:
+Hyper-V sockets. The Windows smoke runs the embedded guest artifacts:
 
 ```powershell
 e2e\run_llvm_windows_vm_smoke.ps1

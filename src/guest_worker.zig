@@ -41,9 +41,7 @@ pub fn run(io: std.Io) !void {
 
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
         .runtime_root_path = "/runtimes",
-        .use_actiondfs = true,
         .cas_blob_root_path = guest_cas_blob_root_path,
-        .input_cas_blob_root_path = guest_cas_blob_root_path,
         .actiondfs_stage_root_path = guest_actiondfs_stage_root_path,
         .staged_cas_index = &cas_presence_index,
     });
