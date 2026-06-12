@@ -105,10 +105,9 @@ def _glibc_deb_runtime_impl(rctx):
         "root/usr/share/locale",
         "root/usr/share/man",
         "root/var",
+        "root/etc",
     ] + ["deb_%d" % i for i in range(len(rctx.attr.urls))])
     _delete_gconv_dirs(rctx)
-    rctx.file("root/etc/hosts", "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n", executable = False)
-    rctx.file("root/etc/nsswitch.conf", "passwd: files\ngroup: files\nhosts: files dns\n", executable = False)
     _write_runtime_entries(rctx)
 
     manifest = """{
@@ -118,8 +117,7 @@ def _glibc_deb_runtime_impl(rctx):
   "mounts": [
     ["root/lib", "/lib"],
     ["root/lib64", "/lib64"],
-    ["root/usr/lib", "/usr/lib"],
-    ["root/etc", "/etc"]
+    ["root/usr/lib", "/usr/lib"]
   ],
   "interpreters": [%s]
 }

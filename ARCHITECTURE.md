@@ -171,8 +171,9 @@ Current runtime names:
 - `glibc2.35`
 - `glibc2.39`
 
-Actions select a runtime with the REAPI platform property `libc`. In Bazel this
-can be set with:
+Every action bind-mounts `/runtimes/common/root/etc` at `/etc`. Actions select
+additional runtime libraries with the REAPI platform property `libc`. In Bazel
+this can be set with:
 
 ```python
 execution_requirements = {"libc": "glibc2.35"}
