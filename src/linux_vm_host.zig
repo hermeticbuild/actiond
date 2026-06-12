@@ -1,7 +1,8 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const control_transport_fd = @import("control_transport_fd.zig");
-const darwin_vm = @import("darwin_vm.zig");
 const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
+const qemu_vm = @import("qemu_vm.zig");
 const vm_host = @import("vm_host.zig");
 
 pub fn serve(
@@ -9,7 +10,12 @@ pub fn serve(
     allocator: std.mem.Allocator,
     options: vm_host.ServeVmOptions,
     comptime embedded_assets: type,
+    comptime embedded_qemu: type,
 ) !void {
+    if (comptime builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) {
+        return error.UnsupportedHost;
+    }
+
     var root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{});
     defer root_dir.close(io);
 
@@ -32,35 +38,47 @@ pub fn serve(
     defer if (raw_initramfs) |path| allocator.free(path);
     const boot_initramfs_path = raw_initramfs orelse assets.initramfs;
 
-    var stderr_buffer: [512]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
-    const stderr = &stderr_writer.interface;
-    try stderr.print("starting actiond VM kernel={s} initramfs={s} runtimes={s} cas_image={s} format_cas_image={}\n", .{
+    const bios_256k_path = try vm_host.materializeEmbeddedFile(
+        io,
+        allocator,
+        root_dir,
+        "qemu/bios-256k.bin",
+        embedded_qemu.bios_256k,
+    );
+    defer allocator.free(bios_256k_path);
+    const linuxboot_dma_path = try vm_host.materializeEmbeddedFile(
+        io,
+        allocator,
+        root_dir,
+        "qemu/linuxboot_dma.bin",
+        embedded_qemu.linuxboot_dma,
+    );
+    defer allocator.free(linuxboot_dma_path);
+    const qemu_data_path = try vm_host.absoluteSubPath(io, allocator, root_dir, "qemu");
+    defer allocator.free(qemu_data_path);
+
+    std.log.info("starting QEMU VM kernel={s} initramfs={s} runtimes={s} cas={s}", .{
         boot_kernel_path,
         boot_initramfs_path,
         assets.runtime_image,
         cas_image_path,
-        format_cas_image,
     });
-    try stderr.flush();
-
-    var vm = try darwin_vm.Machine.start(io, allocator, .{
+    var machine = try qemu_vm.Machine.start(io, allocator, .{
         .kernel_path = boot_kernel_path,
         .initramfs_path = boot_initramfs_path,
         .runtime_image_path = assets.runtime_image,
         .cas_image_path = cas_image_path,
+        .qemu_data_path = qemu_data_path,
         .format_cas_image = format_cas_image,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
         .start_timeout_ms = options.start_timeout_ms,
         .connect_timeout_ms = options.connect_timeout_ms,
     });
-    defer vm.deinit();
+    defer machine.deinit();
 
-    try stderr.print("actiond VM started; proxying gRPC to linux-actiond-guest\n", .{});
-    try stderr.flush();
-
-    var fd_client = control_transport_fd.Client{ .opener = vm.opener() };
+    std.log.info("actiond QEMU VM started; proxying gRPC to linux-actiond-guest", .{});
+    var fd_client = control_transport_fd.Client{ .opener = machine.opener() };
     defer fd_client.deinit(io);
     var background_tasks: std.Io.Group = .init;
     defer background_tasks.cancel(io);
@@ -69,5 +87,5 @@ pub fn serve(
         errdefer allocator.free(stats_path);
         try background_tasks.concurrent(io, vm_host.actiondfsStatsTask, .{ io, allocator, &fd_client, stats_path });
     }
-    return grpc_vsock_bridge.serve(io, options.listen, &vm);
+    return grpc_vsock_bridge.serve(io, options.listen, &machine);
 }

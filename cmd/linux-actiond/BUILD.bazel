@@ -1,0 +1,43 @@
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("//tools:zig_embedded_assets.bzl", "zig_embedded_assets")
+load("//tools:zig_embedded_qemu.bzl", "zig_embedded_qemu")
+
+zig_binary(
+    name = "linux-actiond",
+    main = "main.zig",
+    strip_debug_symbols = True,
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":embedded_assets",
+        ":embedded_qemu",
+        "//src:actiond",
+    ],
+)
+
+zig_embedded_assets(
+    name = "embedded_assets",
+    initramfs = "//vm:initramfs_x86_64",
+    kernel = "//vm:linux_kernel.image",
+    runtime_image = "//runtimes:runtimes_squashfs_x86_64",
+)
+
+zig_embedded_qemu(
+    name = "embedded_qemu",
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+)
+
+platform_transition_binary(
+    name = "linux-actiond_linux_x86_64",
+    basename = "linux-actiond_linux_x86_64",
+    binary = ":linux-actiond",
+    target_platform = "//platforms:linux_x86_64_musl",
+    visibility = ["//visibility:public"],
+)

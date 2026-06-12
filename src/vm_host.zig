@@ -1,5 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const control_protocol = @import("control_protocol.zig");
+const control_transport_fd = @import("control_transport_fd.zig");
 const zstd_test = if (builtin.is_test) @import("c") else struct {};
 
 const max_compressed_initramfs_bytes = 128 * 1024 * 1024;
@@ -63,12 +65,26 @@ fn materializeEmbeddedAsset(
     name: []const u8,
     bytes: []const u8,
 ) ![]u8 {
-    try root_dir.createDirPath(io, "embedded");
-
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
     const output_rel = try std.fmt.allocPrint(allocator, "embedded/{s}-{s}", .{ name, std.fmt.bytesToHex(hash, .lower) });
     defer allocator.free(output_rel);
+
+    return materializeEmbeddedFile(io, allocator, root_dir, output_rel, bytes);
+}
+
+pub fn materializeEmbeddedFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    output_rel: []const u8,
+    bytes: []const u8,
+) ![]u8 {
+    const parent = std.fs.path.dirname(output_rel) orelse ".";
+    if (!std.mem.eql(u8, parent, ".")) try root_dir.createDirPath(io, parent);
+
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
 
     if (root_dir.statFile(io, output_rel, .{})) |stat| {
         if (stat.kind == .file and stat.size == bytes.len and try embeddedAssetMatches(io, root_dir, output_rel, &hash)) {
@@ -86,17 +102,23 @@ fn materializeEmbeddedAsset(
         return absoluteSubPath(io, allocator, root_dir, output_rel);
     }
 
-    var temp_path_buffer: [64]u8 = undefined;
     var output: std.Io.File = undefined;
     const temp_path = while (true) {
         const id = next_embedded_asset_temp_id.fetchAdd(1, .monotonic);
-        const path = try std.fmt.bufPrint(&temp_path_buffer, "embedded/.asset-{d}", .{id});
+        const path = try std.fmt.allocPrint(allocator, "{s}/.asset-{d}", .{ parent, id });
         output = root_dir.createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
-            error.PathAlreadyExists => continue,
-            else => |e| return e,
+            error.PathAlreadyExists => {
+                allocator.free(path);
+                continue;
+            },
+            else => |e| {
+                allocator.free(path);
+                return e;
+            },
         };
         break path;
     };
+    defer allocator.free(temp_path);
     errdefer root_dir.deleteFile(io, temp_path) catch {};
     var output_open = true;
     defer if (output_open) output.close(io);
@@ -355,6 +377,66 @@ pub fn absoluteSubPath(
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try root_dir.realPath(io, &root_buffer);
     return std.fs.path.join(allocator, &.{ root_buffer[0..root_len], sub_path });
+}
+
+pub fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !bool {
+    if (std.Io.Dir.cwd().statFile(io, path, .{})) |stat| {
+        if (stat.kind != .file) return error.InvalidCasImage;
+        return false;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    try createParentDirs(io, path);
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    const size_bytes = try std.math.mul(u64, size_mib, 1024 * 1024);
+    try file.setLength(io, size_bytes);
+    return true;
+}
+
+pub fn actiondfsStatsTask(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    client: *control_transport_fd.Client,
+    path: []const u8,
+) !void {
+    defer allocator.free(path);
+    while (true) {
+        writeActiondfsStatsSnapshot(io, allocator, client, path) catch |err| {
+            std.log.warn("actiondfs stats snapshot failed: {s}", .{@errorName(err)});
+        };
+        try io.sleep(.fromMilliseconds(1_000), .awake);
+    }
+}
+
+fn writeActiondfsStatsSnapshot(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    client: *control_transport_fd.Client,
+    path: []const u8,
+) !void {
+    var response = try client.call(io, allocator, .{
+        .kind = .unary,
+        .method = control_protocol.actiondfs_stats_method,
+        .body = "",
+    });
+    defer response.deinit(allocator);
+    if (response.status != .ok) return error.GuestApplicationError;
+
+    try createParentDirs(io, path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = response.body,
+        .flags = .{ .read = true, .permissions = .default_file },
+    });
+}
+
+fn createParentDirs(io: std.Io, path: []const u8) !void {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
+    if (slash == 0) return;
+    try std.Io.Dir.cwd().createDirPath(io, path[0..slash]);
 }
 
 test "parseServeVmArgs accepts VM flags" {

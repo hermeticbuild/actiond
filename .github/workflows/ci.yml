@@ -24,6 +24,35 @@ jobs:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: .github/workflows/build_release.sh release
 
+  linux-qemu-e2e:
+    name: Linux QEMU e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable vhost-vsock
+        run: |
+          if [[ ! -e /dev/vhost-vsock ]]; then
+            sudo modprobe vhost_vsock
+          fi
+          test -c /dev/vhost-vsock
+          sudo chmod a+rw /dev/vhost-vsock
+
+      - name: Run QEMU e2e
+        env:
+          ACTIOND_E2E_BARE_COUNT: 16
+          ACTIOND_E2E_NESTED_FILES_PER_GROUP: 8
+          ACTIOND_E2E_SOURCE_DIRS: 2
+          ACTIOND_E2E_SOURCE_FILES_PER_DIR: 8
+          ACTIOND_REPO_BAZEL_FLAGS: --config=remote --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
+          ACTIOND_VM_CAS_IMAGE_SIZE_MIB: 1024
+          ACTIOND_VM_CPUS: 2
+          ACTIOND_VM_MEMORY_MIB: 1024
+        run: tools/e2e.sh vm
+
   windows-llvm-smoke:
     name: Windows ${{ matrix.mode }} (${{ matrix.architecture }})
     strategy:
