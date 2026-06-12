@@ -6,11 +6,10 @@ test_workspace="${repo_root}/test"
 
 usage() {
   cat >&2 <<'EOF'
-usage: tools/e2e.sh <build|linux|vm|all>
+usage: tools/e2e.sh <build|vm|all>
 
 Modes:
   build   Run repository build/test checks and build the stress action tools.
-  linux   Start linux-actiond on this Linux host and run test/ via Bazel remote execution.
   vm      Start darwin-actiond serve-vm and run test/ via Bazel remote execution.
   all     Run build plus the host-appropriate e2e mode when configured.
 
@@ -26,7 +25,6 @@ Environment:
   ACTIOND_E2E_SOURCE_FILES_PER_DIR=32
   ACTIOND_E2E_NESTED_GROUPS=8
   ACTIOND_E2E_NESTED_FILES_PER_GROUP=96
-  ACTIOND_E2E_STANDALONE=1
   ACTIOND_E2E_JOBS=8
   ACTIOND_REPO_BAZEL_FLAGS="--config=remote"
   ACTIOND_E2E_REMOTE_GRPC_LOG=/path/to/remote_grpc.log
@@ -64,12 +62,6 @@ cleanup_e2e_server() {
     kill "${e2e_server_pid}" >/dev/null 2>&1 || true
     wait "${e2e_server_pid}" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${e2e_root}" && "$(uname -s)" == "Linux" ]]; then
-    local runtime_mount="${e2e_root}/server/runtimes"
-    if [[ -d "${runtime_mount}" ]] && awk -v path="${runtime_mount}" '$5 == path { found = 1 } END { exit(found ? 0 : 1) }' /proc/self/mountinfo; then
-      umount -l "${runtime_mount}" >/dev/null 2>&1 || true
-    fi
-  fi
   if [[ -n "${e2e_root}" ]]; then
     if [[ "${ACTIOND_E2E_KEEP_TMP:-0}" == "1" ]]; then
       echo "kept e2e root: ${e2e_root}" >&2
@@ -93,14 +85,6 @@ run_bazel() {
 bazel_output() {
   local label="$1"
   run_bazel cquery --output=files "${label}" | tail -n 1
-}
-
-host_arch() {
-  case "$(uname -m)" in
-    arm64|aarch64) echo "aarch64" ;;
-    x86_64|amd64) echo "x86_64" ;;
-    *) echo "unsupported" ;;
-  esac
 }
 
 tool_label_for_arch() {
@@ -179,49 +163,6 @@ run_build_checks() {
   run_bazel test //...
 }
 
-run_linux_e2e() {
-  if [[ "$(uname -s)" != "Linux" ]]; then
-    echo "linux e2e must run on Linux; use tools/docker/run_linux_e2e.sh from macOS" >&2
-    return 1
-  fi
-
-  local arch
-  arch="$(host_arch)"
-  prepare_stress_workspace "${arch}"
-
-  local server root
-  root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-e2e.XXXXXX")"
-  local -a server_args
-  server_args=(
-    --listen="${endpoint}"
-    --root="${root}/server"
-  )
-  if [[ "${ACTIOND_E2E_STANDALONE:-0}" == "1" ]]; then
-    run_bazel build //cmd/linux_actiond:linux-actiond-standalone
-    server="$(bazel_output //cmd/linux_actiond:linux-actiond-standalone)"
-  else
-    run_bazel build //cmd/linux_actiond:linux-actiond
-    run_bazel build //runtimes:runtimes_squashfs
-    server="$(bazel_output //cmd/linux_actiond:linux-actiond)"
-    local runtimes
-    runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
-    server_args+=(--runtime-image="${runtimes}")
-  fi
-  local log="${root}/linux-actiond.log"
-
-  "${server}" serve "${server_args[@]}" >"${log}" 2>&1 &
-  e2e_server_pid="$!"
-  e2e_root="${root}"
-  e2e_log="${log}"
-  e2e_log_label="linux-actiond log"
-  trap 'cleanup_e2e_server $?' EXIT
-
-  wait_for_port "${e2e_host}" "${e2e_port}" 30
-  run_stress_workspace
-  cleanup_e2e_server 0
-  trap - EXIT
-}
-
 run_vm_e2e() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "vm e2e must run on macOS with Virtualization.framework" >&2
@@ -246,26 +187,8 @@ run_vm_e2e() {
     --cpus="${ACTIOND_VM_CPUS:-4}"
   )
 
-  if [[ "${ACTIOND_E2E_STANDALONE:-0}" == "1" ]]; then
-    run_bazel build //cmd/darwin-actiond
-    server="$(bazel_output //cmd/darwin-actiond)"
-  else
-    run_bazel build \
-      //cmd/darwin-actiond \
-      //vm:linux_kernel.image_zst \
-      //vm:initramfs_aarch64 \
-      //runtimes:runtimes_squashfs
-    local kernel initramfs runtimes
-    kernel="$(bazel_output //vm:linux_kernel.image_zst)"
-    initramfs="$(bazel_output //vm:initramfs_aarch64)"
-    runtimes="$(bazel_output //runtimes:runtimes_squashfs)"
-    server="$(bazel_output //cmd/darwin-actiond)"
-    server_args+=(
-      --kernel="${kernel}"
-      --initramfs="${initramfs}"
-      --runtime-image="${runtimes}"
-    )
-  fi
+  run_bazel build //cmd/darwin-actiond
+  server="$(bazel_output //cmd/darwin-actiond)"
   if [[ -n "${ACTIOND_E2E_ACTIONDFS_STATS_PATH:-}" ]]; then
     server_args+=(
       --actiondfs-stats-path="${ACTIOND_E2E_ACTIONDFS_STATS_PATH}"
@@ -289,19 +212,17 @@ case "${1:-}" in
   build)
     run_build_checks
     ;;
-  linux)
-    run_linux_e2e
-    ;;
   vm)
     run_vm_e2e
     ;;
   all)
     run_build_checks
-    case "$(uname -s)" in
-      Linux) run_linux_e2e ;;
-      Darwin) run_vm_e2e ;;
-      *) echo "no e2e mode for $(uname -s)" >&2 ;;
-    esac
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      run_vm_e2e
+    else
+      echo "tools/e2e.sh VM e2e requires macOS; use the PowerShell smoke on Windows" >&2
+      exit 1
+    fi
     ;;
   *)
     usage

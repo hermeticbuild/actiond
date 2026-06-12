@@ -49,7 +49,7 @@ pub fn execute(
         }
     }
 
-    var loaded_action = action_executor.loadAction(io, allocator, blob_store, action_digest, options) catch |err| {
+    var loaded_action = action_executor.loadAction(io, allocator, blob_store, action_digest) catch |err| {
         std.log.err("execute {s}/{d}: failed reading action: {s}", .{
             action_hex,
             action_digest.size_bytes,

@@ -13,6 +13,8 @@ if (-not $OutputDirectory) {
 }
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $ServerErrorLog = Join-Path $OutputDirectory "windows-actiond.err.log"
+$ServerOutputLog = Join-Path $OutputDirectory "windows-actiond.out.log"
+$ServerStateLog = Join-Path $OutputDirectory "windows-actiond.state.log"
 $ActiondBuildLog = Join-Path $OutputDirectory "llvm-tblgen-actiond.log"
 $HostBuildLog = Join-Path $OutputDirectory "llvm-tblgen-windows-host.log"
 $TimingSummary = Join-Path $OutputDirectory "windows-llvm-smoke-timings.md"
@@ -21,20 +23,12 @@ if ($Architecture -eq "arm64") {
     $GuestPlatform = "//platforms:linux_aarch64_musl"
     $LlvmPlatform = "@llvm//platforms:linux_arm64_musl"
     $ExecutionPlatform = "//e2e:actiond_linux_arm64_musl_exec"
-    $KernelTarget = "//vm:linux_kernel.image"
-    $KernelSuffix = ".Image"
-    $InitramfsTarget = "//vm:initramfs_aarch64"
-    $RuntimeTarget = "//runtimes:runtimes_squashfs_aarch64"
     $WindowsActiondTarget = "//cmd/windows-actiond:windows-actiond_windows_arm64"
     $WindowsActiondSuffix = "windows-actiond_windows_arm64.exe"
 } else {
     $GuestPlatform = "//platforms:linux_x86_64_musl"
     $LlvmPlatform = "@llvm//platforms:linux_x86_64_musl"
     $ExecutionPlatform = "//e2e:actiond_linux_x86_64_musl_exec"
-    $KernelTarget = "//vm:linux_kernel.vm_linux"
-    $KernelSuffix = ".vmlinux"
-    $InitramfsTarget = "//vm:initramfs_x86_64"
-    $RuntimeTarget = "//runtimes:runtimes_squashfs_x86_64"
     $WindowsActiondTarget = "//cmd/windows-actiond:windows-actiond_windows_x86_64"
     $WindowsActiondSuffix = "windows-actiond_windows_x86_64.exe"
 }
@@ -160,16 +154,12 @@ try {
         "--config=remote",
         "--remote_timeout=900",
         "--platforms=$GuestPlatform",
-        $WindowsActiondTarget,
-        $KernelTarget,
-        $InitramfsTarget,
-        $RuntimeTarget
+        $WindowsActiondTarget
     ) + $BuildBuddyBesArguments + $BuildBuddyRemoteArguments
     & bazel @BuildArguments
-    if ($LASTEXITCODE -ne 0) { throw "$Architecture windows-actiond artifacts failed to build" }
+    if ($LASTEXITCODE -ne 0) { throw "$Architecture windows-actiond failed to build" }
 
-    $CqueryExpression = "set($WindowsActiondTarget $KernelTarget $InitramfsTarget $RuntimeTarget)"
-    $CqueryResult = & bazel cquery $CqueryExpression --output=files --bes_backend= --noshow_progress `
+    $CqueryResult = & bazel cquery $WindowsActiondTarget --output=files --bes_backend= --noshow_progress `
         --config=remote "--platforms=$GuestPlatform" 2>&1
     if ($LASTEXITCODE -ne 0) { throw "bazel cquery failed: $CqueryResult" }
     $BazelFiles = @(
@@ -178,9 +168,6 @@ try {
             Where-Object { $_ -and -not $_.StartsWith("INFO:") }
     )
     $WindowsActiond = Get-BazelFile $BazelFiles $WindowsActiondSuffix
-    $Kernel = Get-BazelFile $BazelFiles $KernelSuffix
-    $Initramfs = Get-BazelFile $BazelFiles "initramfs.cpio.zst"
-    $RuntimeImage = Get-BazelFile $BazelFiles ".sqfs"
 
     if ($BuildOnly) {
         $ExecutableOutput = (& $WindowsActiond 2>&1 | Out-String).Trim()
@@ -194,7 +181,7 @@ try {
 - Revision: $Revision
 - Architecture: $Architecture
 - Windows executable: $WindowsActiondSuffix
-- Result: all artifacts built in one Bazel command and the Windows executable ran successfully
+- Result: the standalone Windows executable and its embedded VM artifacts built in one Bazel command and the executable ran successfully
 - Hyper-V VM: not run because -BuildOnly was specified
 "@
         Set-Content -Path $TimingSummary -Value $Summary
@@ -210,21 +197,36 @@ try {
         "serve-vm",
         "--listen=127.0.0.1:8998",
         "--root=$VmRoot",
-        "--kernel=$Kernel",
-        "--initramfs=$Initramfs",
-        "--runtime-image=$RuntimeImage",
         "--cas-image-size-mib=8192",
         "--memory-mib=8192",
         "--cpus=$VmCpus",
         "--connect-timeout-ms=900000"
     )
     $VmwpBaselineIds = @((Get-Process -Name "vmwp" -ErrorAction SilentlyContinue).Id)
+    $ServerStart = [DateTime]::UtcNow
     $Server = Start-Process -FilePath $WindowsActiond -ArgumentList $Arguments -NoNewWindow -PassThru `
-        -RedirectStandardError $ServerErrorLog
+        -RedirectStandardError $ServerErrorLog -RedirectStandardOutput $ServerOutputLog
 
     $Deadline = [DateTime]::UtcNow.AddMinutes(16)
     do {
-        if ($Server.HasExited) { throw "windows-actiond exited before accepting REAPI connections" }
+        if ($Server.HasExited) {
+            $Server.WaitForExit()
+            $ExitCodeHex = "0x{0:X8}" -f ($Server.ExitCode -band 0xffffffff)
+            $State = @(
+                "exit_code=$($Server.ExitCode) ($ExitCodeHex)",
+                "lifetime_seconds=$(([DateTime]::UtcNow - $ServerStart).TotalSeconds)",
+                "stdout:",
+                $(if (Test-Path $ServerOutputLog) { Get-Content -Raw $ServerOutputLog } else { "<missing>" }),
+                "stderr:",
+                $(if (Test-Path $ServerErrorLog) { Get-Content -Raw $ServerErrorLog } else { "<missing>" }),
+                "VM root files:",
+                $((Get-ChildItem -Recurse -Force $VmRoot -ErrorAction SilentlyContinue | ForEach-Object {
+                    if ($_.PSIsContainer) { "directory $($_.FullName)" } else { "file $($_.Length) $($_.FullName)" }
+                }) -join "`n")
+            ) -join "`n"
+            Set-Content -Path $ServerStateLog -Value $State
+            throw "windows-actiond exited before accepting REAPI connections: $($Server.ExitCode) ($ExitCodeHex)"
+        }
         if ((Test-Path $ServerErrorLog) -and
             ((Get-Content -Raw $ServerErrorLog) -match "gRPC bridge listening on 127\.0\.0\.1:8998")) {
             break
