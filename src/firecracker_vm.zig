@@ -283,18 +283,17 @@ fn buildConfiguration(
     if (memory_mib == 0) return error.InvalidMemorySize;
     if (cpu_count == 0) return error.InvalidCpuCount;
     const format_argument = if (format_cas_image) " actiond.format_cas=1" else "";
-    // TODO: Firecracker's Async block I/O engine remains developer preview; verify it when Firecracker changes the stability guarantee.
     return std.fmt.allocPrint(allocator,
         \\{{
         \\  "boot-source": {{
         \\    "kernel_image_path": {f},
         \\    "initrd_path": {f},
-        \\    "boot_args": "init=/init console=ttyS0 reboot=k panic=-1 nomodule swiotlb=noforce actiond.cas_device=/dev/vda{s}"
+        \\    "boot_args": "init=/init console=ttyS0 reboot=k panic=-1 nomodule swiotlb=noforce actiond.cas_device=/dev/pmem0 actiond.cas_dax=1{s}"
         \\  }},
         \\  "drives": [
-        \\    {{"drive_id":"cas","partuuid":null,"is_root_device":false,"cache_type":"Unsafe","is_read_only":false,"path_on_host":{f},"rate_limiter":null,"io_engine":"Async","socket":null}},
         \\    {{"drive_id":"runtimes","partuuid":null,"is_root_device":false,"cache_type":"Unsafe","is_read_only":true,"path_on_host":{f},"rate_limiter":null,"io_engine":"Sync","socket":null}}
         \\  ],
+        \\  "pmem": [{{"id":"cas","path_on_host":{f},"root_device":false,"read_only":false,"rate_limiter":null}}],
         \\  "machine-config": {{"vcpu_count":{d},"mem_size_mib":{d},"smt":false,"track_dirty_pages":false,"huge_pages":"None"}},
         \\  "vsock": {{"guest_cid":{d},"uds_path":{f}}}
         \\}}
@@ -302,8 +301,8 @@ fn buildConfiguration(
         std.json.fmt(kernel_path, .{}),
         std.json.fmt(initramfs_path, .{}),
         format_argument,
-        std.json.fmt(cas_image_path, .{}),
         std.json.fmt(runtime_image_path, .{}),
+        std.json.fmt(cas_image_path, .{}),
         cpu_count,
         memory_mib,
         guest_cid,
@@ -462,14 +461,14 @@ fn closeFd(fd: std.posix.fd_t) void {
     };
 }
 
-test "Firecracker configuration preserves drive order" {
+test "Firecracker configuration uses pmem for the CAS" {
     const configuration = try buildConfiguration(std.testing.allocator, "/proc/self/fd/4", "/proc/self/fd/5", "/proc/self/fd/6", "/tmp/cas.ext4", "/tmp/firecracker.vsock", true, 1024, 4, 3);
     defer std.testing.allocator.free(configuration);
-    const cas = std.mem.indexOf(u8, configuration, "\"drive_id\":\"cas\"").?;
-    const runtimes = std.mem.indexOf(u8, configuration, "\"drive_id\":\"runtimes\"").?;
-    try std.testing.expect(cas < runtimes);
-    try std.testing.expect(std.mem.indexOf(u8, configuration, "actiond.cas_device=/dev/vda actiond.format_cas=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, configuration, "\"io_engine\":\"Async\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, configuration, "\"drive_id\":\"cas\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, configuration, "\"drive_id\":\"runtimes\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, configuration, "\"pmem\": [{\"id\":\"cas\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, configuration, "actiond.cas_device=/dev/pmem0 actiond.cas_dax=1 actiond.format_cas=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, configuration, "\"io_engine\":\"Sync\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, configuration, "pci=off") == null);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, configuration, .{});
     defer parsed.deinit();

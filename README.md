@@ -65,8 +65,8 @@ The Linux ARM64 and x86_64 releases embed Firecracker 1.16.0, the matching
 kernel, the compressed initramfs, and the runtime SquashFS. `linux-actiond`
 passes those read-only files to Firecracker through sealed memfds and executes
 Firecracker with `execveat`; none of them is extracted to disk. The writable
-CAS remains a persistent ext4 disk image under `--root`. Firecracker requires
-KVM:
+CAS remains a persistent ext4 disk image under `--root` and is exposed through
+PCI virtio-pmem with ext4 DAX. Firecracker requires KVM:
 
 ```bash
 test -r /dev/kvm -a -w /dev/kvm

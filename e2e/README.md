@@ -21,9 +21,11 @@ Start `darwin-actiond serve-vm` on `127.0.0.1:8998` before running it. The
 script runs `bazel clean --expunge` by default so a fresh worker CAS gets a full
 upload.
 
-VM mode expects a writable ext4 CAS image attached as virtio-blk. `serve-vm`
-creates a sparse image when the configured path is missing, and the guest
-formats that newly-created image before mounting it. Set
+VM mode expects a writable ext4 CAS image. Firecracker exposes the image as PCI
+virtio-pmem and mounts it with ext4 DAX; the macOS and Windows hosts use their
+native virtual block devices. `serve-vm`
+creates a sparse image when the configured path is missing, and the guest formats
+that newly-created image before mounting it. Set
 `ACTIOND_VM_CAS_IMAGE=/path/cas.ext4` to reuse a persistent image, and
 `ACTIOND_VM_CAS_IMAGE_SIZE_MIB=8192` to override the default sparse size.
 Existing images are never reformatted automatically.

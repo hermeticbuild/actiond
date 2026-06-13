@@ -161,6 +161,11 @@ setup_server() {
   server_ready_ns="$(date +%s%N)"
   server_startup_elapsed="$(awk -v start="${server_start_ns}" -v end="${server_ready_ns}" 'BEGIN { printf "%.3f", (end - start) / 1000000000 }')"
 
+  if ! grep -Fq "EXT4-fs (pmem0): mounted filesystem" "${server_log}"; then
+    echo "Firecracker guest did not mount /dev/pmem0 with ext4 DAX" >&2
+    return 1
+  fi
+
   mapfile -t server_files < <(find "${server_root}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
   if [[ "${server_files[*]}" != "cas.ext4 firecracker.vsock" ]]; then
     echo "unexpected files under ${server_root}: ${server_files[*]}" >&2
@@ -342,7 +347,7 @@ cat >"${summary_path}" <<EOF
 - Host architecture: \`${architecture}\`
 - Build mode: \`-c opt --strip=always --stripopt=--strip-all\`
 - Jobs: ${jobs_label}
-- VM: Firecracker with KVM and PCI, CPUs=${vm_cpus}, memory=${vm_memory_mib} MiB
+- VM: Firecracker with KVM, PCI virtio-pmem, and ext4 DAX; CPUs=${vm_cpus}, memory=${vm_memory_mib} MiB
 - VM startup to gRPC readiness: ${server_startup_elapsed}s
 - Comparison: actiond uses Linux ${architecture} musl tools in Firecracker; the Linux host runs the same tools natively. This is an end-to-end comparison, not an executor-only comparison.
 

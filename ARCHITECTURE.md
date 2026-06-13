@@ -35,7 +35,8 @@ Hyper-V synthetic SCSI, and `AF_HYPERV`. Guest AF_VSOCK port 5001 maps to the
 standard Hyper-V socket service GUID template. The Windows guest matches the
 ARM64 or x86_64 host architecture; the macOS guest is ARM64. On Linux,
 `linux-actiond` uses Firecracker with KVM and PCI on ARM64 and x86_64.
-Firecracker exposes the CAS and runtime images as virtio PCI block devices.
+Firecracker exposes the CAS image as PCI virtio-pmem and mounts it with ext4
+DAX. Firecracker exposes the runtime image as a virtio PCI block device.
 Firecracker exposes guest vsock connections through a host Unix socket.
 
 In VM mode, the host does not keep a second CAS mirror. Uploads, downloads,
@@ -61,9 +62,12 @@ matching Linux kernel, compressed initramfs, runtime SquashFS, and Firecracker
 executable built from the pinned Firecracker 1.16.0 source. `linux-actiond`
 writes each embedded file to a sealed memfd, generates the Firecracker config
 in another sealed memfd, and executes Firecracker with `execveat`. The writable
-CAS is the only disk-backed VM image. Firecracker uses KVM and PCI. The CAS
-drive uses Firecracker's Async block I/O engine; the read-only runtime memfd
-uses the Sync block I/O engine.
+CAS is the only disk-backed VM image. Firecracker uses KVM and PCI. PCI
+virtio-pmem maps the CAS image into guest physical memory, and ext4 DAX avoids
+the guest page cache. The read-only runtime memfd uses Firecracker's Sync block
+I/O engine. The ext4 DAX mount uses `nobarrier` to retain the previous
+Firecracker `Unsafe` virtio-block persistence semantics: the CAS persists across
+normal restarts but is not guaranteed durable across host failure.
 
 `linux-actiond-guest` lives in the initramfs. It runs as guest init, mounts the
 minimal guest filesystems, mounts `/cas` and `/runtimes`, then execs itself as

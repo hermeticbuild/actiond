@@ -3,6 +3,8 @@ const std = @import("std");
 const firecracker_vm = @import("firecracker_vm.zig");
 const vm_host = @import("vm_host.zig");
 
+const pmem_alignment_bytes = 2 * 1024 * 1024;
+
 pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -20,7 +22,10 @@ pub fn serve(
         null;
     defer if (owned_cas_image_path) |path| allocator.free(path);
     const cas_image_path = options.cas_image orelse owned_cas_image_path.?;
+    if (options.cas_image_size_mib % 2 != 0) return error.InvalidCasImage;
     const format_cas_image = try vm_host.ensureCasImageFile(io, cas_image_path, options.cas_image_size_mib);
+    const cas_image_stat = try std.Io.Dir.cwd().statFile(io, cas_image_path, .{});
+    try validatePmemImageSize(cas_image_stat.size);
     const absolute_cas_image_path = try vm_host.absolutePath(io, allocator, cas_image_path);
     defer allocator.free(absolute_cas_image_path);
 
@@ -50,4 +55,15 @@ pub fn serve(
 
     std.log.info("actiond Firecracker VM started; proxying gRPC to linux-actiond-guest", .{});
     return vm_host.serveGrpcBridge(io, allocator, options, &machine);
+}
+
+fn validatePmemImageSize(size: u64) !void {
+    if (size == 0 or size % pmem_alignment_bytes != 0) return error.InvalidCasImage;
+}
+
+test "Firecracker pmem images require 2 MiB alignment" {
+    try validatePmemImageSize(pmem_alignment_bytes);
+    try validatePmemImageSize(8 * 1024 * 1024);
+    try std.testing.expectError(error.InvalidCasImage, validatePmemImageSize(0));
+    try std.testing.expectError(error.InvalidCasImage, validatePmemImageSize(3 * 1024 * 1024));
 }
