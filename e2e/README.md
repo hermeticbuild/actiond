@@ -116,5 +116,6 @@ counts, and the actiond-to-host ratio:
 e2e/run_llvm_linux_vm_smoke.sh
 ```
 
-The actiond result includes QEMU TCG overhead and is an end-to-end comparison,
-not an executor-only measurement.
+The actiond result includes QEMU KVM overhead and is an end-to-end comparison,
+not an executor-only measurement. GitHub's hosted ARM64 runner does not expose
+KVM, so CI builds the Linux ARM64 release and runs this comparison on x86_64.

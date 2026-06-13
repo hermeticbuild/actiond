@@ -176,6 +176,14 @@ run_vm_e2e() {
       server_name="darwin-actiond"
       ;;
     Linux)
+      if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+        echo "Linux VM e2e requires read/write access to /dev/kvm" >&2
+        return 1
+      fi
+      if [[ ! -c /dev/vhost-vsock || ! -r /dev/vhost-vsock || ! -w /dev/vhost-vsock ]]; then
+        echo "Linux VM e2e requires read/write access to /dev/vhost-vsock" >&2
+        return 1
+      fi
       case "$(uname -m)" in
         aarch64|arm64)
           architecture="aarch64"

@@ -65,9 +65,12 @@ The Linux releases embed the matching QEMU executable from `rules_qemu`. The
 x86_64 release also embeds `qboot.rom`. `linux-actiond` passes QEMU, the Linux
 kernel, the initramfs, the runtime SquashFS, and `qboot.rom` through sealed
 memfds. The guest-owned CAS remains a persistent ext4 file under `--root`. The
-current implementation uses TCG and requires `/dev/vhost-vsock`:
+QEMU process uses KVM, host CPU passthrough, and `io_uring` for the CAS file.
+The host kernel must support `io_uring`. `linux-actiond` requires read/write
+access to `/dev/kvm` and `/dev/vhost-vsock`:
 
 ```bash
+test -r /dev/kvm -a -w /dev/kvm
 sudo modprobe vhost_vsock
 ./linux-actiond_linux_x86_64 serve-vm \
   --listen=127.0.0.1:8980 \

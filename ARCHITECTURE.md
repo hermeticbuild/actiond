@@ -61,8 +61,9 @@ by the `rules_qemu` target toolchain. The x86_64 release also includes
 `qboot.rom`; QEMU `virt` direct kernel boot on ARM64 does not require firmware.
 `linux-actiond` creates sealed memfds for QEMU and every immutable embedded VM
 artifact, then executes QEMU with `execveat`. Only the persistent guest-owned
-CAS image is stored under `--root`. The current implementation uses TCG. KVM
-and `io_uring` remain follow-up work.
+CAS image is stored under `--root`. QEMU uses KVM and host CPU passthrough. The
+persistent CAS image uses `cache=none`, `aio=io_uring`, one IOThread, and one
+virtio-blk queue per vCPU up to four queues.
 
 `linux-actiond-guest` lives in the initramfs. It runs as guest init, mounts the
 minimal guest filesystems, mounts `/cas` and `/runtimes`, then execs itself as

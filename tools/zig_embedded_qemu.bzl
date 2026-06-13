@@ -11,7 +11,6 @@ def _zig_embedded_qemu_source_impl(ctx):
     lines = [
         'pub const qemu_system = @embedFile("{}");'.format(qemu_system.basename),
         'pub const qemu_system_name = "{}";'.format(qemu.qemu_system.basename),
-        'pub const accel = "{}";'.format(qemu.accel),
         'pub const machine = "{}";'.format(qemu.machine),
         'pub const target_arch = "{}";'.format(qemu.target_arch),
     ]

@@ -32,6 +32,14 @@ if [[ "$#" -gt 1 ]]; then
   echo "usage: e2e/run_llvm_linux_vm_smoke.sh [output-directory]" >&2
   exit 1
 fi
+if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+  echo "Linux LLVM VM smoke requires read/write access to /dev/kvm" >&2
+  exit 1
+fi
+if [[ ! -c /dev/vhost-vsock || ! -r /dev/vhost-vsock || ! -w /dev/vhost-vsock ]]; then
+  echo "Linux LLVM VM smoke requires read/write access to /dev/vhost-vsock" >&2
+  exit 1
+fi
 output_root="${1:-${ACTIOND_LLVM_LINUX_SMOKE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/actiond-linux-llvm.XXXXXX")}}"
 target="${ACTIOND_LLVM_SMOKE_TARGET:-@llvm-project//llvm:llvm-tblgen}"
 warmup_target="${ACTIOND_LLVM_SMOKE_WARMUP_TARGET-//e2e:llvm_exec_warmup}"
@@ -337,7 +345,7 @@ cat >"${summary_path}" <<EOF
 - Host architecture: \`${architecture}\`
 - Build mode: \`-c opt --strip=always --stripopt=--strip-all\`
 - Jobs: ${jobs_label}
-- VM: ${qemu_machine} with TCG, CPUs=${vm_cpus}, memory=${vm_memory_mib} MiB
+- VM: ${qemu_machine} with KVM, host CPU passthrough, CAS aio=io_uring, CPUs=${vm_cpus}, memory=${vm_memory_mib} MiB
 - VM startup to gRPC readiness: ${server_startup_elapsed}s
 - Comparison: actiond uses Linux ${architecture} musl tools in QEMU; the Linux host runs the same tools natively. This is an end-to-end comparison, not an executor-only comparison.
 

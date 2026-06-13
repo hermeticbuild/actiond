@@ -40,7 +40,6 @@ pub fn serve(
     });
     var machine = try qemu_vm.Machine.start(io, allocator, .{
         .qemu_system_name = embedded_qemu.qemu_system_name,
-        .accel = embedded_qemu.accel,
         .machine = embedded_qemu.machine,
         .target_arch = embedded_qemu.target_arch,
         .kernel_path = prepared.boot_kernel_path,

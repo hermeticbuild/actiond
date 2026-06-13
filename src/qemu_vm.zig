@@ -5,6 +5,8 @@ const vsock = @import("vsock.zig");
 
 const linux = std.os.linux;
 const mfd_exec = 0x0010;
+const max_vcpus = 64;
+const max_cas_queues = 4;
 
 pub const fexec_argument = "--actiond-internal-fexec-qemu";
 pub const embedded_kernel_path = "actiond-internal-embedded-kernel";
@@ -14,7 +16,6 @@ pub const embedded_firmware_path = "actiond-internal-embedded-firmware";
 
 pub const Options = struct {
     qemu_system_name: []const u8,
-    accel: []const u8,
     machine: []const u8,
     target_arch: []const u8,
     kernel_path: []const u8,
@@ -43,25 +44,26 @@ pub const Machine = struct {
             return error.UnsupportedHost;
         }
         if (!std.mem.eql(u8, options.target_arch, @tagName(builtin.cpu.arch))) return error.UnsupportedHost;
+        if (options.cpu_count == 0 or options.cpu_count > max_vcpus or options.memory_mib == 0) return error.InvalidVmConfiguration;
 
+        const accelerator = if (std.mem.eql(u8, options.target_arch, "x86_64")) "kvm,kernel-irqchip=on" else "kvm";
+        const cas_queue_count = @min(options.cpu_count, max_cas_queues);
         const guest_cid = options.guest_cid orelse try randomGuestCid(io);
         const memory = try std.fmt.allocPrint(allocator, "{d}M", .{options.memory_mib});
         defer allocator.free(memory);
-        const cpus = try std.fmt.allocPrint(allocator, "{d}", .{options.cpu_count});
-        defer allocator.free(cpus);
+        const smp = try std.fmt.allocPrint(allocator, "cpus={d},sockets=1,cores={d},threads=1", .{ options.cpu_count, options.cpu_count });
+        defer allocator.free(smp);
         const vsock_device = try std.fmt.allocPrint(allocator, "vhost-vsock-device,id=vsock0,guest-cid={d}", .{guest_cid});
         defer allocator.free(vsock_device);
-        const cas_drive = try driveArg(allocator, "cas", options.cas_image_path, false, .none);
+        const cas_drive = try driveArg(allocator, "cas", options.cas_image_path, false, .none, .io_uring);
         defer allocator.free(cas_drive);
-        const runtime_drive = try driveArg(allocator, "runtimes", options.runtime_image_path, true, .writeback);
+        const cas_device = try std.fmt.allocPrint(allocator, "virtio-blk-device,drive=cas,iothread=cas-io,num-queues={d}", .{cas_queue_count});
+        defer allocator.free(cas_device);
+        const runtime_drive = try driveArg(allocator, "runtimes", options.runtime_image_path, true, .writeback, .threads);
         defer allocator.free(runtime_drive);
         const kernel_append = try kernelAppendArg(allocator, options.target_arch, options.format_cas_image);
         defer allocator.free(kernel_append);
-        const machine_option = try std.fmt.allocPrint(allocator, "{s},accel={s}", .{ options.machine, options.accel });
-        defer allocator.free(machine_option);
 
-        // TODO: Use KVM after the rules_qemu QEMU prebuilt is verified with
-        // /dev/kvm on the Linux runner.
         var argv: std.ArrayListUnmanaged([]const u8) = .empty;
         defer argv.deinit(allocator);
         try argv.appendSlice(allocator, &.{
@@ -69,16 +71,18 @@ pub const Machine = struct {
             fexec_argument,
             options.qemu_system_name,
             "-machine",
-            machine_option,
+            options.machine,
+            "-accel",
+            accelerator,
             "-cpu",
-            "max",
+            "host",
         });
         if (options.firmware_path) |path| {
             try argv.appendSlice(allocator, &.{ "-bios", path });
         }
         try argv.appendSlice(allocator, &.{
             "-smp",
-            cpus,
+            smp,
             "-m",
             memory,
             "-no-user-config",
@@ -98,17 +102,23 @@ pub const Machine = struct {
             kernel_append,
             "-device",
             vsock_device,
+            "-object",
+            "iothread,id=cas-io",
             "-drive",
             cas_drive,
             "-device",
-            "virtio-blk-device,drive=cas",
+            cas_device,
             "-drive",
             runtime_drive,
             "-device",
             "virtio-blk-device,drive=runtimes",
         });
 
-        std.log.info("starting embedded {s} guest_cid={d}", .{ options.qemu_system_name, guest_cid });
+        std.log.info("starting embedded {s} with KVM and io_uring guest_cid={d} vcpus={d}", .{
+            options.qemu_system_name,
+            guest_cid,
+            options.cpu_count,
+        });
         var child = try std.process.spawn(io, .{
             .argv = argv.items,
             .stdin = .ignore,
@@ -322,6 +332,7 @@ fn createSealedMemfd(io: std.Io, name: []const u8, bytes: []const u8) !std.posix
 }
 
 const DriveCache = enum { none, writeback };
+const DriveAio = enum { io_uring, threads };
 
 fn driveArg(
     allocator: std.mem.Allocator,
@@ -329,17 +340,17 @@ fn driveArg(
     path: []const u8,
     readonly: bool,
     cache: DriveCache,
+    aio: DriveAio,
 ) ![]u8 {
     const readonly_arg = if (readonly) ",readonly=on" else "";
     const escaped_path = try escapeDriveValue(allocator, path);
     defer allocator.free(escaped_path);
-    // TODO: Add aio=io_uring after the rules_qemu QEMU prebuilt and Linux
-    // runner are verified with io_uring.
-    return std.fmt.allocPrint(allocator, "if=none,id={s},file={s},format=raw{s},cache={s}", .{
+    return std.fmt.allocPrint(allocator, "if=none,id={s},file={s},format=raw{s},cache={s},aio={s}", .{
         id,
         escaped_path,
         readonly_arg,
         @tagName(cache),
+        @tagName(aio),
     });
 }
 
@@ -431,10 +442,10 @@ fn closeFd(fd: std.posix.fd_t) void {
     };
 }
 
-test "driveArg leaves io_uring disabled" {
-    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/cas.ext4", false, .none);
+test "driveArg uses io_uring for the CAS image" {
+    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/cas.ext4", false, .none, .io_uring);
     defer std.testing.allocator.free(drive);
-    try std.testing.expectEqualStrings("if=none,id=cas,file=/tmp/cas.ext4,format=raw,cache=none", drive);
+    try std.testing.expectEqualStrings("if=none,id=cas,file=/tmp/cas.ext4,format=raw,cache=none,aio=io_uring", drive);
 }
 
 test "embedded asset arguments select embedded bytes" {
@@ -468,16 +479,16 @@ test "embedded asset arguments select embedded bytes" {
 }
 
 test "driveArg escapes commas in paths" {
-    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/actiond,vm/cas.ext4", false, .none);
+    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/actiond,vm/cas.ext4", false, .none, .io_uring);
     defer std.testing.allocator.free(drive);
-    try std.testing.expectEqualStrings("if=none,id=cas,file=/tmp/actiond,,vm/cas.ext4,format=raw,cache=none", drive);
+    try std.testing.expectEqualStrings("if=none,id=cas,file=/tmp/actiond,,vm/cas.ext4,format=raw,cache=none,aio=io_uring", drive);
 }
 
 test "driveArg uses buffered I/O for a read-only memfd" {
-    const drive = try driveArg(std.testing.allocator, "runtimes", "/proc/self/fd/7", true, .writeback);
+    const drive = try driveArg(std.testing.allocator, "runtimes", "/proc/self/fd/7", true, .writeback, .threads);
     defer std.testing.allocator.free(drive);
     try std.testing.expectEqualStrings(
-        "if=none,id=runtimes,file=/proc/self/fd/7,format=raw,readonly=on,cache=writeback",
+        "if=none,id=runtimes,file=/proc/self/fd/7,format=raw,readonly=on,cache=writeback,aio=threads",
         drive,
     );
 }
