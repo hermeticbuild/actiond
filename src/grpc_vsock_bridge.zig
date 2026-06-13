@@ -1,5 +1,4 @@
 const std = @import("std");
-const darwin_vm = @import("darwin_vm.zig");
 const vsock = @import("vsock.zig");
 
 pub const Error = error{
@@ -22,9 +21,9 @@ const PumpStats = struct {
 pub fn serve(
     io: std.Io,
     listen: []const u8,
-    machine: *darwin_vm.Machine,
+    machine: anytype,
 ) !void {
-    if (comptime @import("builtin").os.tag != .macos) return error.UnsupportedHost;
+    if (comptime @import("builtin").os.tag != .macos and @import("builtin").os.tag != .linux) return error.UnsupportedHost;
 
     const address = try parseListenAddress(listen);
     var listener = try address.listen(io, .{ .reuse_address = true });
@@ -32,6 +31,11 @@ pub fn serve(
 
     var connections: std.Io.Group = .init;
     defer connections.cancel(io);
+    const ConnectionTask = struct {
+        fn run(task_io: std.Io, task_machine: @TypeOf(machine), client_fd: std.posix.fd_t) void {
+            connectionTask(task_io, task_machine, client_fd);
+        }
+    };
 
     std.log.info("actiond VM raw gRPC bridge listening on {s} -> vsock:{d}", .{ listen, vsock.grpc_port });
     while (true) {
@@ -45,7 +49,7 @@ pub fn serve(
         setTcpNoDelay(client_fd) catch |err| {
             std.log.debug("raw gRPC bridge TCP_NODELAY failed: {s}", .{@errorName(err)});
         };
-        connections.concurrent(io, connectionTask, .{ io, machine, client_fd }) catch |err| {
+        connections.concurrent(io, ConnectionTask.run, .{ io, machine, client_fd }) catch |err| {
             accepted.close(io);
             std.log.err("raw gRPC bridge connection task failed: {s}", .{@errorName(err)});
             sleepMilliseconds(io, 10);
@@ -54,7 +58,7 @@ pub fn serve(
     }
 }
 
-fn connectionTask(io: std.Io, machine: *darwin_vm.Machine, client_fd: std.posix.fd_t) void {
+fn connectionTask(io: std.Io, machine: anytype, client_fd: std.posix.fd_t) void {
     defer closeFd(client_fd);
     const started = std.Io.Clock.awake.now(io);
 

@@ -9,12 +9,13 @@ bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "rules_cc", version = "0.2.18")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "llvm", version = "0.8.1")
+bazel_dep(name = "llvm", version = "0.8.3")
 bazel_dep(name = "linux.bzl", version = "0.0.3")
 bazel_dep(name = "squashfs-tools", version = "4.7.5")
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
 bazel_dep(name = "codesign.bzl", version = "0.0.13")
 bazel_dep(name = "gawk", version = "5.3.2.bcr.3")
+bazel_dep(name = "rules_rs", version = "0.0.86")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
@@ -24,6 +25,27 @@ http_archive(
     sha256 = "fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b",
     strip_prefix = "e2fsprogs-1.47.4",
     urls = ["https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.xz"],
+)
+
+http_archive(
+    name = "firecracker",
+    build_file = "//third_party/firecracker:firecracker.BUILD.bazel",
+    patch_args = ["-p1"],
+    patches = [
+        "//third_party/firecracker:firecracker_build_paths.patch",
+        "//third_party/firecracker:firecracker_no_uffd.patch",
+    ],
+    sha256 = "70d800f6b5d5f380f12d16fbfccf7ec19e77fb13335d529b12e1a01b4d30b4bb",
+    strip_prefix = "firecracker-1.16.0",
+    urls = ["https://github.com/firecracker-microvm/firecracker/archive/refs/tags/v1.16.0.tar.gz"],
+)
+
+http_archive(
+    name = "libseccomp",
+    build_file = "//third_party/libseccomp:libseccomp.BUILD.bazel",
+    sha256 = "83b6085232d1588c379dc9b9cae47bb37407cf262e6e74993c61ba72d2a784dc",
+    strip_prefix = "libseccomp-2.6.0",
+    urls = ["https://github.com/seccomp/libseccomp/releases/download/v2.6.0/libseccomp-2.6.0.tar.gz"],
 )
 
 archive_override(
@@ -37,7 +59,7 @@ single_version_override(
     module_name = "llvm",
     patch_strip = 1,
     patches = ["//third_party/patches:llvm_musl_root_package_copy.patch"],
-    version = "0.8.1",
+    version = "0.8.3",
 )
 
 single_version_override(
@@ -54,7 +76,43 @@ use_repo(zig, "zig_toolchains")
 register_toolchains("@zig_toolchains//:all")
 
 register_toolchains("@llvm//toolchain:all")
+
 register_toolchains("@codesign.bzl//toolchain:all")
+
+rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
+use_repo(rules_rust, "rules_rust")
+
+rust_toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
+rust_toolchains.toolchain(
+    edition = "2024",
+    version = "1.95.0",
+)
+use_repo(rust_toolchains, "default_rust_toolchains")
+
+register_toolchains("@default_rust_toolchains//:all")
+
+crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "firecracker_crates",
+    cargo_lock = "@firecracker//:Cargo.lock",
+    cargo_toml = "@firecracker//:Cargo.toml",
+    platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+    ],
+)
+crate.annotation(
+    build_script_env = {
+        "AWS_LC_SYS_CMAKE_BUILDER": "0",
+        "AWS_LC_SYS_CFLAGS": "-DMY_ASSEMBLER_IS_TOO_OLD_FOR_512AVX",
+        "AWS_LC_SYS_NO_JITTER_ENTROPY": "1",
+    },
+    crate = "aws-lc-sys",
+    gen_build_script = "on",
+)
 
 osx = use_extension("@llvm//extensions:osx.bzl", "osx")
 osx.frameworks(names = [
@@ -92,6 +150,8 @@ llvm_project.configure(
     ],
 )
 use_repo(llvm_project, "llvm-project")
+
+use_repo(crate, "firecracker_crates")
 
 linux_kernel = use_extension("@linux.bzl//:linux.bzl", "linux_kernel")
 linux_kernel.archive(
@@ -145,6 +205,7 @@ use_repo(
 )
 
 glibc_deb_runtime = use_repo_rule("//runtimes:glibc_runtime_repo.bzl", "glibc_deb_runtime")
+
 shell_deb_runtime = use_repo_rule("//runtimes:shell_runtime_repo.bzl", "shell_deb_runtime")
 
 glibc_deb_runtime(
@@ -159,24 +220,24 @@ glibc_deb_runtime(
 shell_deb_runtime(
     name = "bash_5_1_aarch64",
     arch = "aarch64",
+    sha256s = [
+        "57d782072eb479272f763c60b1a92956b05ef26583f78fcd35ab6ef6efccd926",
+    ],
     shell = "bash",
     urls = [
         "https://ports.ubuntu.com/ubuntu-ports/pool/universe/b/bash/bash-static_5.1-6ubuntu1_arm64.deb",
-    ],
-    sha256s = [
-        "57d782072eb479272f763c60b1a92956b05ef26583f78fcd35ab6ef6efccd926",
     ],
 )
 
 shell_deb_runtime(
     name = "bash_5_1_x86_64",
     arch = "x86_64",
+    sha256s = [
+        "bacca4af0f72b83ebb9563b3adc28ceaf6ae019977900b999fcdbc240dca890a",
+    ],
     shell = "bash",
     urls = [
         "https://archive.ubuntu.com/ubuntu/pool/universe/b/bash/bash-static_5.1-6ubuntu1_amd64.deb",
-    ],
-    sha256s = [
-        "bacca4af0f72b83ebb9563b3adc28ceaf6ae019977900b999fcdbc240dca890a",
     ],
 )
 

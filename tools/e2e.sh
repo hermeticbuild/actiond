@@ -10,7 +10,7 @@ usage: tools/e2e.sh <build|vm|all>
 
 Modes:
   build   Run repository build/test checks and build the stress action tools.
-  vm      Start darwin-actiond serve-vm and run test/ via Bazel remote execution.
+  vm      Start the host actiond VM and run test/ via Bazel remote execution.
   all     Run build plus the host-appropriate e2e mode when configured.
 
 Environment:
@@ -118,6 +118,10 @@ wait_for_port() {
     if (echo >"/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
       return 0
     fi
+    if [[ -n "${e2e_server_pid}" ]] && ! kill -0 "${e2e_server_pid}" >/dev/null 2>&1; then
+      echo "${e2e_log_label} exited before ${host}:${port} became ready" >&2
+      return 1
+    fi
     if (( "$(date +%s)" - start >= timeout )); then
       echo "timed out waiting for ${host}:${port}" >&2
       return 1
@@ -164,18 +168,43 @@ run_build_checks() {
 }
 
 run_vm_e2e() {
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "vm e2e must run on macOS with Virtualization.framework" >&2
-    return 1
-  fi
+  local architecture server_label server_name
+  case "$(uname -s)" in
+    Darwin)
+      architecture="aarch64"
+      server_label="//cmd/darwin-actiond"
+      server_name="darwin-actiond"
+      ;;
+    Linux)
+      case "$(uname -m)" in
+        aarch64|arm64)
+          architecture="aarch64"
+          server_label="//cmd/linux-actiond:linux-actiond_linux_arm64"
+          ;;
+        x86_64)
+          architecture="x86_64"
+          server_label="//cmd/linux-actiond:linux-actiond_linux_x86_64"
+          ;;
+        *)
+          echo "Firecracker VM e2e does not support Linux architecture $(uname -m)" >&2
+          return 1
+          ;;
+      esac
+      server_name="linux-actiond"
+      ;;
+    *)
+      echo "VM e2e requires macOS or Linux" >&2
+      return 1
+      ;;
+  esac
 
-  prepare_stress_workspace aarch64
+  prepare_stress_workspace "${architecture}"
 
   local server root log
   local cas_image cas_image_size_mib
   local -a server_args
   root="$(mktemp -d "${TMPDIR:-/tmp}/actiond-vm-e2e.XXXXXX")"
-  log="${root}/darwin-actiond-vm.log"
+  log="${root}/${server_name}-vm.log"
   cas_image="${ACTIOND_VM_CAS_IMAGE:-${root}/server/cas.ext4}"
   cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
   server_args=(
@@ -187,8 +216,8 @@ run_vm_e2e() {
     --cpus="${ACTIOND_VM_CPUS:-4}"
   )
 
-  run_bazel build //cmd/darwin-actiond
-  server="$(bazel_output //cmd/darwin-actiond)"
+  run_bazel build "${server_label}"
+  server="$(bazel_output "${server_label}")"
   if [[ -n "${ACTIOND_E2E_ACTIONDFS_STATS_PATH:-}" ]]; then
     server_args+=(
       --actiondfs-stats-path="${ACTIOND_E2E_ACTIONDFS_STATS_PATH}"
@@ -199,10 +228,10 @@ run_vm_e2e() {
   e2e_server_pid="$!"
   e2e_root="${root}"
   e2e_log="${log}"
-  e2e_log_label="darwin-actiond VM log"
+  e2e_log_label="${server_name} VM log"
   trap 'cleanup_e2e_server $?' EXIT
 
-  wait_for_port "${e2e_host}" "${e2e_port}" 90
+  wait_for_port "${e2e_host}" "${e2e_port}" 180
   run_stress_workspace
   cleanup_e2e_server 0
   trap - EXIT
@@ -217,12 +246,7 @@ case "${1:-}" in
     ;;
   all)
     run_build_checks
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      run_vm_e2e
-    else
-      echo "tools/e2e.sh VM e2e requires macOS; use the PowerShell smoke on Windows" >&2
-      exit 1
-    fi
+    run_vm_e2e
     ;;
   *)
     usage

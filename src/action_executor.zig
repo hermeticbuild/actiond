@@ -50,7 +50,7 @@ pub const RuntimeMountCache = struct {
         self.glibc2_35.deinit(allocator);
         self.glibc2_39.deinit(allocator);
         self.bash.deinit(allocator);
-        self.* = .{};
+        self.* = undefined;
     }
 
     fn forLibc(self: *const RuntimeMountCache, libc: []const u8) ?*const RuntimeMountSources {

@@ -1,0 +1,5 @@
+exports_files([
+    "firecracker.BUILD.bazel",
+    "firecracker_build_paths.patch",
+    "firecracker_no_uffd.patch",
+])

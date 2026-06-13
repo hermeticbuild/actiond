@@ -21,9 +21,11 @@ Start `darwin-actiond serve-vm` on `127.0.0.1:8998` before running it. The
 script runs `bazel clean --expunge` by default so a fresh worker CAS gets a full
 upload.
 
-VM mode expects a writable ext4 CAS image attached as virtio-blk. `serve-vm`
-creates a sparse image when the configured path is missing, and the guest
-formats that newly-created image before mounting it. Set
+VM mode expects a writable ext4 CAS image. Firecracker exposes the image as PCI
+virtio-pmem and mounts it with ext4 DAX; the macOS and Windows hosts use their
+native virtual block devices. `serve-vm`
+creates a sparse image when the configured path is missing, and the guest formats
+that newly-created image before mounting it. Set
 `ACTIOND_VM_CAS_IMAGE=/path/cas.ext4` to reuse a persistent image, and
 `ACTIOND_VM_CAS_IMAGE_SIZE_MIB=8192` to override the default sparse size.
 Existing images are never reformatted automatically.
@@ -100,3 +102,23 @@ GitHub's `windows-11-arm` runner does not provide Hyper-V, so CI passes
 `-BuildOnly` there to build the standalone ARM64 `windows-actiond` executable
 in one Bazel command and run it. The x86_64 matrix entry runs the full Hyper-V
 LLVM comparison.
+
+## Linux Firecracker LLVM Smoke Runner
+
+`run_llvm_linux_vm_smoke.sh` builds `@llvm-project//llvm:llvm-tblgen` once
+through `linux-actiond` and once directly on the Linux ARM64 or x86_64 host.
+Both measurements use fresh Bazel output bases, the matching Linux musl target
+and host platforms, and `//e2e:llvm_exec_warmup` before the measured build. The
+runner stops Firecracker before the Linux-host measurement, passes no `--jobs` value
+by default, and requires equal total and executed process counts. It writes
+`linux-llvm-smoke-timings.md` with Bazel elapsed time, wall time, process
+counts, and the actiond-to-host ratio:
+
+```bash
+e2e/run_llvm_linux_vm_smoke.sh
+```
+
+The runner requires read/write access to `/dev/kvm`. The actiond result includes
+Firecracker and KVM overhead and is an end-to-end comparison, not an
+executor-only measurement. GitHub's ARM64 hosted runner does not expose KVM, so
+CI builds the ARM64 release and runs the full comparison only on x86_64.

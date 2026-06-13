@@ -1,9 +1,15 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const control_protocol = @import("control_protocol.zig");
+const control_transport_fd = @import("control_transport_fd.zig");
+const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
 const zstd_test = if (builtin.is_test) @import("c") else struct {};
 
 const max_compressed_initramfs_bytes = 128 * 1024 * 1024;
 const max_raw_initramfs_bytes = 512 * 1024 * 1024;
+const cas_image_probe_size = 4096;
+const ext4_magic_offset = 1024 + 56;
+const ext4_magic = [_]u8{ 0x53, 0xef };
 const max_compressed_kernel_bytes = 128 * 1024 * 1024;
 const max_raw_kernel_bytes = 512 * 1024 * 1024;
 const zstd_magic = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd };
@@ -24,6 +30,54 @@ pub const ResolvedAssets = struct {
         self.* = undefined;
     }
 };
+
+pub const PreparedVm = struct {
+    root_dir: std.Io.Dir,
+    assets: ResolvedAssets = .{},
+    cas_image_path: []const u8 = "",
+    owned_cas_image_path: ?[]u8 = null,
+    boot_kernel_path: []const u8 = "",
+    owned_boot_kernel_path: ?[]u8 = null,
+    boot_initramfs_path: []const u8 = "",
+    owned_boot_initramfs_path: ?[]u8 = null,
+    format_cas_image: bool = false,
+
+    pub fn deinit(self: *PreparedVm, io: std.Io, allocator: std.mem.Allocator) void {
+        if (self.owned_boot_initramfs_path) |path| allocator.free(path);
+        if (self.owned_boot_kernel_path) |path| allocator.free(path);
+        self.assets.deinit(allocator);
+        if (self.owned_cas_image_path) |path| allocator.free(path);
+        self.root_dir.close(io);
+        self.* = undefined;
+    }
+};
+
+pub fn prepareVm(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: ServeVmOptions,
+    comptime embedded_assets: type,
+) !PreparedVm {
+    var prepared: PreparedVm = .{
+        .root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{}),
+    };
+    errdefer prepared.deinit(io, allocator);
+
+    if (options.cas_image) |path| {
+        prepared.cas_image_path = path;
+    } else {
+        prepared.owned_cas_image_path = try std.fs.path.join(allocator, &.{ options.root, "cas.ext4" });
+        prepared.cas_image_path = prepared.owned_cas_image_path.?;
+    }
+    prepared.format_cas_image = try ensureCasImageFile(io, prepared.cas_image_path, options.cas_image_size_mib);
+
+    prepared.assets = try resolveAssets(io, allocator, prepared.root_dir, options, embedded_assets);
+    prepared.owned_boot_kernel_path = try prepareBootKernel(io, allocator, prepared.root_dir, prepared.assets.kernel);
+    prepared.boot_kernel_path = prepared.owned_boot_kernel_path orelse prepared.assets.kernel;
+    prepared.owned_boot_initramfs_path = try prepareBootInitramfs(io, allocator, prepared.root_dir, prepared.assets.initramfs);
+    prepared.boot_initramfs_path = prepared.owned_boot_initramfs_path orelse prepared.assets.initramfs;
+    return prepared;
+}
 
 pub fn resolveAssets(
     io: std.Io,
@@ -357,6 +411,91 @@ pub fn absoluteSubPath(
     return std.fs.path.join(allocator, &.{ root_buffer[0..root_len], sub_path });
 }
 
+pub fn ensureCasImageFile(io: std.Io, path: []const u8, size_mib: u64) !bool {
+    if (std.Io.Dir.cwd().statFile(io, path, .{})) |stat| {
+        if (stat.kind != .file) return error.InvalidCasImage;
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        var probe: [cas_image_probe_size]u8 = undefined;
+        if (try file.readPositionalAll(io, &probe, 0) != probe.len) return error.InvalidCasImage;
+        if (std.mem.eql(u8, probe[ext4_magic_offset..][0..ext4_magic.len], &ext4_magic)) return false;
+        for (probe) |byte| if (byte != 0) return error.InvalidCasImage;
+        return true;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    if (size_mib == 0) return error.InvalidCasImage;
+    try createParentDirs(io, path);
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    const size_bytes = try std.math.mul(u64, size_mib, 1024 * 1024);
+    try file.setLength(io, size_bytes);
+    return true;
+}
+
+pub fn serveGrpcBridge(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: ServeVmOptions,
+    machine: anytype,
+) !void {
+    var fd_client = control_transport_fd.Client{ .opener = machine.opener() };
+    defer fd_client.deinit(io);
+    var background_tasks: std.Io.Group = .init;
+    defer background_tasks.cancel(io);
+    if (options.actiondfs_stats_path) |path| {
+        const stats_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(stats_path);
+        try background_tasks.concurrent(io, actiondfsStatsTask, .{ io, allocator, &fd_client, stats_path });
+    }
+    return grpc_vsock_bridge.serve(io, options.listen, machine);
+}
+
+fn actiondfsStatsTask(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    client: *control_transport_fd.Client,
+    path: []const u8,
+) !void {
+    defer allocator.free(path);
+    while (true) {
+        writeActiondfsStatsSnapshot(io, allocator, client, path) catch |err| {
+            std.log.warn("actiondfs stats snapshot failed: {s}", .{@errorName(err)});
+        };
+        try io.sleep(.fromMilliseconds(1_000), .awake);
+    }
+}
+
+fn writeActiondfsStatsSnapshot(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    client: *control_transport_fd.Client,
+    path: []const u8,
+) !void {
+    var response = try client.call(io, allocator, .{
+        .kind = .unary,
+        .method = control_protocol.actiondfs_stats_method,
+        .body = "",
+    });
+    defer response.deinit(allocator);
+    if (response.status != .ok) return error.GuestApplicationError;
+
+    try createParentDirs(io, path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = response.body,
+        .flags = .{ .read = true, .permissions = .default_file },
+    });
+}
+
+fn createParentDirs(io: std.Io, path: []const u8) !void {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
+    if (slash == 0) return;
+    try std.Io.Dir.cwd().createDirPath(io, path[0..slash]);
+}
+
 test "parseServeVmArgs accepts VM flags" {
     const options = try parseServeVmArgs(&.{
         "--listen=127.0.0.1:9999",
@@ -430,6 +569,34 @@ test "materializeEmbeddedAsset replaces corrupt cached bytes" {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, second, std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("payload", bytes);
+}
+
+test "ensureCasImageFile formats blank images and preserves ext4 images" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try absoluteSubPath(std.testing.io, std.testing.allocator, tmp.dir, "cas.ext4");
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expect(try ensureCasImageFile(std.testing.io, path, 1));
+    try std.testing.expect(try ensureCasImageFile(std.testing.io, path, 1));
+
+    var file = try std.Io.Dir.cwd().openFile(std.testing.io, path, .{ .mode = .read_write });
+    try file.writePositionalAll(std.testing.io, &ext4_magic, ext4_magic_offset);
+    file.close(std.testing.io);
+    try std.testing.expect(!try ensureCasImageFile(std.testing.io, path, 1));
+}
+
+test "ensureCasImageFile rejects unknown existing images" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try absoluteSubPath(std.testing.io, std.testing.allocator, tmp.dir, "cas.ext4");
+    defer std.testing.allocator.free(path);
+
+    var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+    try file.setLength(std.testing.io, 1024 * 1024);
+    try file.writePositionalAll(std.testing.io, "not ext4", 0);
+    file.close(std.testing.io);
+    try std.testing.expectError(error.InvalidCasImage, ensureCasImageFile(std.testing.io, path, 1));
 }
 
 test "resolveAssets preserves explicit paths" {

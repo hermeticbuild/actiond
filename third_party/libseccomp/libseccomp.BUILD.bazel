@@ -1,0 +1,27 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "configure_h",
+    outs = ["configure.h"],
+    cmd = "touch $@",
+)
+
+cc_library(
+    name = "seccomp",
+    srcs = glob(
+        ["src/*.c"],
+        exclude = ["src/arch-syscall-dump.c"],
+    ),
+    hdrs = glob([
+        "include/*.h",
+        "src/*.h",
+    ]) + [":configure_h"],
+    defines = ["HAVE_LINUX_SECCOMP_H=1"],
+    includes = [
+        "include",
+        "src",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)

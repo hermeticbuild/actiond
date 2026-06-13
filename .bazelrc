@@ -2,6 +2,8 @@ common --enable_platform_specific_config
 common --downloader_config=bazel_downloader.cfg
 common --@rules_zig//zig/settings:use_cc_common_link=true
 common --@rules_zig//zig/settings:mode=release_fast
+common --@rules_rust//rust/settings:codegen_units=1
+common --@rules_rust//rust/settings:lto=fat
 common --stripopt=--strip-all
 
 common:linux --sandbox_add_mount_pair=/tmp
@@ -12,6 +14,8 @@ common --bes_backend=grpcs://remote.buildbuddy.io
 
 common:remote --jobs=500
 common:remote --extra_execution_platforms=@llvm//:rbe_platform
+common:remote --platforms=@llvm//:rbe_platform
+common:remote --@llvm//config:experimental_stub_libgcc_s=True
 common:remote --noexperimental_throttle_remote_action_building
 common:remote --remote_cache=grpcs://remote.buildbuddy.io
 common:remote --remote_executor=grpcs://remote.buildbuddy.io

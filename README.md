@@ -1,11 +1,11 @@
 # actiond
 
-`actiond` is a local Remote Execution API worker and cache for Bazel. On macOS
-and Windows it starts a small Linux VM and runs Bazel actions inside that VM,
-so the host can act like a local Linux remote-execution worker.
+`actiond` is a local Remote Execution API worker and cache for Bazel. On macOS,
+Windows, and Linux it starts a small Linux VM and runs Bazel actions inside
+that VM, so the host can act like a local Linux remote-execution worker.
 
-The macOS ARM64 and Windows ARM64/x86_64 releases include the matching VM
-kernel, initramfs, and Linux runtime image.
+The macOS ARM64, Windows ARM64/x86_64, and Linux ARM64/x86_64 releases include
+the matching VM kernel, initramfs, and Linux runtime image.
 
 ## Why Use It?
 
@@ -60,6 +60,20 @@ e2e\run_llvm_windows_vm_smoke.ps1
 Windows requires Hyper-V. `windows-actiond` wraps the runtime SquashFS and
 guest-owned ext4 CAS in fixed VHD files. The default VHD paths are under
 `--root`; `--cas-image` can select another CAS VHD path.
+
+The Linux ARM64 and x86_64 releases embed Firecracker 1.16.0, the matching
+kernel, the compressed initramfs, and the runtime SquashFS. `linux-actiond`
+passes those read-only files to Firecracker through sealed memfds and executes
+Firecracker with `execveat`; none of them is extracted to disk. The writable
+CAS remains a persistent ext4 disk image under `--root` and is exposed through
+PCI virtio-pmem with ext4 DAX. Firecracker requires KVM:
+
+```bash
+test -r /dev/kvm -a -w /dev/kvm
+./linux-actiond_linux_x86_64 serve-vm \
+  --listen=127.0.0.1:8980 \
+  --root="$HOME/.cache/actiond/vm"
+```
 
 ## Point Bazel At actiond
 
@@ -121,6 +135,8 @@ Most users should use releases. Source builds are mainly for development:
 
 ```bash
 bazel build --config=remote -c opt //cmd/darwin-actiond
+bazel build --config=remote -c opt //cmd/linux-actiond:linux-actiond_linux_arm64
+bazel build --config=remote -c opt //cmd/linux-actiond:linux-actiond_linux_x86_64
 ```
 
 Normal contributor checks:
@@ -130,7 +146,7 @@ bazel build --config=remote //...
 bazel test --config=remote //...
 ```
 
-The macOS VM e2e harness is:
+The macOS and Linux VM e2e harness is:
 
 ```bash
 tools/e2e.sh vm
