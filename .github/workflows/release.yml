@@ -39,6 +39,8 @@ jobs:
           fi
           gh release upload "${TAG_NAME}" \
             release/darwin-actiond_macos_arm64 \
+            release/linux-actiond_linux_arm64 \
+            release/linux-actiond_linux_x86_64 \
             release/windows-actiond_windows_arm64.exe \
             release/windows-actiond_windows_x86_64.exe \
             release/SHA256.txt \

@@ -1,9 +1,10 @@
 # Architecture
 
 `actiond` is a local Remote Execution API worker and cache for Bazel. Its main
-mode is `darwin-actiond serve-vm` or `windows-actiond serve-vm`: the host
-process owns the public gRPC listener, starts a small Linux VM, and forwards
-REAPI traffic into a Linux guest over virtio-vsock or Hyper-V sockets.
+mode is `darwin-actiond serve-vm`, `windows-actiond serve-vm`, or
+`linux-actiond serve-vm`: the host process owns the public gRPC listener,
+starts a small Linux VM, and forwards REAPI traffic into a Linux guest over
+virtio-vsock or Hyper-V sockets.
 
 The design centers on three ideas:
 
@@ -18,7 +19,7 @@ Bazel
   |
   | gRPC / REAPI
   v
-darwin-actiond / windows-actiond
+darwin-actiond / windows-actiond / linux-actiond
   |
   | TCP-to-virtio-vsock / TCP-to-AF_HYPERV bridge
   v
@@ -32,7 +33,10 @@ guest ext4 disk mounted at /cas
 On Windows, `windows-actiond` uses Host Compute System `LinuxKernelDirect`,
 Hyper-V synthetic SCSI, and `AF_HYPERV`. Guest AF_VSOCK port 5001 maps to the
 standard Hyper-V socket service GUID template. The Windows guest matches the
-ARM64 or x86_64 host architecture; the macOS guest is ARM64.
+ARM64 or x86_64 host architecture; the macOS guest is ARM64. On Linux,
+`linux-actiond` uses Firecracker with KVM and PCI on ARM64 and x86_64.
+Firecracker exposes the CAS and runtime images as virtio PCI block devices.
+Firecracker exposes guest vsock connections through a host Unix socket.
 
 In VM mode, the host does not keep a second CAS mirror. Uploads, downloads,
 ActionCache requests, and Execute requests are forwarded to the guest. The
@@ -52,6 +56,15 @@ the matching Linux kernel, initramfs, and runtime SquashFS. At startup it
 materializes those bytes under `--root`, wraps the runtime and CAS as fixed VHD
 files, and starts the VM with Host Compute System.
 
+`linux-actiond` is released for ARM64 and x86_64. Zig `@embedFile` includes the
+matching Linux kernel, compressed initramfs, runtime SquashFS, and Firecracker
+executable built from the pinned Firecracker 1.16.0 source. `linux-actiond`
+writes each embedded file to a sealed memfd, generates the Firecracker config
+in another sealed memfd, and executes Firecracker with `execveat`. The writable
+CAS is the only disk-backed VM image. Firecracker uses KVM and PCI. The CAS
+drive uses Firecracker's Async block I/O engine; the read-only runtime memfd
+uses the Sync block I/O engine.
+
 `linux-actiond-guest` lives in the initramfs. It runs as guest init, mounts the
 minimal guest filesystems, mounts `/cas` and `/runtimes`, then execs itself as
 the guest REAPI worker.
@@ -65,7 +78,7 @@ The VM is intentionally small:
 - writable virtio or Hyper-V synthetic SCSI block device for `/cas`
 - read-only virtio or Hyper-V synthetic SCSI block device for `/runtimes`
 - virtio-vsock or `AF_HYPERV` for gRPC
-- serial stderr for logs on macOS
+- serial host logs on macOS and Linux
 - no guest network device, SSH, systemd, package manager, graphics, or login
 
 The VM is long-lived. Each action gets its own Linux process sandbox inside the
@@ -204,5 +217,5 @@ it is not the primary actiondfs performance benchmark.
 - The REAPI surface is intentionally focused on the methods Bazel uses here.
 - Remote cache compression is not supported yet.
 - Cgroup limits are best-effort.
-- VM mode is ARM64 Linux on Apple Silicon and architecture-matched Linux on Windows.
+- VM mode is ARM64 Linux on Apple Silicon and architecture-matched Linux on Windows and Linux.
 - Runtime selection is limited to the packaged glibc versions.

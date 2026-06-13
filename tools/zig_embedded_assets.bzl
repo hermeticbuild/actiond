@@ -1,10 +1,13 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-def _asset_file(target, name):
+def _asset_file(target, name, suffix = ""):
     files = target[DefaultInfo].files.to_list()
-    if len(files) != 1:
-        fail("%s must provide exactly one file, got %d" % (name, len(files)))
-    return files[0]
+    if len(files) == 1:
+        return files[0]
+    matches = [file for file in files if suffix and file.basename.endswith(suffix)]
+    if len(matches) != 1:
+        fail("%s must provide exactly one file matching suffix %r, got %d of %d" % (name, suffix, len(matches), len(files)))
+    return matches[0]
 
 def _zig_embedded_assets_source_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".zig")
@@ -15,7 +18,7 @@ def _zig_embedded_assets_source_impl(ctx):
         ("initramfs", ctx.attr.initramfs),
         ("runtime_image", ctx.attr.runtime_image),
     ]:
-        asset = _asset_file(target, name)
+        asset = _asset_file(target, name, ctx.attr.kernel_suffix if name == "kernel" else "")
         staged = ctx.actions.declare_file(ctx.label.name + "." + name)
         ctx.actions.symlink(output = staged, target_file = asset)
         embedded.append(staged)
@@ -31,17 +34,19 @@ _zig_embedded_assets_source = rule(
     attrs = {
         "initramfs": attr.label(mandatory = True),
         "kernel": attr.label(mandatory = True),
+        "kernel_suffix": attr.string(),
         "runtime_image": attr.label(mandatory = True),
     },
 )
 
-def zig_embedded_assets(name, kernel, initramfs, runtime_image, visibility = None):
+def zig_embedded_assets(name, kernel, initramfs, runtime_image, kernel_suffix = "", visibility = None):
     source_name = name + "_source"
     assets_name = name + "_files"
     _zig_embedded_assets_source(
         name = source_name,
         initramfs = initramfs,
         kernel = kernel,
+        kernel_suffix = kernel_suffix,
         runtime_image = runtime_image,
     )
     native.filegroup(

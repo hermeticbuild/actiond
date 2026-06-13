@@ -1,0 +1,107 @@
+load("@firecracker_crates//:defs.bzl", "all_crate_deps")
+load("@rules_rs//rs:cargo_build_script.bzl", "cargo_build_script")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+rust_library(
+    name = "acpi_tables",
+    srcs = glob(["src/acpi-tables/src/**/*.rs"]),
+    crate_name = "acpi_tables",
+    crate_root = "src/acpi-tables/src/lib.rs",
+    edition = "2024",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "src/acpi-tables",
+        cargo_only = True,
+    ),
+)
+
+rust_library(
+    name = "utils",
+    srcs = glob(["src/utils/src/**/*.rs"]),
+    crate_name = "utils",
+    crate_root = "src/utils/src/lib.rs",
+    edition = "2024",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "src/utils",
+        cargo_only = True,
+    ),
+)
+
+rust_library(
+    name = "seccompiler",
+    srcs = glob(["src/seccompiler/src/**/*.rs"]),
+    crate_name = "seccompiler",
+    crate_root = "src/seccompiler/src/lib.rs",
+    edition = "2024",
+    deps = ["@libseccomp//:seccomp"] + all_crate_deps(
+        normal = True,
+        package_name = "src/seccompiler",
+        cargo_only = True,
+    ),
+)
+
+rust_library(
+    name = "vmm",
+    srcs = glob(["src/vmm/src/**/*.rs"]),
+    crate_name = "vmm",
+    crate_root = "src/vmm/src/lib.rs",
+    edition = "2024",
+    deps = [
+        ":acpi_tables",
+        ":utils",
+    ] + all_crate_deps(
+        normal = True,
+        package_name = "src/vmm",
+        cargo_only = True,
+    ),
+)
+
+cargo_build_script(
+    name = "firecracker_build_script",
+    srcs = ["src/firecracker/build.rs"],
+    crate_name = "firecracker_build",
+    data = glob([
+        "resources/seccomp/*.json",
+        "src/seccompiler/src/**/*.rs",
+    ]),
+    deps = [":seccompiler"] + all_crate_deps(
+        build = True,
+        package_name = "src/firecracker",
+        cargo_only = True,
+    ),
+    edition = "2024",
+    use_default_shell_env = False,
+)
+
+rust_binary(
+    name = "firecracker",
+    srcs = glob(["src/firecracker/src/**/*.rs"]),
+    crate_name = "firecracker",
+    crate_root = "src/firecracker/src/main.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_VERSION": "1.16.0",
+    },
+    rustc_flags = [
+        "-Cpanic=abort",
+        "-Cstrip=symbols",
+    ],
+    deps = [
+        ":firecracker_build_script",
+        ":utils",
+        ":vmm",
+    ] + all_crate_deps(
+        normal = True,
+        package_name = "src/firecracker",
+        cargo_only = True,
+    ),
+)
