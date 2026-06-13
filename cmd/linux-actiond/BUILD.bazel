@@ -1,0 +1,62 @@
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("//tools:zig_embedded_assets.bzl", "zig_embedded_assets")
+load("//tools:zig_embedded_firecracker.bzl", "zig_embedded_firecracker")
+
+zig_binary(
+    name = "linux-actiond",
+    main = "main.zig",
+    strip_debug_symbols = True,
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":embedded_assets",
+        ":embedded_firecracker",
+        "//src:actiond",
+    ],
+)
+
+alias(
+    name = "embedded_initramfs",
+    actual = select({
+        "@platforms//cpu:aarch64": "//vm:initramfs_aarch64",
+        "@platforms//cpu:x86_64": "//vm:initramfs_x86_64",
+    }),
+)
+
+alias(
+    name = "embedded_kernel",
+    actual = select({
+        "@platforms//cpu:aarch64": "//vm:linux_kernel.image",
+        "@platforms//cpu:x86_64": "//vm:linux_kernel.vm_linux",
+    }),
+)
+
+zig_embedded_assets(
+    name = "embedded_assets",
+    initramfs = ":embedded_initramfs",
+    kernel = ":embedded_kernel",
+    kernel_suffix = ".vmlinux",
+    runtime_image = "//runtimes:runtimes_squashfs",
+)
+
+zig_embedded_firecracker(
+    name = "embedded_firecracker",
+    executable = "@firecracker//:firecracker",
+)
+
+platform_transition_binary(
+    name = "linux-actiond_linux_arm64",
+    basename = "linux-actiond_linux_arm64",
+    binary = ":linux-actiond",
+    target_platform = "//platforms:linux_aarch64_musl",
+    visibility = ["//visibility:public"],
+)
+
+platform_transition_binary(
+    name = "linux-actiond_linux_x86_64",
+    basename = "linux-actiond_linux_x86_64",
+    binary = ":linux-actiond",
+    target_platform = "//platforms:linux_x86_64_musl",
+    visibility = ["//visibility:public"],
+)
