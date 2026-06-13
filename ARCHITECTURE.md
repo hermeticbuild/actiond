@@ -34,8 +34,8 @@ On Windows, `windows-actiond` uses Host Compute System `LinuxKernelDirect`,
 Hyper-V synthetic SCSI, and `AF_HYPERV`. Guest AF_VSOCK port 5001 maps to the
 standard Hyper-V socket service GUID template. The Windows guest matches the
 ARM64 or x86_64 host architecture; the macOS guest is ARM64. On Linux,
-`linux-actiond` uses QEMU `virt` on ARM64 and QEMU `q35` on x86_64. Both QEMU
-machines use virtio PCI block devices and `vhost-vsock-pci`.
+`linux-actiond` uses QEMU `virt` on ARM64 and QEMU `microvm` on x86_64. Both
+QEMU machines use virtio-mmio block devices and `vhost-vsock-device`.
 
 In VM mode, the host does not keep a second CAS mirror. Uploads, downloads,
 ActionCache requests, and Execute requests are forwarded to the guest. The
@@ -58,10 +58,11 @@ files, and starts the VM with Host Compute System.
 `linux-actiond` is released for ARM64 and x86_64. Zig `@embedFile` includes the
 matching Linux kernel, initramfs, runtime SquashFS, and QEMU executable selected
 by the `rules_qemu` target toolchain. The x86_64 release also includes
-`bios-256k.bin` and `linuxboot_dma.bin`; QEMU `virt` direct kernel boot does not
-require those PC firmware files. `linux-actiond` writes QEMU to a sealed memfd
-and executes it with `execveat`; QEMU is not extracted to disk. The current
-implementation uses TCG. KVM and `io_uring` remain follow-up work.
+`qboot.rom`; QEMU `virt` direct kernel boot on ARM64 does not require firmware.
+`linux-actiond` creates sealed memfds for QEMU and every immutable embedded VM
+artifact, then executes QEMU with `execveat`. Only the persistent guest-owned
+CAS image is stored under `--root`. The current implementation uses TCG. KVM
+and `io_uring` remain follow-up work.
 
 `linux-actiond-guest` lives in the initramfs. It runs as guest init, mounts the
 minimal guest filesystems, mounts `/cas` and `/runtimes`, then execs itself as

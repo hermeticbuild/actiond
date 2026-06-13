@@ -13,37 +13,27 @@ def _zig_embedded_qemu_source_impl(ctx):
         'pub const qemu_system_name = "{}";'.format(qemu.qemu_system.basename),
         'pub const accel = "{}";'.format(qemu.accel),
         'pub const machine = "{}";'.format(qemu.machine),
-        'pub const system_target = "{}";'.format(qemu.system_target),
         'pub const target_arch = "{}";'.format(qemu.target_arch),
     ]
 
     if qemu.system_target == "x86_64-softmmu":
-        bios_256k = ctx.actions.declare_file(ctx.label.name + ".bios-256k.bin")
-        linuxboot_dma = ctx.actions.declare_file(ctx.label.name + ".linuxboot_dma.bin")
+        firmware = ctx.actions.declare_file(ctx.label.name + ".qboot.rom")
         ctx.actions.run_shell(
             arguments = [
                 qemu.system_data_anchor.path,
-                bios_256k.path,
-                linuxboot_dma.path,
+                firmware.path,
             ],
             command = """
 set -eu
-cp "$1/bios-256k.bin" "$2"
-cp "$1/linuxboot_dma.bin" "$3"
+cp "$1/qboot.rom" "$2"
 """,
             inputs = qemu.system_data_files,
-            outputs = [bios_256k, linuxboot_dma],
+            outputs = [firmware],
         )
-        embedded.extend([bios_256k, linuxboot_dma])
-        lines.extend([
-            'pub const bios_256k: ?[]const u8 = @embedFile("{}");'.format(bios_256k.basename),
-            'pub const linuxboot_dma: ?[]const u8 = @embedFile("{}");'.format(linuxboot_dma.basename),
-        ])
+        embedded.append(firmware)
+        lines.append('pub const firmware: ?[]const u8 = @embedFile("{}");'.format(firmware.basename))
     elif qemu.system_target == "aarch64-softmmu":
-        lines.extend([
-            "pub const bios_256k: ?[]const u8 = null;",
-            "pub const linuxboot_dma: ?[]const u8 = null;",
-        ])
+        lines.append("pub const firmware: ?[]const u8 = null;")
     else:
         fail("unsupported embedded QEMU system target: {}".format(qemu.system_target))
 

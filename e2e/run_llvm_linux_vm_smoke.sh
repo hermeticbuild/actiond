@@ -18,7 +18,7 @@ case "$(uname -m)" in
     ;;
   x86_64)
     architecture="x86_64"
-    qemu_machine="q35"
+    qemu_machine="microvm"
     default_llvm_platform="@llvm//platforms:linux_x86_64_musl"
     default_execution_platform="//e2e:actiond_linux_x86_64_musl_exec"
     server_target="//cmd/linux-actiond:linux-actiond_linux_x86_64"
@@ -58,6 +58,7 @@ summary_path="${output_root}/linux-llvm-smoke-timings.md"
 rm -rf "${actiond_output_base}" "${host_output_base}" "${server_root}"
 
 server_pid=""
+server_startup_elapsed=""
 
 stop_server() {
   if [[ -n "${server_pid}" ]]; then
@@ -100,6 +101,7 @@ wait_for_server() {
 setup_server() {
   local build_log="${output_root}/linux-actiond-build.log"
   local cquery_log="${output_root}/linux-actiond-cquery.log"
+  local server_start_ns server_ready_ns
   local -a headers=()
   if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
     headers+=(
@@ -140,6 +142,7 @@ setup_server() {
     bazel shutdown
   ) >>"${build_log}" 2>&1
 
+  server_start_ns="$(date +%s%N)"
   setsid "${server}" serve-vm \
     --listen="${endpoint}" \
     --root="${server_root}" \
@@ -150,6 +153,14 @@ setup_server() {
     >"${server_log}" 2>&1 &
   server_pid="$!"
   wait_for_server
+  server_ready_ns="$(date +%s%N)"
+  server_startup_elapsed="$(awk -v start="${server_start_ns}" -v end="${server_ready_ns}" 'BEGIN { printf "%.3f", (end - start) / 1000000000 }')"
+
+  mapfile -t server_files < <(find "${server_root}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+  if [[ "${server_files[*]}" != "cas.ext4" ]]; then
+    echo "unexpected files under ${server_root}: ${server_files[*]}" >&2
+    exit 1
+  fi
 }
 
 process_total() {
@@ -327,6 +338,7 @@ cat >"${summary_path}" <<EOF
 - Build mode: \`-c opt --strip=always --stripopt=--strip-all\`
 - Jobs: ${jobs_label}
 - VM: ${qemu_machine} with TCG, CPUs=${vm_cpus}, memory=${vm_memory_mib} MiB
+- VM startup to gRPC readiness: ${server_startup_elapsed}s
 - Comparison: actiond uses Linux ${architecture} musl tools in QEMU; the Linux host runs the same tools natively. This is an end-to-end comparison, not an executor-only comparison.
 
 | Execution | Bazel elapsed | Wall elapsed | Total processes | Executed processes | Process summary |

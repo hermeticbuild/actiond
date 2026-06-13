@@ -7,6 +7,10 @@ const linux = std.os.linux;
 const mfd_exec = 0x0010;
 
 pub const fexec_argument = "--actiond-internal-fexec-qemu";
+pub const embedded_kernel_path = "actiond-internal-embedded-kernel";
+pub const embedded_initramfs_path = "actiond-internal-embedded-initramfs";
+pub const embedded_runtime_image_path = "actiond-internal-embedded-runtime-image";
+pub const embedded_firmware_path = "actiond-internal-embedded-firmware";
 
 pub const Options = struct {
     qemu_system_name: []const u8,
@@ -17,7 +21,7 @@ pub const Options = struct {
     initramfs_path: []const u8,
     runtime_image_path: []const u8,
     cas_image_path: []const u8,
-    qemu_data_path: ?[]const u8,
+    firmware_path: ?[]const u8,
     format_cas_image: bool = false,
     memory_mib: u64 = 512,
     cpu_count: u32 = 2,
@@ -45,11 +49,11 @@ pub const Machine = struct {
         defer allocator.free(memory);
         const cpus = try std.fmt.allocPrint(allocator, "{d}", .{options.cpu_count});
         defer allocator.free(cpus);
-        const vsock_device = try std.fmt.allocPrint(allocator, "vhost-vsock-pci,id=vsock0,guest-cid={d}", .{guest_cid});
+        const vsock_device = try std.fmt.allocPrint(allocator, "vhost-vsock-device,id=vsock0,guest-cid={d}", .{guest_cid});
         defer allocator.free(vsock_device);
-        const cas_drive = try driveArg(allocator, "cas", options.cas_image_path, false);
+        const cas_drive = try driveArg(allocator, "cas", options.cas_image_path, false, .none);
         defer allocator.free(cas_drive);
-        const runtime_drive = try driveArg(allocator, "runtimes", options.runtime_image_path, true);
+        const runtime_drive = try driveArg(allocator, "runtimes", options.runtime_image_path, true, .writeback);
         defer allocator.free(runtime_drive);
         const kernel_append = try kernelAppendArg(allocator, options.target_arch, options.format_cas_image);
         defer allocator.free(kernel_append);
@@ -69,8 +73,8 @@ pub const Machine = struct {
             "-cpu",
             "max",
         });
-        if (options.qemu_data_path) |path| {
-            try argv.appendSlice(allocator, &.{ "-L", path });
+        if (options.firmware_path) |path| {
+            try argv.appendSlice(allocator, &.{ "-bios", path });
         }
         try argv.appendSlice(allocator, &.{
             "-smp",
@@ -97,11 +101,11 @@ pub const Machine = struct {
             "-drive",
             cas_drive,
             "-device",
-            "virtio-blk-pci,drive=cas",
+            "virtio-blk-device,drive=cas",
             "-drive",
             runtime_drive,
             "-device",
-            "virtio-blk-pci,drive=runtimes",
+            "virtio-blk-device,drive=runtimes",
         });
 
         std.log.info("starting embedded {s} guest_cid={d}", .{ options.qemu_system_name, guest_cid });
@@ -207,7 +211,8 @@ pub fn fexecEmbedded(
     io: std.Io,
     allocator: std.mem.Allocator,
     environ: std.process.Environ,
-    executable: []const u8,
+    comptime embedded_assets: type,
+    comptime embedded_qemu: type,
     args: []const [:0]const u8,
 ) !noreturn {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
@@ -232,15 +237,30 @@ pub fn fexecEmbedded(
     };
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     defer file.close(io);
-    try file.writePositionalAll(io, executable, 0);
+    try file.writePositionalAll(io, embedded_qemu.qemu_system, 0);
     try file.setPermissions(io, .executable_file);
 
     const seals = linux.F.SEAL_SEAL | linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_WRITE;
     const seal_result = linux.fcntl(fd, linux.F.ADD_SEALS, seals);
     if (linux.errno(seal_result) != .SUCCESS) return error.FexecFailed;
 
+    var inherited_fds: [4]std.posix.fd_t = undefined;
+    var inherited_fd_count: usize = 0;
+    defer for (inherited_fds[0..inherited_fd_count]) |inherited_fd| closeFd(inherited_fd);
+
     const argv = try allocator.allocSentinel(?[*:0]const u8, args.len, null);
-    for (args, argv) |arg, *entry| entry.* = arg.ptr;
+    for (args, argv) |arg, *entry| {
+        const asset = (try embeddedAsset(arg, embedded_assets, embedded_qemu)) orelse {
+            entry.* = arg.ptr;
+            continue;
+        };
+        if (inherited_fd_count == inherited_fds.len) return error.TooManyEmbeddedAssets;
+        const inherited_fd = try createSealedMemfd(io, asset.name, asset.bytes);
+        inherited_fds[inherited_fd_count] = inherited_fd;
+        inherited_fd_count += 1;
+        const path = try std.fmt.allocPrintSentinel(allocator, "/proc/self/fd/{d}", .{inherited_fd}, 0);
+        entry.* = (try replaceEmbeddedAssetPath(allocator, arg, asset.marker, path)).ptr;
+    }
 
     const environment = environ.block.view().slice;
     const envp = try allocator.allocSentinel(?[*:0]const u8, environment.len, null);
@@ -251,16 +271,75 @@ pub fn fexecEmbedded(
     return error.FexecFailed;
 }
 
-fn driveArg(allocator: std.mem.Allocator, id: []const u8, path: []const u8, readonly: bool) ![]u8 {
+const EmbeddedAsset = struct {
+    marker: []const u8,
+    name: []const u8,
+    bytes: []const u8,
+};
+
+fn embeddedAsset(arg: []const u8, comptime embedded_assets: type, comptime embedded_qemu: type) !?EmbeddedAsset {
+    if (std.mem.indexOf(u8, arg, embedded_kernel_path) != null) return .{ .marker = embedded_kernel_path, .name = "actiond-kernel", .bytes = embedded_assets.kernel };
+    if (std.mem.indexOf(u8, arg, embedded_initramfs_path) != null) return .{ .marker = embedded_initramfs_path, .name = "actiond-initramfs", .bytes = embedded_assets.initramfs };
+    if (std.mem.indexOf(u8, arg, embedded_runtime_image_path) != null) return .{ .marker = embedded_runtime_image_path, .name = "actiond-runtimes", .bytes = embedded_assets.runtime_image };
+    if (std.mem.indexOf(u8, arg, embedded_firmware_path) != null) return .{
+        .marker = embedded_firmware_path,
+        .name = "actiond-firmware",
+        .bytes = embedded_qemu.firmware orelse return error.InvalidQemuAssets,
+    };
+    return null;
+}
+
+fn replaceEmbeddedAssetPath(
+    allocator: std.mem.Allocator,
+    arg: []const u8,
+    marker: []const u8,
+    path: []const u8,
+) ![:0]u8 {
+    const marker_index = std.mem.indexOf(u8, arg, marker) orelse return error.MissingEmbeddedAssetMarker;
+    const suffix_index = marker_index + marker.len;
+    if (std.mem.indexOfPos(u8, arg, suffix_index, marker) != null) return error.DuplicateEmbeddedAssetMarker;
+
+    const replaced = try allocator.allocSentinel(u8, arg.len - marker.len + path.len, 0);
+    @memcpy(replaced[0..marker_index], arg[0..marker_index]);
+    @memcpy(replaced[marker_index..][0..path.len], path);
+    @memcpy(replaced[marker_index + path.len ..], arg[suffix_index..]);
+    return replaced;
+}
+
+fn createSealedMemfd(io: std.Io, name: []const u8, bytes: []const u8) !std.posix.fd_t {
+    const fd = try std.posix.memfd_create(name, linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING);
+    errdefer closeFd(fd);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    try file.writePositionalAll(io, bytes, 0);
+
+    const seals = linux.F.SEAL_SEAL | linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_WRITE;
+    const seal_result = linux.fcntl(fd, linux.F.ADD_SEALS, seals);
+    if (linux.errno(seal_result) != .SUCCESS) return error.FexecFailed;
+
+    const inherit_result = linux.fcntl(fd, linux.F.SETFD, 0);
+    if (linux.errno(inherit_result) != .SUCCESS) return error.FexecFailed;
+    return fd;
+}
+
+const DriveCache = enum { none, writeback };
+
+fn driveArg(
+    allocator: std.mem.Allocator,
+    id: []const u8,
+    path: []const u8,
+    readonly: bool,
+    cache: DriveCache,
+) ![]u8 {
     const readonly_arg = if (readonly) ",readonly=on" else "";
     const escaped_path = try escapeDriveValue(allocator, path);
     defer allocator.free(escaped_path);
     // TODO: Add aio=io_uring after the rules_qemu QEMU prebuilt and Linux
     // runner are verified with io_uring.
-    return std.fmt.allocPrint(allocator, "if=none,id={s},file={s},format=raw{s},cache=none", .{
+    return std.fmt.allocPrint(allocator, "if=none,id={s},file={s},format=raw{s},cache={s}", .{
         id,
         escaped_path,
         readonly_arg,
+        @tagName(cache),
     });
 }
 
@@ -285,14 +364,15 @@ fn randomGuestCid(io: std.Io) !u32 {
 }
 
 fn kernelAppendArg(allocator: std.mem.Allocator, target_arch: []const u8, format_cas_image: bool) ![]u8 {
-    const console = if (std.mem.eql(u8, target_arch, "aarch64"))
-        "ttyAMA0"
+    const console, const cas_device = if (std.mem.eql(u8, target_arch, "aarch64"))
+        .{ "ttyAMA0", "/dev/vdb" }
     else if (std.mem.eql(u8, target_arch, "x86_64"))
-        "ttyS0"
+        .{ "ttyS0", "/dev/vda" }
     else
         return error.UnsupportedHost;
-    return std.fmt.allocPrint(allocator, "init=/init console={s} panic=-1 actiond.cas_device=/dev/vda{s}", .{
+    return std.fmt.allocPrint(allocator, "init=/init console={s} panic=-1 actiond.cas_device={s}{s}", .{
         console,
+        cas_device,
         if (format_cas_image) " actiond.format_cas=1" else "",
     });
 }
@@ -352,15 +432,54 @@ fn closeFd(fd: std.posix.fd_t) void {
 }
 
 test "driveArg leaves io_uring disabled" {
-    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/cas.ext4", false);
+    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/cas.ext4", false, .none);
     defer std.testing.allocator.free(drive);
     try std.testing.expectEqualStrings("if=none,id=cas,file=/tmp/cas.ext4,format=raw,cache=none", drive);
 }
 
+test "embedded asset arguments select embedded bytes" {
+    const assets = struct {
+        const kernel = "kernel";
+        const initramfs = "initramfs";
+        const runtime_image = "runtimes";
+    };
+    const qemu = struct {
+        const firmware: ?[]const u8 = "qboot";
+    };
+
+    try std.testing.expectEqualStrings("kernel", (try embeddedAsset(embedded_kernel_path, assets, qemu)).?.bytes);
+    try std.testing.expectEqualStrings("initramfs", (try embeddedAsset(embedded_initramfs_path, assets, qemu)).?.bytes);
+    const runtime_drive = "if=none,file=" ++ embedded_runtime_image_path ++ ",format=raw";
+    const runtime = (try embeddedAsset(runtime_drive, assets, qemu)).?;
+    try std.testing.expectEqualStrings("runtimes", runtime.bytes);
+    const replaced_runtime_drive = try replaceEmbeddedAssetPath(std.testing.allocator, runtime_drive, runtime.marker, "/proc/self/fd/7");
+    defer std.testing.allocator.free(replaced_runtime_drive);
+    try std.testing.expectEqualStrings("if=none,file=/proc/self/fd/7,format=raw", replaced_runtime_drive);
+    try std.testing.expectEqualStrings("qboot", (try embeddedAsset(embedded_firmware_path, assets, qemu)).?.bytes);
+    try std.testing.expect((try embeddedAsset("/tmp/kernel", assets, qemu)) == null);
+
+    const qemu_without_firmware = struct {
+        const firmware: ?[]const u8 = null;
+    };
+    try std.testing.expectError(
+        error.InvalidQemuAssets,
+        embeddedAsset(embedded_firmware_path, assets, qemu_without_firmware),
+    );
+}
+
 test "driveArg escapes commas in paths" {
-    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/actiond,vm/cas.ext4", false);
+    const drive = try driveArg(std.testing.allocator, "cas", "/tmp/actiond,vm/cas.ext4", false, .none);
     defer std.testing.allocator.free(drive);
     try std.testing.expectEqualStrings("if=none,id=cas,file=/tmp/actiond,,vm/cas.ext4,format=raw,cache=none", drive);
+}
+
+test "driveArg uses buffered I/O for a read-only memfd" {
+    const drive = try driveArg(std.testing.allocator, "runtimes", "/proc/self/fd/7", true, .writeback);
+    defer std.testing.allocator.free(drive);
+    try std.testing.expectEqualStrings(
+        "if=none,id=runtimes,file=/proc/self/fd/7,format=raw,readonly=on,cache=writeback",
+        drive,
+    );
 }
 
 test "kernelAppendArg selects the x86 console and CAS block device" {
@@ -376,7 +495,7 @@ test "kernelAppendArg selects the aarch64 console" {
     const argument = try kernelAppendArg(std.testing.allocator, "aarch64", false);
     defer std.testing.allocator.free(argument);
     try std.testing.expectEqualStrings(
-        "init=/init console=ttyAMA0 panic=-1 actiond.cas_device=/dev/vda",
+        "init=/init console=ttyAMA0 panic=-1 actiond.cas_device=/dev/vdb",
         argument,
     );
 }

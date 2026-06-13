@@ -62,9 +62,10 @@ guest-owned ext4 CAS in fixed VHD files. The default VHD paths are under
 `--root`; `--cas-image` can select another CAS VHD path.
 
 The Linux releases embed the matching QEMU executable from `rules_qemu`. The
-x86_64 release also embeds `bios-256k.bin` and `linuxboot_dma.bin`.
-`linux-actiond` executes QEMU from a sealed memfd, so QEMU is not extracted to
-disk. The current implementation uses TCG and requires `/dev/vhost-vsock`:
+x86_64 release also embeds `qboot.rom`. `linux-actiond` passes QEMU, the Linux
+kernel, the initramfs, the runtime SquashFS, and `qboot.rom` through sealed
+memfds. The guest-owned CAS remains a persistent ext4 file under `--root`. The
+current implementation uses TCG and requires `/dev/vhost-vsock`:
 
 ```bash
 sudo modprobe vhost_vsock

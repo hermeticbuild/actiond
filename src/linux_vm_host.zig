@@ -7,7 +7,6 @@ pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
     options: vm_host.ServeVmOptions,
-    comptime embedded_assets: type,
     comptime embedded_qemu: type,
 ) !void {
     if (comptime builtin.os.tag != .linux or (builtin.cpu.arch != .aarch64 and builtin.cpu.arch != .x86_64)) {
@@ -15,17 +14,23 @@ pub fn serve(
     }
     if (!std.mem.eql(u8, embedded_qemu.target_arch, @tagName(builtin.cpu.arch))) return error.UnsupportedHost;
 
-    var prepared = try vm_host.prepareVm(io, allocator, options, embedded_assets);
+    var prepared = try vm_host.prepareVmStorage(io, allocator, options);
     defer prepared.deinit(io, allocator);
 
-    if ((embedded_qemu.bios_256k == null) != (embedded_qemu.linuxboot_dma == null)) return error.InvalidQemuAssets;
-    try materializeQemuFile(io, allocator, prepared.root_dir, "qemu/bios-256k.bin", embedded_qemu.bios_256k);
-    try materializeQemuFile(io, allocator, prepared.root_dir, "qemu/linuxboot_dma.bin", embedded_qemu.linuxboot_dma);
-    const qemu_data_path: ?[]u8 = if (embedded_qemu.bios_256k != null)
-        try vm_host.absoluteSubPath(io, allocator, prepared.root_dir, "qemu")
-    else
-        null;
-    defer if (qemu_data_path) |path| allocator.free(path);
+    prepared.assets.kernel = options.kernel orelse qemu_vm.embedded_kernel_path;
+    prepared.assets.initramfs = options.initramfs orelse qemu_vm.embedded_initramfs_path;
+    prepared.assets.runtime_image = options.runtime_image orelse qemu_vm.embedded_runtime_image_path;
+    if (options.kernel != null) {
+        prepared.owned_boot_kernel_path = try vm_host.prepareBootKernel(io, allocator, prepared.root_dir, prepared.assets.kernel);
+    }
+    prepared.boot_kernel_path = prepared.owned_boot_kernel_path orelse prepared.assets.kernel;
+    if (options.initramfs != null) {
+        prepared.owned_boot_initramfs_path = try vm_host.prepareBootInitramfs(io, allocator, prepared.root_dir, prepared.assets.initramfs);
+    }
+    prepared.boot_initramfs_path = prepared.owned_boot_initramfs_path orelse prepared.assets.initramfs;
+
+    const expects_firmware = std.mem.eql(u8, embedded_qemu.target_arch, "x86_64");
+    if ((embedded_qemu.firmware != null) != expects_firmware) return error.InvalidQemuAssets;
 
     std.log.info("starting QEMU VM kernel={s} initramfs={s} runtimes={s} cas={s}", .{
         prepared.boot_kernel_path,
@@ -42,7 +47,7 @@ pub fn serve(
         .initramfs_path = prepared.boot_initramfs_path,
         .runtime_image_path = prepared.assets.runtime_image,
         .cas_image_path = prepared.cas_image_path,
-        .qemu_data_path = qemu_data_path,
+        .firmware_path = if (embedded_qemu.firmware != null) qemu_vm.embedded_firmware_path else null,
         .format_cas_image = prepared.format_cas_image,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,
@@ -53,16 +58,4 @@ pub fn serve(
 
     std.log.info("actiond QEMU VM started; proxying gRPC to linux-actiond-guest", .{});
     return vm_host.serveGrpcBridge(io, allocator, options, &machine);
-}
-
-fn materializeQemuFile(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    root_dir: std.Io.Dir,
-    path: []const u8,
-    bytes: ?[]const u8,
-) !void {
-    const contents = bytes orelse return;
-    const absolute_path = try vm_host.materializeEmbeddedFile(io, allocator, root_dir, path, contents);
-    allocator.free(absolute_path);
 }

@@ -15,14 +15,15 @@ pub fn main(init: std.process.Init) !void {
             io,
             arena,
             init.minimal.environ,
-            embedded_qemu.qemu_system,
+            embedded_assets,
+            embedded_qemu,
             args[2..],
         );
     }
 
     if (args.len > 1 and std.mem.eql(u8, args[1], "serve-vm")) {
         const options = try actiond.vm_host.parseServeVmArgs(args[2..]);
-        return actiond.linux_vm_host.serve(io, std.heap.smp_allocator, options, embedded_assets, embedded_qemu);
+        return actiond.linux_vm_host.serve(io, std.heap.smp_allocator, options, embedded_qemu);
     }
 
     var stdout_buffer: [256]u8 = undefined;

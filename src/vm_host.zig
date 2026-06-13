@@ -55,6 +55,22 @@ pub fn prepareVm(
     options: ServeVmOptions,
     comptime embedded_assets: type,
 ) !PreparedVm {
+    var prepared = try prepareVmStorage(io, allocator, options);
+    errdefer prepared.deinit(io, allocator);
+
+    prepared.assets = try resolveAssets(io, allocator, prepared.root_dir, options, embedded_assets);
+    prepared.owned_boot_kernel_path = try prepareBootKernel(io, allocator, prepared.root_dir, prepared.assets.kernel);
+    prepared.boot_kernel_path = prepared.owned_boot_kernel_path orelse prepared.assets.kernel;
+    prepared.owned_boot_initramfs_path = try prepareBootInitramfs(io, allocator, prepared.root_dir, prepared.assets.initramfs);
+    prepared.boot_initramfs_path = prepared.owned_boot_initramfs_path orelse prepared.assets.initramfs;
+    return prepared;
+}
+
+pub fn prepareVmStorage(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    options: ServeVmOptions,
+) !PreparedVm {
     var prepared: PreparedVm = .{
         .root_dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.root, .{}),
     };
@@ -67,12 +83,6 @@ pub fn prepareVm(
         prepared.cas_image_path = prepared.owned_cas_image_path.?;
     }
     prepared.format_cas_image = try ensureCasImageFile(io, prepared.cas_image_path, options.cas_image_size_mib);
-
-    prepared.assets = try resolveAssets(io, allocator, prepared.root_dir, options, embedded_assets);
-    prepared.owned_boot_kernel_path = try prepareBootKernel(io, allocator, prepared.root_dir, prepared.assets.kernel);
-    prepared.boot_kernel_path = prepared.owned_boot_kernel_path orelse prepared.assets.kernel;
-    prepared.owned_boot_initramfs_path = try prepareBootInitramfs(io, allocator, prepared.root_dir, prepared.assets.initramfs);
-    prepared.boot_initramfs_path = prepared.owned_boot_initramfs_path orelse prepared.assets.initramfs;
     return prepared;
 }
 
@@ -119,18 +129,6 @@ fn materializeEmbeddedAsset(
     const output_rel = try std.fmt.allocPrint(allocator, "embedded/{s}-{s}", .{ name, std.fmt.bytesToHex(hash, .lower) });
     defer allocator.free(output_rel);
 
-    return materializeEmbeddedFileWithHash(io, allocator, root_dir, output_rel, bytes, &hash);
-}
-
-pub fn materializeEmbeddedFile(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    root_dir: std.Io.Dir,
-    output_rel: []const u8,
-    bytes: []const u8,
-) ![]u8 {
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
     return materializeEmbeddedFileWithHash(io, allocator, root_dir, output_rel, bytes, &hash);
 }
 

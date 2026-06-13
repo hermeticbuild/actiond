@@ -68,6 +68,7 @@ qemu.system_toolchain(
     target_settings = ["//platforms:qemu_system_aarch64"],
 )
 qemu.system_toolchain(
+    machine = "microvm,acpi=off,pcie=off,x-option-roms=off",
     system_target = "x86_64-softmmu",
     target_settings = ["//platforms:qemu_system_x86_64"],
 )
