@@ -1,38 +1,41 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//tools:zstd.bzl", "zstd_compress", "zstd_tool_attr")
 
 _QEMU_TOOLCHAIN_TYPE = "@rules_qemu//qemu:target_toolchain_type"
 
 def _zig_embedded_qemu_source_impl(ctx):
     qemu = ctx.toolchains[_QEMU_TOOLCHAIN_TYPE]
-    qemu_system = ctx.actions.declare_file(ctx.label.name + ".qemu-system")
+    qemu_system = ctx.actions.declare_file(ctx.label.name + ".qemu-system.zst")
     source = ctx.actions.declare_file(ctx.label.name + ".zig")
-    ctx.actions.symlink(output = qemu_system, target_file = qemu.qemu_system)
+    zstd_compress(ctx, qemu.qemu_system, qemu_system)
     embedded = [qemu_system]
     lines = [
-        'pub const qemu_system = @embedFile("{}");'.format(qemu_system.basename),
+        'pub const qemu_system_zstd = @embedFile("{}");'.format(qemu_system.basename),
         'pub const qemu_system_name = "{}";'.format(qemu.qemu_system.basename),
         'pub const machine = "{}";'.format(qemu.machine),
         'pub const target_arch = "{}";'.format(qemu.target_arch),
     ]
 
     if qemu.system_target == "x86_64-softmmu":
-        firmware = ctx.actions.declare_file(ctx.label.name + ".qboot.rom")
+        firmware_raw = ctx.actions.declare_file(ctx.label.name + ".qboot.rom")
         ctx.actions.run_shell(
             arguments = [
                 qemu.system_data_anchor.path,
-                firmware.path,
+                firmware_raw.path,
             ],
             command = """
 set -eu
 cp "$1/qboot.rom" "$2"
 """,
             inputs = qemu.system_data_files,
-            outputs = [firmware],
+            outputs = [firmware_raw],
         )
+        firmware = ctx.actions.declare_file(ctx.label.name + ".qboot.rom.zst")
+        zstd_compress(ctx, firmware_raw, firmware)
         embedded.append(firmware)
-        lines.append('pub const firmware: ?[]const u8 = @embedFile("{}");'.format(firmware.basename))
+        lines.append('pub const firmware_zstd: ?[]const u8 = @embedFile("{}");'.format(firmware.basename))
     elif qemu.system_target == "aarch64-softmmu":
-        lines.append("pub const firmware: ?[]const u8 = null;")
+        lines.append("pub const firmware_zstd: ?[]const u8 = null;")
     else:
         fail("unsupported embedded QEMU system target: {}".format(qemu.system_target))
 
@@ -44,6 +47,7 @@ cp "$1/qboot.rom" "$2"
 
 _zig_embedded_qemu_source = rule(
     implementation = _zig_embedded_qemu_source_impl,
+    attrs = {"_zstd": zstd_tool_attr()},
     toolchains = [_QEMU_TOOLCHAIN_TYPE],
 )
 

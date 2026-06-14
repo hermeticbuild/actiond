@@ -33,7 +33,7 @@ zig_binary(
 zig_embedded_assets(
     name = "embedded_assets",
     initramfs = "//vm:initramfs_aarch64",
-    kernel = "//vm:linux_kernel.image_zst",
+    kernel = "//vm:linux_kernel.image",
     runtime_image = "//runtimes:runtimes_squashfs_aarch64",
 )
 

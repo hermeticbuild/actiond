@@ -5,6 +5,7 @@ artifact_dir="${1:-release}"
 artifact_dir="$(mkdir -p "${artifact_dir}" && cd "${artifact_dir}" && pwd)"
 bazel_flags=(
   --config=remote
+  --strip=always
 )
 
 if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then

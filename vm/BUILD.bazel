@@ -1,18 +1,18 @@
-load("@linux.bzl//:linux.bzl", "linux")
 load("@bazel_lib//lib:run_binary.bzl", "run_binary")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@linux.bzl//:linux.bzl", "linux")
 
 run_binary(
     name = "initramfs",
-    args = [
-        "$(location initramfs.cpio.zst)",
-        "$(location //cmd/linux_actiond_guest:linux-actiond-guest)",
-        "--file=$(location @e2fsprogs//:mkfs_ext4.stripped)=/sbin/mkfs.ext4",
-    ],
-    outs = ["initramfs.cpio.zst"],
     srcs = [
         "//cmd/linux_actiond_guest:linux-actiond-guest",
         "@e2fsprogs//:mkfs_ext4.stripped",
+    ],
+    outs = ["initramfs.cpio"],
+    args = [
+        "$(location initramfs.cpio)",
+        "$(location //cmd/linux_actiond_guest:linux-actiond-guest)",
+        "--file=$(location @e2fsprogs//:mkfs_ext4.stripped)=/sbin/mkfs.ext4",
     ],
     tags = ["manual"],
     tool = "//tools:initramfs_newc",
@@ -35,13 +35,13 @@ platform_transition_filegroup(
 
 linux(
     name = "linux_kernel",
-    config = {
-        "aarch64": "@actiond_vm_aarch64_kconfig//:kconfig",
-        "x86_64": "@actiond_vm_x86_64_kconfig//:kconfig",
-    },
     compact_repos = {
         "aarch64": "@actiond_vm_aarch64_compact",
         "x86_64": "@actiond_vm_x86_64_compact",
+    },
+    config = {
+        "aarch64": "@actiond_vm_aarch64_kconfig//:kconfig",
+        "x86_64": "@actiond_vm_x86_64_kconfig//:kconfig",
     },
     config_mode = "allnoconfig",
     extra_kconfigs = {
@@ -54,6 +54,8 @@ linux(
 
 run_binary(
     name = "linux_kernel.image_zst",
+    srcs = [":linux_kernel.image"],
+    outs = ["Image.zst"],
     args = [
         "-q",
         "--ultra",
@@ -63,8 +65,6 @@ run_binary(
         "-o",
         "$(location :Image.zst)",
     ],
-    outs = ["Image.zst"],
-    srcs = [":linux_kernel.image"],
     tool = "@zstd//:zstd_cli",
     visibility = ["//visibility:public"],
 )

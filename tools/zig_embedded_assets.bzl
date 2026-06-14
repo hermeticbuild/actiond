@@ -1,4 +1,5 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//tools:zstd.bzl", "zstd_compress", "zstd_tool_attr")
 
 def _asset_file(target, name):
     files = target[DefaultInfo].files.to_list()
@@ -16,10 +17,10 @@ def _zig_embedded_assets_source_impl(ctx):
         ("runtime_image", ctx.attr.runtime_image),
     ]:
         asset = _asset_file(target, name)
-        staged = ctx.actions.declare_file(ctx.label.name + "." + name)
-        ctx.actions.symlink(output = staged, target_file = asset)
-        embedded.append(staged)
-        lines.append('pub const %s = @embedFile("%s");' % (name, staged.basename))
+        compressed = ctx.actions.declare_file(ctx.label.name + "." + name + ".zst")
+        zstd_compress(ctx, asset, compressed)
+        embedded.append(compressed)
+        lines.append('pub const %s_zstd = @embedFile("%s");' % (name, compressed.basename))
     ctx.actions.write(out, "\n".join(lines) + "\n")
     return [
         DefaultInfo(files = depset([out])),
@@ -32,6 +33,7 @@ _zig_embedded_assets_source = rule(
         "initramfs": attr.label(mandatory = True),
         "kernel": attr.label(mandatory = True),
         "runtime_image": attr.label(mandatory = True),
+        "_zstd": zstd_tool_attr(),
     },
 )
 

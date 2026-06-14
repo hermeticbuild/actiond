@@ -32,6 +32,7 @@ pub const version = @import("version.zig");
 pub const vm_host = @import("vm_host.zig");
 pub const vsock = @import("vsock.zig");
 pub const windows_vm_host = @import("windows_vm_host.zig");
+pub const zstd = @import("zstd.zig");
 
 test {
     _ = action_executor;
@@ -68,4 +69,5 @@ test {
     _ = vm_host;
     _ = vsock;
     _ = windows_vm_host;
+    _ = zstd;
 }

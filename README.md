@@ -5,7 +5,8 @@ Windows, and Linux it starts a small Linux VM and runs Bazel actions inside
 that VM, so the host can act like a local Linux remote-execution worker.
 
 The macOS ARM64, Windows ARM64/x86_64, and Linux ARM64/x86_64 releases include
-the matching VM kernel, initramfs, and Linux runtime image.
+zstd level 22 frames containing the matching VM kernel, initramfs, and Linux
+runtime image.
 
 ## Why Use It?
 
@@ -61,11 +62,12 @@ Windows requires Hyper-V. `windows-actiond` wraps the runtime SquashFS and
 guest-owned ext4 CAS in fixed VHD files. The default VHD paths are under
 `--root`; `--cas-image` can select another CAS VHD path.
 
-The Linux releases embed the matching QEMU executable from `rules_qemu`. The
-x86_64 release also embeds `qboot.rom`. `linux-actiond` passes QEMU, the Linux
-kernel, the initramfs, the runtime SquashFS, and `qboot.rom` through sealed
-memfds. The guest-owned CAS remains a persistent ext4 file under `--root`. The
-QEMU process uses KVM, host CPU passthrough, and `io_uring` for the CAS file.
+The Linux releases embed zstd level 22 frames containing the matching QEMU
+executable from `rules_qemu` and, on x86_64, `qboot.rom`. `linux-actiond`
+expands QEMU, the Linux kernel, the initramfs, the runtime SquashFS, and
+`qboot.rom` into sealed memfds. The guest-owned CAS remains a persistent ext4
+file under `--root`. The QEMU process uses KVM, host CPU passthrough, and
+`io_uring` for the CAS file.
 The host kernel must support `io_uring`. `linux-actiond` requires read/write
 access to `/dev/kvm` and `/dev/vhost-vsock`:
 

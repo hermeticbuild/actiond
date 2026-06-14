@@ -2,11 +2,13 @@ const builtin = @import("builtin");
 const std = @import("std");
 const control_transport_fd = @import("control_transport_fd.zig");
 const vsock = @import("vsock.zig");
+const zstd = @import("zstd.zig");
 
 const linux = std.os.linux;
 const mfd_exec = 0x0010;
 const max_vcpus = 64;
 const max_cas_queues = 4;
+const max_embedded_asset_bytes = 512 * 1024 * 1024;
 
 pub const fexec_argument = "--actiond-internal-fexec-qemu";
 pub const embedded_kernel_path = "actiond-internal-embedded-kernel";
@@ -247,7 +249,9 @@ pub fn fexecEmbedded(
     };
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     defer file.close(io);
-    try file.writePositionalAll(io, embedded_qemu.qemu_system, 0);
+    const qemu_system = try zstd.decompressAlloc(allocator, embedded_qemu.qemu_system_zstd, max_embedded_asset_bytes);
+    defer allocator.free(qemu_system);
+    try file.writePositionalAll(io, qemu_system, 0);
     try file.setPermissions(io, .executable_file);
 
     const seals = linux.F.SEAL_SEAL | linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_WRITE;
@@ -265,7 +269,7 @@ pub fn fexecEmbedded(
             continue;
         };
         if (inherited_fd_count == inherited_fds.len) return error.TooManyEmbeddedAssets;
-        const inherited_fd = try createSealedMemfd(io, asset.name, asset.bytes);
+        const inherited_fd = try createSealedZstdMemfd(io, allocator, asset.name, asset.bytes);
         inherited_fds[inherited_fd_count] = inherited_fd;
         inherited_fd_count += 1;
         const path = try std.fmt.allocPrintSentinel(allocator, "/proc/self/fd/{d}", .{inherited_fd}, 0);
@@ -288,13 +292,13 @@ const EmbeddedAsset = struct {
 };
 
 fn embeddedAsset(arg: []const u8, comptime embedded_assets: type, comptime embedded_qemu: type) !?EmbeddedAsset {
-    if (std.mem.indexOf(u8, arg, embedded_kernel_path) != null) return .{ .marker = embedded_kernel_path, .name = "actiond-kernel", .bytes = embedded_assets.kernel };
-    if (std.mem.indexOf(u8, arg, embedded_initramfs_path) != null) return .{ .marker = embedded_initramfs_path, .name = "actiond-initramfs", .bytes = embedded_assets.initramfs };
-    if (std.mem.indexOf(u8, arg, embedded_runtime_image_path) != null) return .{ .marker = embedded_runtime_image_path, .name = "actiond-runtimes", .bytes = embedded_assets.runtime_image };
+    if (std.mem.indexOf(u8, arg, embedded_kernel_path) != null) return .{ .marker = embedded_kernel_path, .name = "actiond-kernel", .bytes = embedded_assets.kernel_zstd };
+    if (std.mem.indexOf(u8, arg, embedded_initramfs_path) != null) return .{ .marker = embedded_initramfs_path, .name = "actiond-initramfs", .bytes = embedded_assets.initramfs_zstd };
+    if (std.mem.indexOf(u8, arg, embedded_runtime_image_path) != null) return .{ .marker = embedded_runtime_image_path, .name = "actiond-runtimes", .bytes = embedded_assets.runtime_image_zstd };
     if (std.mem.indexOf(u8, arg, embedded_firmware_path) != null) return .{
         .marker = embedded_firmware_path,
         .name = "actiond-firmware",
-        .bytes = embedded_qemu.firmware orelse return error.InvalidQemuAssets,
+        .bytes = embedded_qemu.firmware_zstd orelse return error.InvalidQemuAssets,
     };
     return null;
 }
@@ -316,10 +320,17 @@ fn replaceEmbeddedAssetPath(
     return replaced;
 }
 
-fn createSealedMemfd(io: std.Io, name: []const u8, bytes: []const u8) !std.posix.fd_t {
+fn createSealedZstdMemfd(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    compressed: []const u8,
+) !std.posix.fd_t {
     const fd = try std.posix.memfd_create(name, linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING);
     errdefer closeFd(fd);
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const bytes = try zstd.decompressAlloc(allocator, compressed, max_embedded_asset_bytes);
+    defer allocator.free(bytes);
     try file.writePositionalAll(io, bytes, 0);
 
     const seals = linux.F.SEAL_SEAL | linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_WRITE;
@@ -450,12 +461,12 @@ test "driveArg uses io_uring for the CAS image" {
 
 test "embedded asset arguments select embedded bytes" {
     const assets = struct {
-        const kernel = "kernel";
-        const initramfs = "initramfs";
-        const runtime_image = "runtimes";
+        const kernel_zstd = "kernel";
+        const initramfs_zstd = "initramfs";
+        const runtime_image_zstd = "runtimes";
     };
     const qemu = struct {
-        const firmware: ?[]const u8 = "qboot";
+        const firmware_zstd: ?[]const u8 = "qboot";
     };
 
     try std.testing.expectEqualStrings("kernel", (try embeddedAsset(embedded_kernel_path, assets, qemu)).?.bytes);
@@ -470,7 +481,7 @@ test "embedded asset arguments select embedded bytes" {
     try std.testing.expect((try embeddedAsset("/tmp/kernel", assets, qemu)) == null);
 
     const qemu_without_firmware = struct {
-        const firmware: ?[]const u8 = null;
+        const firmware_zstd: ?[]const u8 = null;
     };
     try std.testing.expectError(
         error.InvalidQemuAssets,
