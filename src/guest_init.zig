@@ -168,7 +168,7 @@ fn isCandidateBlockDevice(name: []const u8) bool {
 fn tryMountRuntimeDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
     const linux = std.os.linux;
     const fd_rc = linux.open(device.ptr, .{ .CLOEXEC = true }, 0);
-    switch (std.posix.errno(fd_rc)) {
+    switch (linux.errno(fd_rc)) {
         .SUCCESS => _ = linux.close(@intCast(fd_rc)),
         .NOENT, .NXIO, .NODEV, .NOTBLK => return false,
         else => return false,
@@ -181,7 +181,7 @@ fn tryMountRuntimeDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
         linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV,
         0,
     );
-    switch (std.posix.errno(rc)) {
+    switch (linux.errno(rc)) {
         .SUCCESS => {
             stderr.print("mounted runtime image from {s}\n", .{device}) catch {};
             stderr.flush() catch {};
@@ -203,7 +203,7 @@ fn tryMountRuntimeDevice(stderr: *std.Io.Writer, device: [:0]const u8) !bool {
 fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !CasMountAttempt {
     const linux = std.os.linux;
     const fd_rc = linux.open(device.ptr, .{ .CLOEXEC = true }, 0);
-    switch (std.posix.errno(fd_rc)) {
+    switch (linux.errno(fd_rc)) {
         .SUCCESS => _ = linux.close(@intCast(fd_rc)),
         .NOENT, .NXIO, .NODEV, .NOTBLK => return .unavailable,
         else => return .unavailable,
@@ -217,7 +217,7 @@ fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !CasMountAtte
         cas_mount_flags,
         @intFromPtr(data.ptr),
     );
-    switch (std.posix.errno(rc)) {
+    switch (linux.errno(rc)) {
         .SUCCESS => {
             stderr.print("mounted guest CAS from {s}\n", .{device}) catch {};
             stderr.flush() catch {};
@@ -315,7 +315,7 @@ fn sleepRuntimeDevicePollInterval() void {
         .sec = 0,
         .nsec = runtime_device_wait_ns,
     };
-    while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
+    while (std.os.linux.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
 }
 
 fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {
@@ -328,7 +328,7 @@ fn mount(stderr: *std.Io.Writer, mount_spec: Mount) !void {
         mount_spec.flags,
         if (mount_spec.data) |data| @intFromPtr(data.ptr) else 0,
     );
-    switch (std.posix.errno(rc)) {
+    switch (std.os.linux.errno(rc)) {
         .SUCCESS => {},
         else => |errno| {
             stderr.print("mount {s} on {s} type {s} failed: {s}\n", .{

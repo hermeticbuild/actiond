@@ -15,6 +15,7 @@ bazel_dep(name = "squashfs-tools", version = "4.7.5")
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
 bazel_dep(name = "codesign.bzl", version = "0.0.13")
 bazel_dep(name = "gawk", version = "5.3.2.bcr.3")
+bazel_dep(name = "rules_qemu", version = "0.3.0")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
@@ -55,6 +56,20 @@ register_toolchains("@zig_toolchains//:all")
 
 register_toolchains("@llvm//toolchain:all")
 register_toolchains("@codesign.bzl//toolchain:all")
+
+qemu = use_extension("@rules_qemu//qemu/extension:qemu.bzl", "qemu")
+qemu.system_toolchain(
+    system_target = "aarch64-softmmu",
+    target_settings = ["//platforms:qemu_system_aarch64"],
+)
+qemu.system_toolchain(
+    machine = "microvm,acpi=off,pcie=off,x-option-roms=off,rtc=off",
+    system_target = "x86_64-softmmu",
+    target_settings = ["//platforms:qemu_system_x86_64"],
+)
+use_repo(qemu, "qemu_system_toolchains", "qemu_user_toolchains")
+
+register_toolchains("@qemu_system_toolchains//:all")
 
 osx = use_extension("@llvm//extensions:osx.bzl", "osx")
 osx.frameworks(names = [
