@@ -30,7 +30,7 @@ pub fn serve(
     prepared.boot_initramfs_path = prepared.owned_boot_initramfs_path orelse prepared.assets.initramfs;
 
     const expects_firmware = std.mem.eql(u8, embedded_qemu.target_arch, "x86_64");
-    if ((embedded_qemu.firmware != null) != expects_firmware) return error.InvalidQemuAssets;
+    if ((embedded_qemu.firmware_zstd != null) != expects_firmware) return error.InvalidQemuAssets;
 
     std.log.info("starting QEMU VM kernel={s} initramfs={s} runtimes={s} cas={s}", .{
         prepared.boot_kernel_path,
@@ -46,7 +46,7 @@ pub fn serve(
         .initramfs_path = prepared.boot_initramfs_path,
         .runtime_image_path = prepared.assets.runtime_image,
         .cas_image_path = prepared.cas_image_path,
-        .firmware_path = if (embedded_qemu.firmware != null) qemu_vm.embedded_firmware_path else null,
+        .firmware_path = if (embedded_qemu.firmware_zstd != null) qemu_vm.embedded_firmware_path else null,
         .format_cas_image = prepared.format_cas_image,
         .memory_mib = options.memory_mib,
         .cpu_count = options.cpus,

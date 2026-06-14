@@ -53,6 +53,7 @@ zig_library(
         "vsock.zig",
         "windows_hcs.zig",
         "windows_vm_host.zig",
+        "zstd.zig",
     ],
     import_name = "actiond",
     main = "root.zig",
@@ -103,6 +104,7 @@ zig_test(
         "vsock.zig",
         "windows_hcs.zig",
         "windows_vm_host.zig",
+        "zstd.zig",
     ],
     main = "root.zig",
     deps = [

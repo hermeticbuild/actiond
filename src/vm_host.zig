@@ -3,13 +3,14 @@ const std = @import("std");
 const control_protocol = @import("control_protocol.zig");
 const control_transport_fd = @import("control_transport_fd.zig");
 const grpc_vsock_bridge = @import("grpc_vsock_bridge.zig");
+const zstd = @import("zstd.zig");
 const zstd_test = if (builtin.is_test) @import("c") else struct {};
 
 const max_compressed_initramfs_bytes = 128 * 1024 * 1024;
 const max_raw_initramfs_bytes = 512 * 1024 * 1024;
 const max_compressed_kernel_bytes = 128 * 1024 * 1024;
 const max_raw_kernel_bytes = 512 * 1024 * 1024;
-const zstd_magic = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd };
+const max_raw_runtime_image_bytes = 2 * 1024 * 1024 * 1024;
 var next_embedded_asset_temp_id = std.atomic.Value(u64).init(0);
 
 pub const ResolvedAssets = struct {
@@ -99,22 +100,35 @@ pub fn resolveAssets(
     if (options.kernel) |path| {
         resolved.kernel = path;
     } else {
-        resolved.owned_kernel = try materializeEmbeddedAsset(io, allocator, root_dir, "linux_kernel", embedded.kernel);
+        resolved.owned_kernel = try materializeEmbeddedZstdAsset(io, allocator, root_dir, "linux_kernel", embedded.kernel_zstd, max_raw_kernel_bytes);
         resolved.kernel = resolved.owned_kernel.?;
     }
     if (options.initramfs) |path| {
         resolved.initramfs = path;
     } else {
-        resolved.owned_initramfs = try materializeEmbeddedAsset(io, allocator, root_dir, "initramfs.cpio.zst", embedded.initramfs);
+        resolved.owned_initramfs = try materializeEmbeddedZstdAsset(io, allocator, root_dir, "initramfs.cpio", embedded.initramfs_zstd, max_raw_initramfs_bytes);
         resolved.initramfs = resolved.owned_initramfs.?;
     }
     if (options.runtime_image) |path| {
         resolved.runtime_image = path;
     } else {
-        resolved.owned_runtime_image = try materializeEmbeddedAsset(io, allocator, root_dir, "runtimes.sqfs", embedded.runtime_image);
+        resolved.owned_runtime_image = try materializeEmbeddedZstdAsset(io, allocator, root_dir, "runtimes.sqfs", embedded.runtime_image_zstd, max_raw_runtime_image_bytes);
         resolved.runtime_image = resolved.owned_runtime_image.?;
     }
     return resolved;
+}
+
+fn materializeEmbeddedZstdAsset(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_dir: std.Io.Dir,
+    name: []const u8,
+    compressed: []const u8,
+    max_raw_bytes: u64,
+) ![]u8 {
+    const raw = try zstd.decompressAlloc(allocator, compressed, max_raw_bytes);
+    defer allocator.free(raw);
+    return materializeEmbeddedAsset(io, allocator, root_dir, name, raw);
 }
 
 fn materializeEmbeddedAsset(
@@ -351,7 +365,7 @@ fn prepareZstdBootFile(
     );
     defer allocator.free(compressed);
 
-    if (!isZstdFrame(compressed)) {
+    if (!zstd.isFrame(compressed)) {
         if (std.mem.endsWith(u8, path, ".zst")) return error.InvalidCompressedBootArtifact;
         return null;
     }
@@ -371,7 +385,11 @@ fn prepareZstdBootFile(
         else => return err,
     }
 
-    const raw = try decompressZstdAlloc(allocator, compressed, max_raw_bytes);
+    const raw = zstd.decompressAlloc(allocator, compressed, max_raw_bytes) catch |err| switch (err) {
+        error.InvalidZstdFrame => return error.InvalidCompressedBootArtifact,
+        error.UnknownZstdContentSize => return error.UnknownCompressedBootArtifactSize,
+        else => |e| return e,
+    };
     defer allocator.free(raw);
 
     var file = try root_dir.createFile(io, output_rel, .{ .truncate = true });
@@ -383,36 +401,6 @@ fn prepareZstdBootFile(
 
     return try absoluteSubPath(io, allocator, root_dir, output_rel);
 }
-
-fn decompressZstdAlloc(allocator: std.mem.Allocator, compressed: []const u8, max_raw_bytes: u64) ![]u8 {
-    const content_size = ZSTD_getFrameContentSize(compressed.ptr, compressed.len);
-    if (content_size == zstdContentSizeError()) return error.InvalidCompressedBootArtifact;
-    if (content_size == zstdContentSizeUnknown()) return error.UnknownCompressedBootArtifactSize;
-    if (content_size > max_raw_bytes) return error.FileTooBig;
-
-    const raw = try allocator.alloc(u8, @intCast(content_size));
-    errdefer allocator.free(raw);
-    const actual_size = ZSTD_decompress(raw.ptr, raw.len, compressed.ptr, compressed.len);
-    if (ZSTD_isError(actual_size) != 0) return error.InvalidCompressedBootArtifact;
-    if (actual_size != raw.len) return error.InvalidCompressedBootArtifact;
-    return raw;
-}
-
-fn zstdContentSizeUnknown() c_ulonglong {
-    return std.math.maxInt(c_ulonglong);
-}
-
-fn zstdContentSizeError() c_ulonglong {
-    return std.math.maxInt(c_ulonglong) - 1;
-}
-
-fn isZstdFrame(bytes: []const u8) bool {
-    return bytes.len >= zstd_magic.len and std.mem.eql(u8, bytes[0..zstd_magic.len], &zstd_magic);
-}
-
-extern fn ZSTD_getFrameContentSize(src: *const anyopaque, src_size: usize) c_ulonglong;
-extern fn ZSTD_decompress(dst: *anyopaque, dst_capacity: usize, src: *const anyopaque, compressed_size: usize) usize;
-extern fn ZSTD_isError(code: usize) c_uint;
 
 pub fn absolutePath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) {
@@ -589,14 +577,35 @@ test "materializeEmbeddedAsset replaces corrupt cached bytes" {
     try std.testing.expectEqualStrings("payload", bytes);
 }
 
+test "materializeEmbeddedZstdAsset writes decompressed bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const compressed = try compressZstdForTest(std.testing.allocator, "payload");
+    defer std.testing.allocator.free(compressed);
+    const path = try materializeEmbeddedZstdAsset(
+        std.testing.io,
+        std.testing.allocator,
+        tmp.dir,
+        "kernel",
+        compressed,
+        1024,
+    );
+    defer std.testing.allocator.free(path);
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("payload", bytes);
+}
+
 test "resolveAssets preserves explicit paths" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const embedded = struct {
-        const kernel = "embedded kernel";
-        const initramfs = "embedded initramfs";
-        const runtime_image = "embedded runtimes";
+        const kernel_zstd = "embedded kernel";
+        const initramfs_zstd = "embedded initramfs";
+        const runtime_image_zstd = "embedded runtimes";
     };
 
     var resolved = try resolveAssets(std.testing.io, std.testing.allocator, tmp.dir, .{
@@ -659,8 +668,8 @@ test "prepareBootKernel inflates zstd payloads without relying on filename suffi
 }
 
 test "isZstdFrame detects zstd magic" {
-    try std.testing.expect(isZstdFrame(&zstd_magic));
-    try std.testing.expect(!isZstdFrame("not zstd"));
+    try std.testing.expect(zstd.isFrame(&.{ 0x28, 0xb5, 0x2f, 0xfd }));
+    try std.testing.expect(!zstd.isFrame("not zstd"));
 }
 
 test "decompressZstdAlloc inflates libzstd frames" {
@@ -668,7 +677,7 @@ test "decompressZstdAlloc inflates libzstd frames" {
     const compressed = try compressZstdForTest(std.testing.allocator, plain);
     defer std.testing.allocator.free(compressed);
 
-    const decompressed = try decompressZstdAlloc(std.testing.allocator, compressed, max_raw_initramfs_bytes);
+    const decompressed = try zstd.decompressAlloc(std.testing.allocator, compressed, max_raw_initramfs_bytes);
     defer std.testing.allocator.free(decompressed);
     try std.testing.expectEqualStrings(plain, decompressed);
 }
