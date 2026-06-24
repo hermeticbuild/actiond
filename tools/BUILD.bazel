@@ -2,15 +2,6 @@ load("@bazel_lib//lib:transitions.bzl", "platform_transition_binary")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
-    name = "initramfs_newc",
-    linkopts = ["-lc"],
-    main = "initramfs_newc.zig",
-    strip_debug_symbols = True,
-    visibility = ["//visibility:public"],
-    deps = ["@zstd"],
-)
-
-zig_binary(
     name = "e2e_action_tool",
     main = "e2e_action_tool.zig",
     strip_debug_symbols = True,
@@ -36,11 +27,4 @@ platform_transition_binary(
     binary = ":e2e_action_tool",
     target_platform = "//platforms:linux_x86_64_musl",
     visibility = ["//visibility:public"],
-)
-
-zig_test(
-    name = "initramfs_newc_tests",
-    linkopts = ["-lc"],
-    main = "initramfs_newc.zig",
-    deps = ["@zstd"],
 )
