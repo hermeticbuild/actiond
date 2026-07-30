@@ -133,7 +133,6 @@ struct actiondfs_sb_info {
 	struct path stage_path;
 	bool stage_path_valid;
 	struct actiondfs_node *root;
-	struct actiondfs_cached_dir *root_cached_dir;
 	atomic64_t next_ino;
 };
 
@@ -2483,6 +2482,8 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 	err = actiondfs_read_cas_blob(sbi, hash, expected_size, &buffer, &len);
 	if (err)
 		goto fail;
+	if (sbi->root && !memcmp(hash, sbi->root->hash, ACTIONDFS_HASH_HEX_LEN))
+		actiondfs_stat_inc(ACTIONDFS_STAT_ROOT_DIR_PARSES);
 	entry->size = len;
 	actiondfs_stat_inc(ACTIONDFS_STAT_CACHED_DIR_BUILDS);
 	actiondfs_stat_add(ACTIONDFS_STAT_CACHED_DIR_BYTES, (u64)len);
@@ -2611,29 +2612,16 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 						 struct actiondfs_node *dir)
 {
+	struct actiondfs_cached_dir *cached;
 	int err;
 
 	if (smp_load_acquire(&dir->loaded))
 		return 0;
 
-	if (dir->parent) {
-		struct actiondfs_cached_dir *cached;
-
-		err = actiondfs_get_cached_dir(sbi, dir->hash, dir->size,
-					       &cached);
-		if (err)
-			return err;
-		dir->cached_dir = cached;
-		smp_store_release(&dir->loaded, true);
-		return 0;
-	}
-
-	actiondfs_stat_inc(ACTIONDFS_STAT_ROOT_DIR_PARSES);
-	err = actiondfs_build_cached_dir(sbi, dir->hash, dir->size,
-					 &dir->cached_dir);
+	err = actiondfs_get_cached_dir(sbi, dir->hash, dir->size, &cached);
 	if (err)
 		return err;
-	sbi->root_cached_dir = dir->cached_dir;
+	dir->cached_dir = cached;
 	smp_store_release(&dir->loaded, true);
 	return 0;
 }
@@ -4057,7 +4045,6 @@ static void actiondfs_put_super(struct super_block *sb)
 	if (!sbi)
 		return;
 	actiondfs_free_tree(sbi->root);
-	actiondfs_free_cached_dir(sbi->root_cached_dir);
 	if (sbi->cas_path.dentry)
 		path_put(&sbi->cas_path);
 	if (sbi->stage_path_valid)
