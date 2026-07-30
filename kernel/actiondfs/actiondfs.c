@@ -106,6 +106,8 @@ struct actiondfs_node {
 	umode_t mode;
 	u64 size;
 	char hash[65];
+	const char *input_name;
+	size_t input_name_len;
 	struct file *blob_file;
 	struct mutex blob_lock;
 	struct mutex load_lock;
@@ -818,6 +820,8 @@ actiondfs_materialize_cached_child(struct actiondfs_sb_info *sbi,
 		return ERR_PTR(-ENOMEM);
 
 	node->parent = parent;
+	node->input_name = record->name;
+	node->input_name_len = record->name_len;
 	node->ino = actiondfs_input_child_ino(parent, record->name,
 					     record->name_len,
 					     S_ISDIR(record->mode));
@@ -2497,13 +2501,40 @@ static int actiondfs_parse_options(struct actiondfs_mount_options *opts, void *d
 	return 0;
 }
 
+static int actiondfs_test_input_inode(struct inode *inode, void *data)
+{
+	struct actiondfs_node *candidate = data;
+	struct actiondfs_node *existing = inode->i_private;
+
+	return existing && existing->origin == ACTIONDFS_NODE_INPUT &&
+	       existing->ino == candidate->ino &&
+	       existing->parent == candidate->parent &&
+	       (existing->mode & S_IFMT) == (candidate->mode & S_IFMT) &&
+	       existing->input_name_len == candidate->input_name_len &&
+	       !memcmp(existing->input_name, candidate->input_name,
+		       candidate->input_name_len);
+}
+
+static int actiondfs_set_input_inode(struct inode *inode, void *data)
+{
+	struct actiondfs_node *node = data;
+
+	inode->i_ino = node->ino;
+	inode->i_private = node;
+	return 0;
+}
+
 static struct inode *actiondfs_iget(struct super_block *sb,
 				    struct actiondfs_node *node)
 {
 	struct inode *inode;
 	bool input_child = node->origin == ACTIONDFS_NODE_INPUT && node->parent;
 
-	inode = iget_locked(sb, node->ino);
+	if (input_child)
+		inode = iget5_locked(sb, node->ino, actiondfs_test_input_inode,
+				     actiondfs_set_input_inode, node);
+	else
+		inode = iget_locked(sb, node->ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 	if (!(inode->i_state & I_NEW)) {
@@ -3476,8 +3507,27 @@ static void actiondfs_evict_inode(struct inode *inode)
 
 	truncate_inode_pages_final(&inode->i_data);
 	clear_inode(inode);
-	if (node && (!sbi || node != sbi->root))
-		actiondfs_free_tree(node);
+	if (!node)
+		return;
+	if (sbi && node == sbi->root) {
+		inode->i_private = NULL;
+		return;
+	}
+	if (node->stage_dentry) {
+		dput(node->stage_dentry);
+		node->stage_dentry = NULL;
+	}
+}
+
+static void actiondfs_free_inode(struct inode *inode)
+{
+	struct actiondfs_node *node = inode->i_private;
+
+	if (node) {
+		WARN_ON_ONCE(node->stage_dentry);
+		kfree(node);
+	}
+	free_inode_nonrcu(inode);
 }
 
 static void actiondfs_put_super(struct super_block *sb)
@@ -3500,6 +3550,7 @@ static const struct super_operations actiondfs_super_ops = {
 	.statfs = simple_statfs,
 	.put_super = actiondfs_put_super,
 	.evict_inode = actiondfs_evict_inode,
+	.free_inode = actiondfs_free_inode,
 };
 
 struct actiondfs_mount_context {
@@ -3677,6 +3728,7 @@ static void __exit actiondfs_exit(void)
 #endif
 	unregister_filesystem(&actiondfs_fs_type);
 	actiondfs_destroy_blob_path_cache();
+	rcu_barrier();
 	actiondfs_destroy_dir_cache();
 }
 
