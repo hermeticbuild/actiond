@@ -2868,7 +2868,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 			err = actiondfs_get_cached_dir(sbi, input_lookup.record->hash,
 						       input_lookup.record->size,
 						       &input_cached);
-			if (err && err != -ENOENT) {
+			if (err) {
 				actiondfs_stage_unlock_child(&parent_path, real_dentry);
 				path_put(&parent_path);
 				actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
@@ -3314,6 +3314,8 @@ static int actiondfs_rmdir(struct inode *dir, struct dentry *dentry)
 		return -EROFS;
 	if (!S_ISDIR(node->mode))
 		return -ENOTDIR;
+	if (node->cached_dir)
+		return -EROFS;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RMDIR_CALLS);
 	err = actiondfs_stage_node_path(sbi, parent, &parent_path);
@@ -3375,6 +3377,9 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	if (old_node->origin != ACTIONDFS_NODE_STAGED)
 		return -EROFS;
 	if (new_node && new_node->origin != ACTIONDFS_NODE_STAGED)
+		return -EROFS;
+	if ((S_ISDIR(old_node->mode) && old_node->cached_dir) ||
+	    (new_node && S_ISDIR(new_node->mode) && new_node->cached_dir))
 		return -EROFS;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_CALLS);
