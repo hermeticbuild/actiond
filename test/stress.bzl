@@ -270,7 +270,10 @@ def stress_workload(name, tool):
     stress_symlinks(
         name = "filesystem_regression",
         execution_requirements = {"libc": "glibc2.35"},
-        srcs = [":bare_inputs"],
+        srcs = [
+            ":bare_inputs",
+            "nested_files/group_001/foo/bar/baz/0001.txt",
+        ],
         stress_case = "filesystem_regression",
         tool = tool,
     )

@@ -482,6 +482,8 @@ fn exerciseFilesystem(
     var output_dir = try root.openDir(io, output_path, .{ .iterate = true });
     defer output_dir.close(io);
     try output_dir.createDirPath(io, "filesystem");
+    try requireFilesystem((try output_dir.stat(io)).nlink == 3, "creating a staged subdirectory did not increment the output directory link count");
+    try exerciseInputDirectoryLinkCounts(io, root);
     var dir = try output_dir.openDir(io, "filesystem", .{ .iterate = true });
     defer dir.close(io);
 
@@ -492,6 +494,26 @@ fn exerciseFilesystem(
     try exerciseImmutableInputAuthorization(io, allocator, root, inputs);
     try syncDirectory(dir);
     try syncDirectory(output_dir);
+}
+
+fn exerciseInputDirectoryLinkCounts(io: std.Io, root: std.Io.Dir) !void {
+    const paths = [_][]const u8{
+        "nested_files",
+        "nested_files/group_001",
+        "nested_files/group_001/foo",
+        "nested_files/group_001/foo/bar",
+        "nested_files/group_001/foo/bar/baz",
+    };
+    for (paths, 0..) |path, index| {
+        var dir = try root.openDir(io, path, .{ .iterate = true });
+        defer dir.close(io);
+        const expected: std.Io.File.NLink = if (index + 1 == paths.len) 2 else 3;
+        const actual = (try dir.stat(io)).nlink;
+        if (actual != expected) {
+            std.debug.print("immutable input directory {s} has {d} links, expected {d}\n", .{ path, actual, expected });
+            return filesystemFailure("immutable input directory reported an incorrect link count");
+        }
+    }
 }
 
 fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {

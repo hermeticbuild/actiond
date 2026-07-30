@@ -3304,6 +3304,8 @@ static int actiondfs_unlink(struct inode *dir, struct dentry *dentry)
 				 NULL);
 	}
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
+	if (!err)
+		clear_nlink(inode);
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
 out_put_path:
@@ -3352,8 +3354,10 @@ static int actiondfs_rmdir(struct inode *dir, struct dentry *dentry)
 				d_inode(parent_path.dentry), real_dentry);
 	}
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
-	if (!err)
+	if (!err) {
+		clear_nlink(inode);
 		drop_nlink(dir);
+	}
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
 out_put_path:
@@ -3455,8 +3459,20 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	rd.new_dentry = real_new;
 	rd.flags = flags;
 	err = vfs_rename(&rd);
-	if (!err)
+	if (!err) {
+		if (new_node)
+			clear_nlink(d_inode(new_dentry));
+		if (S_ISDIR(old_node->mode)) {
+			if (old_dir != new_dir) {
+				drop_nlink(old_dir);
+				if (!new_node)
+					inc_nlink(new_dir);
+			} else if (new_node) {
+				drop_nlink(new_dir);
+			}
+		}
 		old_node->parent = new_parent;
+	}
 
 out_unlock:
 	if (real_new)
@@ -3873,6 +3889,57 @@ static size_t actiondfs_readdir_start_index_counted(loff_t ctx_pos, loff_t base,
 	return start;
 }
 
+static int actiondfs_dir_getattr(struct mnt_idmap *idmap,
+				 const struct path *path,
+				 struct kstat *stat,
+				 u32 request_mask,
+				 unsigned int query_flags)
+{
+	struct inode *inode = d_inode(path->dentry);
+	struct actiondfs_node *node = inode->i_private;
+	struct actiondfs_cached_dir *cached;
+	struct dentry *stage_dentry;
+	struct inode *stage_inode;
+	size_t input_dir_count;
+	unsigned int backing_nlink = 0;
+	int err;
+
+	err = actiondfs_ensure_loaded(inode->i_sb, node);
+	if (err)
+		return err;
+	err = simple_getattr(idmap, path, stat, request_mask, query_flags);
+	if (err)
+		return err;
+
+	cached = node->cached_dir;
+	stage_dentry = READ_ONCE(node->stage_dentry);
+	if (stage_dentry) {
+		stage_inode = d_inode(stage_dentry);
+		if (stage_inode && S_ISDIR(stage_inode->i_mode))
+			backing_nlink = READ_ONCE(stage_inode->i_nlink);
+		else
+			stage_dentry = NULL;
+	}
+	if (!cached) {
+		if (stage_dentry)
+			stat->nlink = backing_nlink;
+		return 0;
+	}
+
+	if (cached->dir_count > UINT_MAX - 2) {
+		stat->nlink = 1;
+		return 0;
+	}
+	input_dir_count = cached->dir_count;
+	if (!stage_dentry || backing_nlink == 2)
+		stat->nlink = 2 + input_dir_count;
+	else if (!input_dir_count)
+		stat->nlink = backing_nlink;
+	else
+		stat->nlink = 1;
+	return 0;
+}
+
 static const struct inode_operations actiondfs_file_iops = {
 	.getattr = simple_getattr,
 	.setattr = actiondfs_setattr,
@@ -3903,7 +3970,7 @@ static const struct inode_operations actiondfs_dir_iops = {
 	.unlink = actiondfs_unlink,
 	.rmdir = actiondfs_rmdir,
 	.rename = actiondfs_rename,
-	.getattr = simple_getattr,
+	.getattr = actiondfs_dir_getattr,
 	.setattr = actiondfs_setattr,
 };
 
