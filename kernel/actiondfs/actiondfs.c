@@ -1811,6 +1811,8 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 			err = actiondfs_pb_read_varint(data, len, &pos, &value);
 			if (err)
 				return err;
+			if (value > (u64)MAX_LFS_FILESIZE)
+				return -EINVAL;
 			digest->size = value;
 			break;
 		default:
@@ -2454,7 +2456,8 @@ static int actiondfs_parse_options(struct actiondfs_mount_options *opts, void *d
 				return -ENOMEM;
 			}
 		} else if (str_has_prefix(token, "root_size=")) {
-			if (kstrtoull(token + 10, 10, &opts->root_size)) {
+			if (kstrtoull(token + 10, 10, &opts->root_size) ||
+			    opts->root_size > MAX_LFS_FILESIZE) {
 				kfree(options);
 				return -EINVAL;
 			}
