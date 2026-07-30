@@ -1523,6 +1523,37 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	return nread;
 }
 
+static void actiondfs_sync_staged_inode(struct inode *inode,
+					struct inode *backing_inode)
+{
+	struct actiondfs_node *node = inode->i_private;
+	loff_t size;
+
+	spin_lock(&inode->i_lock);
+	size = i_size_read(backing_inode);
+	node->size = size;
+	i_size_write(inode, size);
+	inode_set_mtime_to_ts(inode, inode_get_mtime(backing_inode));
+	inode_set_ctime_to_ts(inode, inode_get_ctime(backing_inode));
+	spin_unlock(&inode->i_lock);
+}
+
+static void actiondfs_stage_end_write(struct kiocb *iocb, ssize_t written)
+{
+	struct file *backing_file;
+
+	if (written <= 0)
+		return;
+
+	backing_file = iocb->ki_filp->private_data;
+	if (!backing_file)
+		return;
+
+	actiondfs_sync_staged_inode(file_inode(iocb->ki_filp),
+				    file_inode(backing_file));
+	actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES, (u64)written);
+}
+
 static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -1531,6 +1562,7 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t nwritten;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
+		.end_write = actiondfs_stage_end_write,
 	};
 
 	if (node->origin != ACTIONDFS_NODE_STAGED)
@@ -1548,16 +1580,6 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		}
 		nwritten = backing_file_write_iter(file, from, iocb,
 						   iocb->ki_flags, &ctx);
-		if (nwritten > 0) {
-			loff_t end = iocb->ki_pos;
-
-			if (end > node->size) {
-				node->size = end;
-				i_size_write(inode, end);
-			}
-			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES,
-					   (u64)nwritten);
-		}
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
 					   total_start);
 	}
@@ -1654,19 +1676,12 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	}
 
 	copied = vfs_copy_file_range(real_in, pos_in, real_out, pos_out, len, 0);
-	if (copied > 0) {
-		pos_out += copied;
-	}
+	if (copied > 0)
+		actiondfs_sync_staged_inode(inode_out, file_inode(real_out));
 	fput(real_out);
 	fput(real_in);
 	if (copied > 0) {
-		loff_t end = pos_out;
-
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_SUCCESS);
-		if (end > node_out->size) {
-			node_out->size = end;
-			i_size_write(inode_out, end);
-		}
 		actiondfs_stat_add(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_BYTES,
 				   (u64)copied);
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_COPY_FILE_RANGE_TOTAL_NS,
@@ -3545,10 +3560,9 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			    &real_attr, NULL);
 	inode_unlock(d_inode(real_path.dentry));
 	if (!err) {
-		if (changing_size) {
-			node->size = i_size_read(d_inode(real_path.dentry));
-			i_size_write(inode, node->size);
-		}
+		if (changing_size)
+			actiondfs_sync_staged_inode(inode,
+						    d_inode(real_path.dentry));
 		setattr_copy(idmap, inode, attr);
 		mark_inode_dirty(inode);
 	}
