@@ -39,6 +39,7 @@
 #include <linux/uaccess.h>
 #include <linux/uio.h>
 #include <linux/vmalloc.h>
+#include <linux/workqueue.h>
 
 #ifndef ACTIONDFS_ENABLE_STATS
 #define ACTIONDFS_ENABLE_STATS 0
@@ -86,6 +87,8 @@ struct actiondfs_cached_dir {
 struct actiondfs_blob_path_cache_entry {
 	struct hlist_node hnode;
 	struct list_head list;
+	struct rcu_head rcu;
+	struct work_struct release_work;
 	char hash[65];
 	struct path cas_root;
 	struct path path;
@@ -401,6 +404,7 @@ static DEFINE_HASHTABLE(actiondfs_blob_path_cache, ACTIONDFS_BLOB_PATH_CACHE_BIT
 static LIST_HEAD(actiondfs_blob_path_cache_list);
 static DEFINE_MUTEX(actiondfs_blob_path_cache_lock);
 static size_t actiondfs_blob_path_cache_count;
+static struct workqueue_struct *actiondfs_blob_path_cache_release_wq;
 
 static const struct inode_operations actiondfs_dir_iops;
 static const struct inode_operations actiondfs_file_iops;
@@ -918,6 +922,29 @@ static void actiondfs_free_blob_path_cache_entry(struct actiondfs_blob_path_cach
 	path_put(&entry->path);
 	path_put(&entry->cas_root);
 	kfree(entry);
+}
+
+static void actiondfs_release_blob_path_cache_entry_work(struct work_struct *work)
+{
+	struct actiondfs_blob_path_cache_entry *entry =
+		container_of(work, struct actiondfs_blob_path_cache_entry,
+			     release_work);
+
+	actiondfs_free_blob_path_cache_entry(entry);
+}
+
+static void actiondfs_release_blob_path_cache_entry_rcu(struct rcu_head *rcu)
+{
+	struct actiondfs_blob_path_cache_entry *entry =
+		container_of(rcu, struct actiondfs_blob_path_cache_entry, rcu);
+
+	queue_work(actiondfs_blob_path_cache_release_wq, &entry->release_work);
+}
+
+static void actiondfs_release_blob_path_cache_entry(
+	struct actiondfs_blob_path_cache_entry *entry)
+{
+	call_rcu(&entry->rcu, actiondfs_release_blob_path_cache_entry_rcu);
 }
 
 static void actiondfs_destroy_blob_path_cache(void)
@@ -2096,14 +2123,11 @@ static void actiondfs_get_blob_path_cache_entry_locked(
 
 static void actiondfs_evict_blob_path_cache_one_locked(void)
 {
-	struct actiondfs_blob_path_cache_entry *entry;
-	struct actiondfs_blob_path_cache_entry *victim = NULL;
+	struct actiondfs_blob_path_cache_entry *victim;
 
-	list_for_each_entry(entry, &actiondfs_blob_path_cache_list, list) {
-		if (!victim ||
-		    atomic_read(&entry->hits) < atomic_read(&victim->hits))
-			victim = entry;
-	}
+	victim = list_first_entry_or_null(&actiondfs_blob_path_cache_list,
+					  struct actiondfs_blob_path_cache_entry,
+					  list);
 	if (!victim)
 		return;
 
@@ -2111,8 +2135,7 @@ static void actiondfs_evict_blob_path_cache_one_locked(void)
 	list_del(&victim->list);
 	actiondfs_blob_path_cache_count--;
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_EVICTIONS);
-	synchronize_rcu();
-	actiondfs_free_blob_path_cache_entry(victim);
+	actiondfs_release_blob_path_cache_entry(victim);
 }
 
 static int actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
@@ -2139,6 +2162,8 @@ static int actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 	entry->path = *path;
 	path_get(&entry->path);
 	INIT_LIST_HEAD(&entry->list);
+	INIT_WORK(&entry->release_work,
+		  actiondfs_release_blob_path_cache_entry_work);
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
 	existing = actiondfs_find_blob_path_cache_locked(sbi, hash);
@@ -2220,10 +2245,8 @@ static void actiondfs_drop_cached_blob_path(struct actiondfs_sb_info *sbi,
 		actiondfs_blob_path_cache_count--;
 	}
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
-	if (entry) {
-		synchronize_rcu();
-		actiondfs_free_blob_path_cache_entry(entry);
-	}
+	if (entry)
+		actiondfs_release_blob_path_cache_entry(entry);
 }
 
 static struct actiondfs_cached_dir *actiondfs_find_cached_dir_locked(struct actiondfs_sb_info *sbi,
@@ -3716,20 +3739,29 @@ static int __init actiondfs_init(void)
 {
 	int err;
 
+	actiondfs_blob_path_cache_release_wq = alloc_workqueue(
+		ACTIONDFS_FS_NAME "-blob-cache", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	if (!actiondfs_blob_path_cache_release_wq)
+		return -ENOMEM;
+
 	err = register_filesystem(&actiondfs_fs_type);
 	if (err)
-		return err;
+		goto fail_workqueue;
 #if ACTIONDFS_ENABLE_STATS
 	if (!proc_create_single(ACTIONDFS_PROC_STATS, 0444, NULL,
 				actiondfs_stats_show)) {
 		err = -ENOMEM;
-		goto fail;
+		goto fail_filesystem;
 	}
 #endif
 	return 0;
 
-fail:
+#if ACTIONDFS_ENABLE_STATS
+fail_filesystem:
 	unregister_filesystem(&actiondfs_fs_type);
+#endif
+fail_workqueue:
+	destroy_workqueue(actiondfs_blob_path_cache_release_wq);
 	return err;
 }
 
@@ -3741,6 +3773,7 @@ static void __exit actiondfs_exit(void)
 	unregister_filesystem(&actiondfs_fs_type);
 	actiondfs_destroy_blob_path_cache();
 	rcu_barrier();
+	destroy_workqueue(actiondfs_blob_path_cache_release_wq);
 	actiondfs_destroy_dir_cache();
 }
 
