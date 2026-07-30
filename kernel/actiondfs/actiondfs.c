@@ -2501,12 +2501,16 @@ static struct inode *actiondfs_iget(struct super_block *sb,
 				    struct actiondfs_node *node)
 {
 	struct inode *inode;
+	bool input_child = node->origin == ACTIONDFS_NODE_INPUT && node->parent;
 
 	inode = iget_locked(sb, node->ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
+	if (!(inode->i_state & I_NEW)) {
+		if (input_child)
+			actiondfs_free_tree(node);
 		return inode;
+	}
 
 	inode_init_owner(&nop_mnt_idmap, inode, NULL, node->mode);
 	inode->i_private = node;
@@ -2677,8 +2681,10 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 				return ERR_CAST(child);
 			actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUP_HITS);
 			inode = actiondfs_iget(dir->i_sb, child);
-			if (IS_ERR(inode))
+			if (IS_ERR(inode)) {
+				actiondfs_free_tree(child);
 				return ERR_CAST(inode);
+			}
 		} else {
 			actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUP_NEGATIVE);
 		}
