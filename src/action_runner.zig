@@ -326,11 +326,11 @@ fn prepareChrootWritableSubdirs(
 
 fn makeDirectoryWritableBySandbox(fd: std.posix.fd_t, uid: u32, gid: u32) !void {
     const linux = std.os.linux;
-    switch (std.posix.errno(linux.fchown(fd, @intCast(uid), @intCast(gid)))) {
+    switch (std.os.linux.errno(linux.fchown(fd, @intCast(uid), @intCast(gid)))) {
         .SUCCESS => {},
         else => return error.Unexpected,
     }
-    switch (std.posix.errno(linux.fchmod(fd, 0o755))) {
+    switch (std.os.linux.errno(linux.fchmod(fd, 0o755))) {
         .SUCCESS => {},
         else => return error.Unexpected,
     }
@@ -494,7 +494,7 @@ const child_setup_fd: std.posix.fd_t = 3;
 fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     const linux = std.os.linux;
     const rc = linux.fork();
-    switch (std.posix.errno(rc)) {
+    switch (std.os.linux.errno(rc)) {
         .SUCCESS => {},
         .AGAIN, .NOMEM => return error.SystemResources,
         else => return error.Unexpected,
@@ -539,7 +539,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     var saw_access_denied = false;
     for (action.exec_candidates) |candidate| {
         const execve_rc = linux.execve(candidate.ptr, action.argv, action.envp);
-        exec_errno = std.posix.errno(execve_rc);
+        exec_errno = std.os.linux.errno(execve_rc);
         switch (exec_errno) {
             .NOENT, .NOTDIR => continue,
             .ACCES => {
@@ -560,7 +560,7 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
 fn childEnterPidNamespace() void {
     const linux = std.os.linux;
     const rc = linux.fork();
-    switch (std.posix.errno(rc)) {
+    switch (std.os.linux.errno(rc)) {
         .SUCCESS => {},
         else => {
             childWriteLiteral("actiond child setup failed: fork_pidns\n");
@@ -574,7 +574,7 @@ fn childEnterPidNamespace() void {
     var raw_status: u32 = 0;
     while (true) {
         const wait_rc = linux.waitpid(pid, &raw_status, 0);
-        switch (std.posix.errno(wait_rc)) {
+        switch (std.os.linux.errno(wait_rc)) {
             .SUCCESS => break,
             .INTR => continue,
             else => {
@@ -666,7 +666,7 @@ fn childDropPrivileges(uid: u32, gid: u32) void {
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
     };
-    _ = linux.capset(&header, &data[0]);
+    childSyscallName(linux.capset(&header, &data[0]), "capset");
 }
 
 fn childDup2(old: std.posix.fd_t, new: std.posix.fd_t) void {
@@ -674,7 +674,7 @@ fn childDup2(old: std.posix.fd_t, new: std.posix.fd_t) void {
 }
 
 fn childClose(fd: std.posix.fd_t) void {
-    while (true) switch (std.posix.errno(std.os.linux.close(fd))) {
+    while (true) switch (std.os.linux.errno(std.os.linux.close(fd))) {
         .SUCCESS => return,
         .INTR => continue,
         else => return,
@@ -686,7 +686,7 @@ fn childCloseExtraFdsFrom(first_fd: std.posix.fd_t) void {
         .UNSHARE = true,
         .CLOEXEC = false,
     });
-    switch (std.posix.errno(rc)) {
+    switch (std.os.linux.errno(rc)) {
         .SUCCESS, .NOSYS, .INVAL, .PERM => return,
         else => return,
     }
@@ -705,7 +705,7 @@ fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         const rc = linux.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {
                 const n: usize = @intCast(rc);
                 if (n == 0) linux.exit(127);
@@ -719,7 +719,7 @@ fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
 }
 
 fn childSyscallName(rc: usize, comptime name: []const u8) void {
-    if (std.posix.errno(rc) == .SUCCESS) return;
+    if (std.os.linux.errno(rc) == .SUCCESS) return;
     childWriteLiteral("actiond child setup failed: " ++ name ++ "\n");
     std.os.linux.exit(127);
 }
@@ -734,7 +734,7 @@ fn childWriteBytes(bytes: []const u8) void {
 
 fn linuxPipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
-    switch (std.posix.errno(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
+    switch (std.os.linux.errno(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
         .SUCCESS => return fds,
         .NFILE, .MFILE => return error.SystemResources,
         else => return error.Unexpected,
@@ -747,7 +747,7 @@ fn closePipe(pipe: [2]std.posix.fd_t) void {
 }
 
 fn closeFd(fd: std.posix.fd_t) void {
-    while (true) switch (std.posix.errno(std.os.linux.close(fd))) {
+    while (true) switch (std.os.linux.errno(std.os.linux.close(fd))) {
         .SUCCESS => return,
         .INTR => continue,
         else => return,
@@ -815,7 +815,7 @@ fn collectChildResult(
         }
 
         const rc = std.os.linux.poll(&poll_fds, poll_fds.len, child_poll_timeout_ms);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,
             else => return error.Unexpected,
@@ -865,7 +865,7 @@ fn readSetupSignal(fd: std.posix.fd_t) !bool {
     var byte: [1]u8 = undefined;
     while (true) {
         const rc = std.os.linux.read(fd, byte[0..].ptr, byte.len);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => return rc == 1,
             .INTR => continue,
             else => return error.Unexpected,
@@ -880,7 +880,7 @@ fn readPipeChunk(
 ) !bool {
     var buffer: [16 * 1024]u8 = undefined;
     const rc = std.os.linux.read(fd, buffer[0..].ptr, buffer.len);
-    switch (std.posix.errno(rc)) {
+    switch (std.os.linux.errno(rc)) {
         .SUCCESS => {
             const n: usize = @intCast(rc);
             if (n == 0) return true;
@@ -901,7 +901,7 @@ fn waitForPid(pid: std.os.linux.pid_t) !Status {
     var raw_status: u32 = 0;
     while (true) {
         const rc = std.os.linux.waitpid(pid, &raw_status, 0);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => break,
             .INTR => continue,
             else => return error.Unexpected,
@@ -915,7 +915,7 @@ fn waitForPidNoHang(pid: std.os.linux.pid_t) !?Status {
     var raw_status: u32 = 0;
     while (true) {
         const rc = std.os.linux.waitpid(pid, &raw_status, std.os.linux.W.NOHANG);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return null;
                 break;

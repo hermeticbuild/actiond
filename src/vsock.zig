@@ -43,7 +43,7 @@ pub const Listener = struct {
         if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
         const rc = linux.accept(self.fd, null, null);
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => return .{ .fd = @intCast(rc) },
             else => return error.AcceptFailed,
         }
@@ -63,7 +63,7 @@ pub const Connection = struct {
         var offset: usize = 0;
         while (offset < buffer.len) {
             const rc = linux.read(self.fd, buffer[offset..].ptr, buffer.len - offset);
-            switch (std.posix.errno(rc)) {
+            switch (linux.errno(rc)) {
                 .SUCCESS => {
                     const n: usize = @intCast(rc);
                     if (n == 0) return error.UnexpectedEof;
@@ -80,7 +80,7 @@ pub const Connection = struct {
         var offset: usize = 0;
         while (offset < bytes.len) {
             const rc = linux.write(self.fd, bytes[offset..].ptr, bytes.len - offset);
-            switch (std.posix.errno(rc)) {
+            switch (linux.errno(rc)) {
                 .SUCCESS => {
                     const n: usize = @intCast(rc);
                     if (n == 0) return error.WriteFailed;
@@ -96,7 +96,7 @@ pub fn listen(port: u32) !Listener {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
     const socket_rc = linux.socket(linux.AF.VSOCK, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
-    switch (std.posix.errno(socket_rc)) {
+    switch (linux.errno(socket_rc)) {
         .SUCCESS => {},
         else => return error.SocketFailed,
     }
@@ -109,13 +109,13 @@ pub fn listen(port: u32) !Listener {
         @as(*const linux.sockaddr, @ptrCast(&addr)),
         @sizeOf(linux.sockaddr.vm),
     );
-    switch (std.posix.errno(bind_rc)) {
+    switch (linux.errno(bind_rc)) {
         .SUCCESS => {},
         else => return error.BindFailed,
     }
 
     const listen_rc = linux.listen(fd, backlog);
-    switch (std.posix.errno(listen_rc)) {
+    switch (linux.errno(listen_rc)) {
         .SUCCESS => {},
         else => return error.ListenFailed,
     }

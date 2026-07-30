@@ -3128,52 +3128,60 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	struct actiondfs_node *node = inode->i_private;
 	struct path real_path;
 	struct iattr real_attr;
+	bool changing_size = attr->ia_valid & ATTR_SIZE;
 	int err;
 
 	if (node->origin != ACTIONDFS_NODE_STAGED)
 		return -EROFS;
-	if (attr->ia_valid & ATTR_SIZE) {
+	if (changing_size)
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SETATTR_SIZE_CALLS);
-		err = actiondfs_stage_node_path(actiondfs_sbi(inode->i_sb), node,
-					       &real_path);
-		if (err) {
-			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SETATTR_SIZE_FAILURES);
-			return err;
-		}
-		err = vfs_truncate(&real_path, attr->ia_size);
+
+	err = setattr_prepare(idmap, dentry, attr);
+	if (err)
+		goto out;
+	err = actiondfs_stage_node_path(actiondfs_sbi(inode->i_sb), node,
+				       &real_path);
+	if (err)
+		goto out;
+	err = mnt_want_write(real_path.mnt);
+	if (err) {
 		path_put(&real_path);
-		if (err) {
+		goto out;
+	}
+
+	real_attr = *attr;
+	if (real_attr.ia_valid & ATTR_FILE) {
+		if (!real_attr.ia_file || !real_attr.ia_file->private_data) {
+			err = -EBADF;
+			goto out_drop_write;
+		}
+		real_attr.ia_file = real_attr.ia_file->private_data;
+	}
+
+	inode_lock(d_inode(real_path.dentry));
+	err = notify_change(mnt_idmap(real_path.mnt), real_path.dentry,
+			    &real_attr, NULL);
+	inode_unlock(d_inode(real_path.dentry));
+	if (!err) {
+		if (changing_size) {
+			node->size = i_size_read(d_inode(real_path.dentry));
+			i_size_write(inode, node->size);
+		}
+		setattr_copy(idmap, inode, attr);
+		mark_inode_dirty(inode);
+	}
+
+out_drop_write:
+	mnt_drop_write(real_path.mnt);
+	path_put(&real_path);
+out:
+	if (changing_size) {
+		if (err)
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SETATTR_SIZE_FAILURES);
-			return err;
-		}
-		node->size = attr->ia_size;
-		i_size_write(inode, attr->ia_size);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SETATTR_SIZE_SUCCESS);
+		else
+			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SETATTR_SIZE_SUCCESS);
 	}
-	if (attr->ia_valid & ATTR_MODE) {
-		err = actiondfs_stage_node_path(actiondfs_sbi(inode->i_sb), node,
-					       &real_path);
-		if (err)
-			return err;
-		err = mnt_want_write(real_path.mnt);
-		if (err) {
-			path_put(&real_path);
-			return err;
-		}
-		real_attr = *attr;
-		real_attr.ia_valid &= ATTR_MODE | ATTR_KILL_SUID | ATTR_KILL_SGID;
-		inode_lock(d_inode(real_path.dentry));
-		err = notify_change(mnt_idmap(real_path.mnt), real_path.dentry,
-				    &real_attr, NULL);
-		inode_unlock(d_inode(real_path.dentry));
-		mnt_drop_write(real_path.mnt);
-		path_put(&real_path);
-		if (err)
-			return err;
-	}
-	setattr_copy(&nop_mnt_idmap, inode, attr);
-	mark_inode_dirty(inode);
-	return 0;
+	return err;
 }
 
 struct actiondfs_stage_dirent {

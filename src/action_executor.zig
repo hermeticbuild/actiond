@@ -512,7 +512,7 @@ const ActiondfsWorkspace = struct {
             linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME,
             @intFromPtr(self.actiondfs_data.ptr),
         );
-        switch (std.posix.errno(actiondfs_rc)) {
+        switch (std.os.linux.errno(actiondfs_rc)) {
             .SUCCESS => {},
             else => return error.MountFailed,
         }
@@ -525,7 +525,7 @@ const ActiondfsWorkspace = struct {
             linux.MS.NOSUID | linux.MS.NODEV,
             @intFromPtr(self.overlay_data.?.ptr),
         );
-        switch (std.posix.errno(overlay_rc)) {
+        switch (std.os.linux.errno(overlay_rc)) {
             .SUCCESS => {},
             else => return error.MountFailed,
         }
