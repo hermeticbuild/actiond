@@ -476,8 +476,11 @@ fn exerciseFilesystem(
     output_path: []const u8,
     inputs: []const []const u8,
 ) !void {
+    const output_root_end = std.mem.indexOfScalar(u8, output_path, '/') orelse
+        return filesystemFailure("filesystem output path did not include an output parent");
     var iterable_root = try root.openDir(io, ".", .{ .iterate = true });
     defer iterable_root.close(io);
+    try expectDirectoryEntry(io, iterable_root, output_path[0..output_root_end], .directory, true);
 
     var output_dir = try root.openDir(io, output_path, .{ .iterate = true });
     defer output_dir.close(io);

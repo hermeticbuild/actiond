@@ -126,6 +126,7 @@ struct actiondfs_node {
 	struct dentry *stage_dentry;
 	bool stage_parent_ready;
 	struct actiondfs_cached_dir *cached_dir;
+	atomic64_t stage_generation;
 };
 
 struct actiondfs_sb_info {
@@ -465,6 +466,7 @@ static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi
 	node->mode = mode;
 	node->loaded = true;
 	mutex_init(&node->load_lock);
+	atomic64_set(&node->stage_generation, 0);
 	node->stage_parent_ready = false;
 	return node;
 }
@@ -499,7 +501,7 @@ static u64 actiondfs_input_child_ino(struct actiondfs_node *parent,
 static struct actiondfs_node *
 actiondfs_alloc_staged_node(struct actiondfs_sb_info *sbi,
 			    struct actiondfs_node *parent,
-			    umode_t mode, u64 size)
+			    umode_t mode, u64 size, u64 real_ino)
 {
 	struct actiondfs_node *node;
 
@@ -507,6 +509,7 @@ actiondfs_alloc_staged_node(struct actiondfs_sb_info *sbi,
 	if (!node)
 		return NULL;
 	node->origin = ACTIONDFS_NODE_STAGED;
+	node->ino = real_ino & ~(1ULL << 63);
 	node->parent = parent;
 	node->size = size;
 	return node;
@@ -522,6 +525,11 @@ static void actiondfs_set_stage_dentry(struct actiondfs_node *node,
 	if (old)
 		dput(dentry);
 	smp_store_release(&node->stage_parent_ready, true);
+}
+
+static void actiondfs_note_stage_change(struct actiondfs_node *node)
+{
+	atomic64_inc(&node->stage_generation);
 }
 
 static int actiondfs_stage_node_path(struct actiondfs_sb_info *sbi,
@@ -2828,6 +2836,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	char *link_target = NULL;
 	umode_t mode;
 	u64 size = 0;
+	bool merged_input = false;
 	int err;
 
 	if (!sbi->stage_path_valid)
@@ -2868,6 +2877,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 						 dentry->d_name.len,
 						 &input_lookup) &&
 		    input_lookup.is_dir) {
+			merged_input = true;
 			err = actiondfs_get_cached_dir(sbi, input_lookup.record->hash,
 						       input_lookup.record->size,
 						       &input_cached);
@@ -2908,9 +2918,19 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		return NULL;
 	}
 
-	node = actiondfs_alloc_staged_node(sbi, parent, mode, size);
-	if (!node)
-		err = -ENOMEM;
+	if (merged_input) {
+		node = actiondfs_materialize_cached_child(sbi, parent,
+							  input_lookup.record);
+		if (IS_ERR(node)) {
+			err = PTR_ERR(node);
+			node = NULL;
+		}
+	} else {
+		node = actiondfs_alloc_staged_node(sbi, parent, mode, size,
+						   real_inode->i_ino);
+		if (!node)
+			err = -ENOMEM;
+	}
 	if (!node) {
 		kfree(link_target);
 		actiondfs_stage_unlock_child(&parent_path, real_dentry);
@@ -2927,7 +2947,8 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
 	} else {
 		if (inode->i_private != node) {
-			actiondfs_free_tree(node);
+			if (!merged_input)
+				actiondfs_free_tree(node);
 			node = inode->i_private;
 		}
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_HITS);
@@ -2935,7 +2956,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		actiondfs_stage_unlock_child(&parent_path, real_dentry);
 		path_put(&parent_path);
 	}
-	if (!IS_ERR(inode) && S_ISDIR(mode) && input_cached) {
+	if (!IS_ERR(inode) && merged_input) {
 		node->cached_dir = input_cached;
 		smp_store_release(&node->loaded, true);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES);
@@ -3046,7 +3067,8 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 		struct actiondfs_node *node;
 
 		node = actiondfs_alloc_staged_node(sbi, parent,
-						   S_IFREG | (mode & 0777), 0);
+						   S_IFREG | (mode & 0777), 0,
+						   d_inode(real_dentry)->i_ino);
 		if (!node) {
 			err = -ENOMEM;
 			dput(real_dentry);
@@ -3066,6 +3088,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 	actiondfs_set_stage_dentry(inode->i_private, real_dentry);
 	dput(real_dentry);
 	d_instantiate(dentry, inode);
+	actiondfs_note_stage_change(parent);
 	err = 0;
 
 out_drop_write:
@@ -3130,7 +3153,8 @@ static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	}
 
 	node = actiondfs_alloc_staged_node(sbi, parent, S_IFLNK | 0777,
-					   target_len);
+					   target_len,
+					   d_inode(real_dentry)->i_ino);
 	if (!node) {
 		err = -ENOMEM;
 		dput(real_dentry);
@@ -3157,6 +3181,7 @@ static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	actiondfs_set_stage_dentry(node, real_dentry);
 	dput(real_dentry);
 	d_instantiate(dentry, inode);
+	actiondfs_note_stage_change(parent);
 	err = 0;
 
 out_drop_write:
@@ -3223,7 +3248,8 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 		struct actiondfs_node *node;
 
 		node = actiondfs_alloc_staged_node(sbi, parent,
-						   S_IFDIR | ACTIONDFS_DIR_MODE, 0);
+						   S_IFDIR | ACTIONDFS_DIR_MODE, 0,
+						   d_inode(created)->i_ino);
 		if (!node) {
 			err = -ENOMEM;
 			dput(created);
@@ -3244,6 +3270,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 	dput(created);
 	inc_nlink(dir);
 	d_instantiate(dentry, inode);
+	actiondfs_note_stage_change(parent);
 
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
@@ -3292,8 +3319,10 @@ static int actiondfs_unlink(struct inode *dir, struct dentry *dentry)
 				 NULL);
 	}
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
-	if (!err)
+	if (!err) {
 		clear_nlink(inode);
+		actiondfs_note_stage_change(parent);
+	}
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
 out_put_path:
@@ -3345,6 +3374,7 @@ static int actiondfs_rmdir(struct inode *dir, struct dentry *dentry)
 	if (!err) {
 		clear_nlink(inode);
 		drop_nlink(dir);
+		actiondfs_note_stage_change(parent);
 	}
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
@@ -3460,6 +3490,9 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 			}
 		}
 		old_node->parent = new_parent;
+		actiondfs_note_stage_change(old_parent);
+		if (new_parent != old_parent)
+			actiondfs_note_stage_change(new_parent);
 	}
 
 out_unlock:
@@ -3628,6 +3661,7 @@ struct actiondfs_stage_dirent {
 
 struct actiondfs_dir_file {
 	bool stage_loaded;
+	u64 stage_generation;
 	struct actiondfs_stage_dirent *stage_entries;
 	size_t stage_count;
 	size_t stage_capacity;
@@ -3692,21 +3726,30 @@ static bool actiondfs_stage_collect_filldir(struct dir_context *ctx,
 
 	stage_ctx->err = actiondfs_append_stage_dirent(stage_ctx->dir_file,
 						       name, namelen,
-						       ino, d_type);
+						       ino & ~(1ULL << 63), d_type);
 	if (stage_ctx->err)
 		return false;
 	return true;
 }
 
-static void actiondfs_free_dir_file(struct actiondfs_dir_file *dir_file)
+static void actiondfs_reset_stage_entries(struct actiondfs_dir_file *dir_file)
 {
 	size_t i;
 
-	if (!dir_file)
-		return;
 	for (i = 0; i < dir_file->stage_count; i++)
 		kfree(dir_file->stage_entries[i].name);
 	kfree(dir_file->stage_entries);
+	dir_file->stage_entries = NULL;
+	dir_file->stage_count = 0;
+	dir_file->stage_capacity = 0;
+	dir_file->stage_loaded = false;
+}
+
+static void actiondfs_free_dir_file(struct actiondfs_dir_file *dir_file)
+{
+	if (!dir_file)
+		return;
+	actiondfs_reset_stage_entries(dir_file);
 	kfree(dir_file);
 }
 
@@ -3718,12 +3761,17 @@ static int actiondfs_load_stage_entries(struct inode *inode,
 	struct actiondfs_stage_collect_ctx stage_ctx;
 	struct path real_path;
 	struct file *file;
+	u64 generation = atomic64_read(&dir->stage_generation);
 	int err;
 
-	if (dir_file->stage_loaded)
+	if (dir_file->stage_loaded &&
+	    dir_file->stage_generation == generation)
 		return 0;
+	if (dir_file->stage_loaded)
+		actiondfs_reset_stage_entries(dir_file);
 	if (!sbi->stage_path_valid) {
 		dir_file->stage_loaded = true;
+		dir_file->stage_generation = generation;
 		return 0;
 	}
 
@@ -3732,6 +3780,7 @@ static int actiondfs_load_stage_entries(struct inode *inode,
 	if (err == -ENOENT) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_READDIR_MISSES);
 		dir_file->stage_loaded = true;
+		dir_file->stage_generation = generation;
 		return 0;
 	}
 	if (err) {
@@ -3762,17 +3811,11 @@ static int actiondfs_load_stage_entries(struct inode *inode,
 	err = iterate_dir(file, &stage_ctx.ctx);
 	fput(file);
 	if (stage_ctx.err || err) {
-		size_t i;
-
-		for (i = 0; i < dir_file->stage_count; i++)
-			kfree(dir_file->stage_entries[i].name);
-		kfree(dir_file->stage_entries);
-		dir_file->stage_entries = NULL;
-		dir_file->stage_count = 0;
-		dir_file->stage_capacity = 0;
+		actiondfs_reset_stage_entries(dir_file);
 		return stage_ctx.err ? stage_ctx.err : err;
 	}
 	dir_file->stage_loaded = true;
+	dir_file->stage_generation = generation;
 	return 0;
 }
 
@@ -3802,6 +3845,9 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	size_t i;
 	loff_t base = 2;
 	int err;
+
+	if (!ctx->pos && dir_file->stage_loaded)
+		actiondfs_reset_stage_entries(dir_file);
 
 	err = actiondfs_ensure_loaded(inode->i_sb, dir);
 	if (err)
