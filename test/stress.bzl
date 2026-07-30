@@ -27,11 +27,13 @@ def _pad4(value):
         return "0%d" % value
     return "%d" % value
 
-def _add_common_args(args, out_file, out_dir, files, srcs, trees, expect_network_blocked, expect_loopback, expect_localhost_hosts):
+def _add_common_args(args, out_file, out_dir, files, srcs, trees, expect_network_blocked, expect_loopback, expect_localhost_hosts, exercise_filesystem = False):
     args.add("--out-file", out_file)
     if out_dir:
         args.add("--out-dir", out_dir)
         args.add("--out-count", str(files))
+    if exercise_filesystem:
+        args.add("--exercise-filesystem")
     if expect_network_blocked:
         args.add("--expect-network-blocked")
     if expect_loopback:
@@ -80,6 +82,60 @@ stress_tree = rule(
         "expect_network_blocked": attr.bool(default = False),
         "expect_loopback": attr.bool(default = False),
         "expect_localhost_hosts": attr.bool(default = False),
+        "tool": attr.label(
+            allow_single_file = True,
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
+def _stress_symlinks_impl(ctx):
+    out_file = ctx.actions.declare_file(ctx.label.name + ".target.txt")
+    out_dir = ctx.actions.declare_directory(ctx.label.name + ".target.tree")
+    file_symlink = ctx.actions.declare_symlink(ctx.label.name + ".file.symlink")
+    directory_symlink = ctx.actions.declare_symlink(ctx.label.name + ".directory.symlink")
+    transitive = [dep[DefaultInfo].files for dep in ctx.attr.trees]
+    inputs = depset(ctx.files.srcs, transitive = transitive)
+
+    args = ctx.actions.args()
+    _add_common_args(
+        args,
+        out_file.path,
+        out_dir.path,
+        ctx.attr.files,
+        ctx.files.srcs,
+        ctx.files.trees,
+        False,
+        False,
+        False,
+        exercise_filesystem = True,
+    )
+    args.add("--out-symlink", file_symlink.path)
+    args.add("--out-symlink-target", out_file.basename)
+    args.add("--out-symlink", directory_symlink.path)
+    args.add("--out-symlink-target", out_dir.basename)
+    outputs = [out_file, out_dir, file_symlink, directory_symlink]
+    ctx.actions.run(
+        executable = ctx.executable.tool,
+        inputs = inputs,
+        outputs = outputs,
+        arguments = [args],
+        env = _stress_env(ctx),
+        execution_requirements = ctx.attr.execution_requirements,
+        mnemonic = "ActiondStressSymlinks",
+        progress_message = "Checking staged filesystem operations %{label}",
+    )
+    return DefaultInfo(files = depset(outputs))
+
+stress_symlinks = rule(
+    implementation = _stress_symlinks_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+        "trees": attr.label_list(),
+        "files": attr.int(default = 2),
+        "stress_case": attr.string(),
+        "execution_requirements": attr.string_dict(),
         "tool": attr.label(
             allow_single_file = True,
             executable = True,
@@ -210,6 +266,25 @@ stress_aggregate = rule(
 
 def stress_workload(name, tool):
     stress_targets = []
+
+    stress_symlinks(
+        name = "filesystem_regression",
+        execution_requirements = {"libc": "glibc2.35"},
+        srcs = [":bare_inputs"],
+        stress_case = "filesystem_regression",
+        tool = tool,
+    )
+    stress_targets.append(":filesystem_regression")
+
+    stress_consumer(
+        name = "symlink_input_consumer",
+        execution_requirements = {"libc": "glibc2.35"},
+        files = 2,
+        stress_case = "symlink_input_consumer",
+        tool = tool,
+        trees = [":filesystem_regression"],
+    )
+    stress_targets.append(":symlink_input_consumer")
 
     stress_tree(
         name = "shared_generated_tree",

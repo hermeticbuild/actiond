@@ -1288,10 +1288,59 @@ fn respondServerStreaming(
 
 fn grpcStatusForError(err: anyerror) []const u8 {
     return switch (err) {
+        error.EmptyExecPath,
+        error.EscapingExecPath,
+        error.InvalidDigestHash,
+        error.InvalidDigestSize,
+        error.InvalidDirectoryEntryName,
+        error.InvalidFieldNumber,
+        error.InvalidLength,
+        error.InvalidOutputSymlinkPath,
+        error.InvalidSymlinkName,
+        error.InvalidSymlinkTarget,
+        error.InvalidVarint,
+        error.MissingInputDirectoryDigest,
+        error.NonCanonicalDirectory,
+        error.OutputParentConflictsWithInputFile,
+        error.OutputParentConflictsWithInputSymlink,
+        error.UnexpectedWireType,
+        => "3",
         error.FileNotFound => "5",
+        error.FailedPrecondition => "9",
         error.UnsupportedMethod => "12",
         else => "13",
     };
+}
+
+test "gRPC status maps invalid REAPI symlinks, directories, and execution paths" {
+    const invalid_arguments = [_]anyerror{
+        error.EmptyExecPath,
+        error.EscapingExecPath,
+        error.InvalidDigestHash,
+        error.InvalidDigestSize,
+        error.InvalidDirectoryEntryName,
+        error.InvalidFieldNumber,
+        error.InvalidLength,
+        error.InvalidOutputSymlinkPath,
+        error.InvalidSymlinkName,
+        error.InvalidSymlinkTarget,
+        error.InvalidVarint,
+        error.MissingInputDirectoryDigest,
+        error.NonCanonicalDirectory,
+        error.OutputParentConflictsWithInputFile,
+        error.OutputParentConflictsWithInputSymlink,
+        error.UnexpectedWireType,
+    };
+    for (invalid_arguments) |invalid_argument| {
+        try std.testing.expectEqualStrings("3", grpcStatusForError(invalid_argument));
+    }
+}
+
+test "gRPC status maps failed preconditions and preserves existing error mappings" {
+    try std.testing.expectEqualStrings("9", grpcStatusForError(error.FailedPrecondition));
+    try std.testing.expectEqualStrings("5", grpcStatusForError(error.FileNotFound));
+    try std.testing.expectEqualStrings("12", grpcStatusForError(error.UnsupportedMethod));
+    try std.testing.expectEqualStrings("13", grpcStatusForError(error.OutOfMemory));
 }
 
 fn sleepMilliseconds(io: std.Io, milliseconds: u32) !void {

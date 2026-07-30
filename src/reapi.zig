@@ -117,6 +117,12 @@ pub const DigestFunction = enum(u32) {
     sha256 = 1,
 };
 
+pub const SymlinkAbsolutePathStrategy = enum(u32) {
+    unknown = 0,
+    disallowed = 1,
+    allowed = 2,
+};
+
 pub const SemVer = struct {
     major: i32 = 0,
     minor: i32 = 0,
@@ -153,11 +159,14 @@ pub const CacheCapabilities = struct {
     digest_functions: []const DigestFunction = &.{},
     action_cache_update_capabilities: ?ActionCacheUpdateCapabilities = null,
     max_batch_total_size_bytes: i64 = 0,
+    symlink_absolute_path_strategy: SymlinkAbsolutePathStrategy = .unknown,
 
     pub fn encode(self: CacheCapabilities, writer: *protobuf.Writer) !void {
         for (self.digest_functions) |function| try writer.writeEnumField(1, function);
         if (self.action_cache_update_capabilities) |caps| try writer.writeMessageField(2, caps);
         if (self.max_batch_total_size_bytes != 0) try writer.writeInt64Field(4, self.max_batch_total_size_bytes);
+        if (self.symlink_absolute_path_strategy != .unknown)
+            try writer.writeEnumField(5, self.symlink_absolute_path_strategy);
     }
 
     pub fn encodedLen(self: CacheCapabilities) usize {
@@ -165,6 +174,8 @@ pub const CacheCapabilities = struct {
         for (self.digest_functions) |function| len += protobuf.enumFieldLen(1, function);
         if (self.action_cache_update_capabilities) |caps| len += protobuf.messageFieldLen(2, caps.encodedLen());
         if (self.max_batch_total_size_bytes != 0) len += protobuf.int64FieldLen(4, self.max_batch_total_size_bytes);
+        if (self.symlink_absolute_path_strategy != .unknown)
+            len += protobuf.enumFieldLen(5, self.symlink_absolute_path_strategy);
         return len;
     }
 };
@@ -559,37 +570,96 @@ pub const DirectoryNode = struct {
     }
 };
 
+pub const SymlinkNode = struct {
+    name: []const u8 = "",
+    target: []const u8 = "",
+
+    pub fn validate(self: SymlinkNode) !void {
+        if (self.name.len == 0 or
+            self.name.len > std.os.linux.NAME_MAX or
+            std.mem.indexOfScalar(u8, self.name, '/') != null or
+            std.mem.indexOfScalar(u8, self.name, 0) != null or
+            std.mem.eql(u8, self.name, ".") or
+            std.mem.eql(u8, self.name, ".."))
+        {
+            return error.InvalidSymlinkName;
+        }
+        try validateSymlinkTarget(self.target);
+    }
+
+    pub fn encode(self: SymlinkNode, writer: *protobuf.Writer) !void {
+        try self.validate();
+        try writer.writeStringField(1, self.name);
+        try writer.writeStringField(2, self.target);
+    }
+
+    pub fn encodedLen(self: SymlinkNode) usize {
+        return protobuf.stringFieldLen(1, self.name.len) +
+            protobuf.stringFieldLen(2, self.target.len);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !SymlinkNode {
+        var out: SymlinkNode = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.name = try reader.readString(),
+                2 => out.target = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        try out.validate();
+        return out;
+    }
+};
+
+fn validateSymlinkTarget(target: []const u8) !void {
+    if (target.len == 0 or
+        target.len >= std.os.linux.PATH_MAX or
+        std.mem.indexOfScalar(u8, target, 0) != null)
+    {
+        return error.InvalidSymlinkTarget;
+    }
+}
+
 pub const Directory = struct {
     files: []const FileNode = &.{},
     directories: []const DirectoryNode = &.{},
+    symlinks: []const SymlinkNode = &.{},
 
     pub fn deinit(self: *Directory, allocator: std.mem.Allocator) void {
         allocator.free(self.files);
         allocator.free(self.directories);
+        allocator.free(self.symlinks);
         self.* = .{};
     }
 
     pub fn validateCanonical(self: Directory) !void {
-        if (self.files.len > 1) {
-            for (self.files[1..], 1..) |file, index| {
-                if (std.mem.order(u8, self.files[index - 1].name, file.name) != .lt)
-                    return error.NonCanonicalDirectory;
-            }
-        }
-        if (self.directories.len > 1) {
-            for (self.directories[1..], 1..) |directory, index| {
-                if (std.mem.order(u8, self.directories[index - 1].name, directory.name) != .lt)
-                    return error.NonCanonicalDirectory;
-            }
-        }
+        try validateSortedNames(self.files);
+        try validateSortedNames(self.directories);
+        try validateSortedNames(self.symlinks);
+        for (self.symlinks) |symlink| try symlink.validate();
 
-        var file_index: usize = 0;
-        var directory_index: usize = 0;
-        while (file_index < self.files.len and directory_index < self.directories.len) {
-            switch (std.mem.order(u8, self.files[file_index].name, self.directories[directory_index].name)) {
+        try validateDisjointNames(self.files, self.directories);
+        try validateDisjointNames(self.files, self.symlinks);
+        try validateDisjointNames(self.directories, self.symlinks);
+    }
+
+    fn validateSortedNames(nodes: anytype) !void {
+        if (nodes.len <= 1) return;
+        for (nodes[1..], 1..) |node, index| {
+            if (std.mem.order(u8, nodes[index - 1].name, node.name) != .lt)
+                return error.NonCanonicalDirectory;
+        }
+    }
+
+    fn validateDisjointNames(left: anytype, right: anytype) !void {
+        var left_index: usize = 0;
+        var right_index: usize = 0;
+        while (left_index < left.len and right_index < right.len) {
+            switch (std.mem.order(u8, left[left_index].name, right[right_index].name)) {
                 .eq => return error.NonCanonicalDirectory,
-                .lt => file_index += 1,
-                .gt => directory_index += 1,
+                .lt => left_index += 1,
+                .gt => right_index += 1,
             }
         }
     }
@@ -598,12 +668,14 @@ pub const Directory = struct {
         try self.validateCanonical();
         for (self.files) |file| try writer.writeMessageField(1, file);
         for (self.directories) |directory| try writer.writeMessageField(2, directory);
+        for (self.symlinks) |symlink| try writer.writeMessageField(3, symlink);
     }
 
     pub fn encodedLen(self: Directory) usize {
         var len: usize = 0;
         for (self.files) |file| len += protobuf.messageFieldLen(1, file.encodedLen());
         for (self.directories) |directory| len += protobuf.messageFieldLen(2, directory.encodedLen());
+        for (self.symlinks) |symlink| len += protobuf.messageFieldLen(3, symlink.encodedLen());
         return len;
     }
 
@@ -612,6 +684,8 @@ pub const Directory = struct {
         errdefer files.deinit(allocator);
         var directories: std.ArrayListUnmanaged(DirectoryNode) = .empty;
         errdefer directories.deinit(allocator);
+        var symlinks: std.ArrayListUnmanaged(SymlinkNode) = .empty;
+        errdefer symlinks.deinit(allocator);
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
@@ -623,6 +697,10 @@ pub const Directory = struct {
                     var nested = try reader.readMessage();
                     try directories.append(allocator, try DirectoryNode.decode(&nested));
                 },
+                3 => {
+                    var nested = try reader.readMessage();
+                    try symlinks.append(allocator, try SymlinkNode.decode(&nested));
+                },
                 else => try reader.skipField(tag.wire_type),
             }
         }
@@ -631,9 +709,12 @@ pub const Directory = struct {
         errdefer allocator.free(file_slice);
         const directory_slice = try directories.toOwnedSlice(allocator);
         errdefer allocator.free(directory_slice);
+        const symlink_slice = try symlinks.toOwnedSlice(allocator);
+        errdefer allocator.free(symlink_slice);
         const out = Directory{
             .files = file_slice,
             .directories = directory_slice,
+            .symlinks = symlink_slice,
         };
         try out.validateCanonical();
         return out;
@@ -695,6 +776,9 @@ pub const ExecuteRequest = struct {
 pub const ActionResult = struct {
     output_files: []const OutputFile = &.{},
     output_directories: []const OutputDirectory = &.{},
+    output_file_symlinks: []const OutputSymlink = &.{},
+    output_directory_symlinks: []const OutputSymlink = &.{},
+    output_symlinks: []const OutputSymlink = &.{},
     exit_code: i32 = 0,
     stdout_digest: ?Digest = null,
     stderr_digest: ?Digest = null,
@@ -703,6 +787,9 @@ pub const ActionResult = struct {
     pub fn deinit(self: *ActionResult, allocator: std.mem.Allocator) void {
         allocator.free(self.output_files);
         allocator.free(self.output_directories);
+        allocator.free(self.output_file_symlinks);
+        allocator.free(self.output_directory_symlinks);
+        allocator.free(self.output_symlinks);
         self.* = .{};
     }
 
@@ -713,6 +800,9 @@ pub const ActionResult = struct {
         if (self.stdout_digest) |digest| try writer.writeMessageField(6, digest);
         if (self.stderr_digest) |digest| try writer.writeMessageField(8, digest);
         if (self.execution_metadata) |metadata| try writer.writeMessageField(9, metadata);
+        for (self.output_file_symlinks) |symlink| try writer.writeMessageField(10, symlink);
+        for (self.output_directory_symlinks) |symlink| try writer.writeMessageField(11, symlink);
+        for (self.output_symlinks) |symlink| try writer.writeMessageField(12, symlink);
     }
 
     pub fn encodedLen(self: ActionResult) usize {
@@ -723,6 +813,9 @@ pub const ActionResult = struct {
         if (self.stdout_digest) |digest| len += protobuf.messageFieldLen(6, digest.encodedLen());
         if (self.stderr_digest) |digest| len += protobuf.messageFieldLen(8, digest.encodedLen());
         if (self.execution_metadata) |metadata| len += protobuf.messageFieldLen(9, metadata.encodedLen());
+        for (self.output_file_symlinks) |symlink| len += protobuf.messageFieldLen(10, symlink.encodedLen());
+        for (self.output_directory_symlinks) |symlink| len += protobuf.messageFieldLen(11, symlink.encodedLen());
+        for (self.output_symlinks) |symlink| len += protobuf.messageFieldLen(12, symlink.encodedLen());
         return len;
     }
 
@@ -732,6 +825,7 @@ pub const ActionResult = struct {
             switch (tag.field_number) {
                 2 => try reader.skipField(tag.wire_type),
                 3 => try reader.skipField(tag.wire_type),
+                10, 11, 12 => try reader.skipField(tag.wire_type),
                 4 => out.exit_code = try reader.readInt32(),
                 6 => {
                     var nested = try reader.readMessage();
@@ -756,6 +850,12 @@ pub const ActionResult = struct {
         errdefer output_files.deinit(allocator);
         var output_directories: std.ArrayListUnmanaged(OutputDirectory) = .empty;
         errdefer output_directories.deinit(allocator);
+        var output_file_symlinks: std.ArrayListUnmanaged(OutputSymlink) = .empty;
+        errdefer output_file_symlinks.deinit(allocator);
+        var output_directory_symlinks: std.ArrayListUnmanaged(OutputSymlink) = .empty;
+        errdefer output_directory_symlinks.deinit(allocator);
+        var output_symlinks: std.ArrayListUnmanaged(OutputSymlink) = .empty;
+        errdefer output_symlinks.deinit(allocator);
         var out: ActionResult = .{};
 
         while (try reader.next()) |tag| {
@@ -781,12 +881,37 @@ pub const ActionResult = struct {
                     var nested = try reader.readMessage();
                     out.execution_metadata = try ExecutedActionMetadata.decode(&nested);
                 },
+                10 => {
+                    var nested = try reader.readMessage();
+                    try output_file_symlinks.append(allocator, try OutputSymlink.decode(&nested));
+                },
+                11 => {
+                    var nested = try reader.readMessage();
+                    try output_directory_symlinks.append(allocator, try OutputSymlink.decode(&nested));
+                },
+                12 => {
+                    var nested = try reader.readMessage();
+                    try output_symlinks.append(allocator, try OutputSymlink.decode(&nested));
+                },
                 else => try reader.skipField(tag.wire_type),
             }
         }
 
-        out.output_files = try output_files.toOwnedSlice(allocator);
-        out.output_directories = try output_directories.toOwnedSlice(allocator);
+        const output_file_slice = try output_files.toOwnedSlice(allocator);
+        errdefer allocator.free(output_file_slice);
+        const output_directory_slice = try output_directories.toOwnedSlice(allocator);
+        errdefer allocator.free(output_directory_slice);
+        const output_file_symlink_slice = try output_file_symlinks.toOwnedSlice(allocator);
+        errdefer allocator.free(output_file_symlink_slice);
+        const output_directory_symlink_slice = try output_directory_symlinks.toOwnedSlice(allocator);
+        errdefer allocator.free(output_directory_symlink_slice);
+        const output_symlink_slice = try output_symlinks.toOwnedSlice(allocator);
+
+        out.output_files = output_file_slice;
+        out.output_directories = output_directory_slice;
+        out.output_file_symlinks = output_file_symlink_slice;
+        out.output_directory_symlinks = output_directory_symlink_slice;
+        out.output_symlinks = output_symlink_slice;
         return out;
     }
 };
@@ -954,6 +1079,57 @@ pub const OutputDirectory = struct {
                 else => try reader.skipField(tag.wire_type),
             }
         }
+        return out;
+    }
+};
+
+pub const OutputSymlink = struct {
+    path: []const u8 = "",
+    target: []const u8 = "",
+
+    pub fn validate(self: OutputSymlink) !void {
+        if (self.path.len == 0 or
+            self.path.len >= std.os.linux.PATH_MAX or
+            self.path[0] == '/' or
+            std.mem.indexOfScalar(u8, self.path, 0) != null)
+        {
+            return error.InvalidOutputSymlinkPath;
+        }
+
+        var components = std.mem.splitScalar(u8, self.path, '/');
+        while (components.next()) |component| {
+            if (component.len == 0 or
+                component.len > std.os.linux.NAME_MAX or
+                std.mem.eql(u8, component, ".") or
+                std.mem.eql(u8, component, ".."))
+            {
+                return error.InvalidOutputSymlinkPath;
+            }
+        }
+        try validateSymlinkTarget(self.target);
+    }
+
+    pub fn encode(self: OutputSymlink, writer: *protobuf.Writer) !void {
+        try self.validate();
+        try writer.writeStringField(1, self.path);
+        try writer.writeStringField(2, self.target);
+    }
+
+    pub fn encodedLen(self: OutputSymlink) usize {
+        return protobuf.stringFieldLen(1, self.path.len) +
+            protobuf.stringFieldLen(2, self.target.len);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !OutputSymlink {
+        var out: OutputSymlink = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.path = try reader.readString(),
+                2 => out.target = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        try out.validate();
         return out;
     }
 };
@@ -1552,6 +1728,27 @@ test "Digest encodes with REAPI field numbers" {
     try std.testing.expect(digest.eql(decoded));
 }
 
+test "CacheCapabilities advertises absolute symlink strategy with REAPI field number" {
+    const allowed: CacheCapabilities = .{
+        .symlink_absolute_path_strategy = .allowed,
+    };
+    const allowed_bytes = try encodeAlloc(std.testing.allocator, allowed);
+    defer std.testing.allocator.free(allowed_bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0x28, 0x02 }, allowed_bytes);
+    try std.testing.expectEqual(allowed.encodedLen(), allowed_bytes.len);
+
+    const disallowed: CacheCapabilities = .{
+        .symlink_absolute_path_strategy = .disallowed,
+    };
+    const disallowed_bytes = try encodeAlloc(std.testing.allocator, disallowed);
+    defer std.testing.allocator.free(disallowed_bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0x28, 0x01 }, disallowed_bytes);
+
+    const unspecified = try encodeAlloc(std.testing.allocator, CacheCapabilities{});
+    defer std.testing.allocator.free(unspecified);
+    try std.testing.expectEqual(@as(usize, 0), unspecified.len);
+}
+
 test "Command decode preserves repeated fields" {
     const command: Command = .{
         .arguments = &.{ "/bin/sh", "-c", "echo hi" },
@@ -1630,7 +1827,72 @@ test "Action and ExecuteRequest round-trip borrowed views" {
     try std.testing.expect(decoded_request.action_digest.?.eql(digest));
 }
 
-test "Directory decodes files and child directories" {
+test "SymlinkNode encodes REAPI field numbers and preserves target spelling" {
+    const symlink: SymlinkNode = .{
+        .name = "bin",
+        .target = "../tool",
+    };
+
+    const encoded = try encodeAlloc(std.testing.allocator, symlink);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x0a, 0x03, 'b', 'i', 'n',
+        0x12, 0x07, '.', '.', '/',
+        't',  'o',  'o', 'l',
+    }, encoded);
+
+    var reader = protobuf.Reader.init(encoded);
+    const decoded = try SymlinkNode.decode(&reader);
+    try std.testing.expectEqualStrings("bin", decoded.name);
+    try std.testing.expectEqualStrings("../tool", decoded.target);
+    try std.testing.expectEqual(symlink.encodedLen(), encoded.len);
+}
+
+test "SymlinkNode rejects invalid names and targets" {
+    const invalid_names = [_][]const u8{
+        "",
+        ".",
+        "..",
+        "nested/name",
+        "name\x00suffix",
+    };
+    for (invalid_names) |name| {
+        try std.testing.expectError(error.InvalidSymlinkName, encodeAlloc(
+            std.testing.allocator,
+            SymlinkNode{ .name = name, .target = "target" },
+        ));
+    }
+
+    const oversized_name = [_]u8{'a'} ** (std.os.linux.NAME_MAX + 1);
+    try std.testing.expectError(error.InvalidSymlinkName, encodeAlloc(
+        std.testing.allocator,
+        SymlinkNode{ .name = &oversized_name, .target = "target" },
+    ));
+
+    const invalid_targets = [_][]const u8{ "", "target\x00suffix" };
+    for (invalid_targets) |target| {
+        try std.testing.expectError(error.InvalidSymlinkTarget, encodeAlloc(
+            std.testing.allocator,
+            SymlinkNode{ .name = "link", .target = target },
+        ));
+    }
+
+    const oversized_target = [_]u8{'a'} ** std.os.linux.PATH_MAX;
+    try std.testing.expectError(error.InvalidSymlinkTarget, encodeAlloc(
+        std.testing.allocator,
+        SymlinkNode{ .name = "link", .target = &oversized_target },
+    ));
+
+    for ([_][]const u8{ "../target", "foo/../bar", "/absolute/target" }) |target| {
+        const encoded = try encodeAlloc(
+            std.testing.allocator,
+            SymlinkNode{ .name = "link", .target = target },
+        );
+        std.testing.allocator.free(encoded);
+    }
+}
+
+test "Directory decodes files, child directories, and symlinks" {
     const file_digest: Digest = .{
         .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         .size_bytes = 5,
@@ -1645,6 +1907,9 @@ test "Directory decodes files and child directories" {
         },
         .directories = &.{
             .{ .name = "src", .digest = child_digest },
+        },
+        .symlinks = &.{
+            .{ .name = "hello-link", .target = "../hello.txt" },
         },
     };
 
@@ -1662,15 +1927,22 @@ test "Directory decodes files and child directories" {
     try std.testing.expectEqual(@as(usize, 1), decoded.directories.len);
     try std.testing.expectEqualStrings("src", decoded.directories[0].name);
     try std.testing.expect(decoded.directories[0].digest.?.eql(child_digest));
+    try std.testing.expectEqual(@as(usize, 1), decoded.symlinks.len);
+    try std.testing.expectEqualStrings("hello-link", decoded.symlinks[0].name);
+    try std.testing.expectEqualStrings("../hello.txt", decoded.symlinks[0].target);
+    try std.testing.expectEqual(directory.encodedLen(), encoded.len);
 }
 
-test "Directory canonical order is enforced per field" {
+test "Directory canonical order includes symlinks and all name collisions" {
     const canonical: Directory = .{
         .files = &.{
             .{ .name = "b.txt" },
         },
         .directories = &.{
             .{ .name = "a" },
+        },
+        .symlinks = &.{
+            .{ .name = "c", .target = "../b.txt" },
         },
     };
     try canonical.validateCanonical();
@@ -1685,6 +1957,30 @@ test "Directory canonical order is enforced per field" {
     };
     try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, unsorted_files));
 
+    const unsorted_directories: Directory = .{
+        .directories = &.{
+            .{ .name = "b" },
+            .{ .name = "a" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, unsorted_directories));
+
+    const unsorted_symlinks: Directory = .{
+        .symlinks = &.{
+            .{ .name = "b", .target = "target" },
+            .{ .name = "a", .target = "target" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, unsorted_symlinks));
+
+    const duplicate_symlinks: Directory = .{
+        .symlinks = &.{
+            .{ .name = "same", .target = "first" },
+            .{ .name = "same", .target = "second" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, duplicate_symlinks));
+
     const overlapping_names: Directory = .{
         .files = &.{
             .{ .name = "same" },
@@ -1694,6 +1990,28 @@ test "Directory canonical order is enforced per field" {
         },
     };
     try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, overlapping_names));
+
+    const overlapping_file_symlink: Directory = .{
+        .files = &.{.{ .name = "same" }},
+        .symlinks = &.{.{ .name = "same", .target = "target" }},
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, overlapping_file_symlink));
+
+    const overlapping_directory_symlink: Directory = .{
+        .directories = &.{.{ .name = "same" }},
+        .symlinks = &.{.{ .name = "same", .target = "target" }},
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, overlapping_directory_symlink));
+
+    var writer = protobuf.Writer.init(std.testing.allocator);
+    defer writer.deinit();
+    try writer.writeMessageField(3, SymlinkNode{ .name = "b", .target = "target" });
+    try writer.writeMessageField(3, SymlinkNode{ .name = "a", .target = "target" });
+    var reader = protobuf.Reader.init(writer.writtenBytes());
+    try std.testing.expectError(error.NonCanonicalDirectory, Directory.decodeOwned(
+        std.testing.allocator,
+        &reader,
+    ));
 }
 
 test "CAS batch messages decode repeated request and response fields" {
@@ -1763,7 +2081,43 @@ test "GetTreeResponse round-trips directories" {
     try std.testing.expect(decoded.directories[0].files[0].digest.?.eql(file_digest));
 }
 
-test "ActionResult round-trips exit code and stream digests" {
+test "OutputSymlink validates output paths and preserves target spelling" {
+    const symlink: OutputSymlink = .{
+        .path = "out/link",
+        .target = "../input/tool",
+    };
+    const encoded = try encodeAlloc(std.testing.allocator, symlink);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqual(@as(u8, 0x0a), encoded[0]);
+
+    var reader = protobuf.Reader.init(encoded);
+    const decoded = try OutputSymlink.decode(&reader);
+    try std.testing.expectEqualStrings("out/link", decoded.path);
+    try std.testing.expectEqualStrings("../input/tool", decoded.target);
+    try std.testing.expectEqual(symlink.encodedLen(), encoded.len);
+
+    const invalid_paths = [_][]const u8{
+        "",
+        "/absolute/link",
+        "./link",
+        "../link",
+        "out//link",
+        "out/",
+        "out/\x00link",
+    };
+    for (invalid_paths) |path| {
+        try std.testing.expectError(error.InvalidOutputSymlinkPath, encodeAlloc(
+            std.testing.allocator,
+            OutputSymlink{ .path = path, .target = "target" },
+        ));
+    }
+    try std.testing.expectError(error.InvalidSymlinkTarget, encodeAlloc(
+        std.testing.allocator,
+        OutputSymlink{ .path = "out/link", .target = "" },
+    ));
+}
+
+test "ActionResult round-trips output symlinks, exit code, and stream digests" {
     const stdout_digest: Digest = .{
         .hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         .size_bytes = 3,
@@ -1783,6 +2137,15 @@ test "ActionResult round-trips exit code and stream digests" {
                 .is_topologically_sorted = true,
                 .root_directory_digest = stdout_digest,
             },
+        },
+        .output_file_symlinks = &.{
+            .{ .path = "out/file-link", .target = "app" },
+        },
+        .output_directory_symlinks = &.{
+            .{ .path = "out/tree-link", .target = "tree" },
+        },
+        .output_symlinks = &.{
+            .{ .path = "out/general-link", .target = "../input/tool" },
         },
         .exit_code = 7,
         .stdout_digest = stdout_digest,
@@ -1815,6 +2178,15 @@ test "ActionResult round-trips exit code and stream digests" {
     try std.testing.expect(decoded.output_directories[0].tree_digest.?.eql(stderr_digest));
     try std.testing.expect(decoded.output_directories[0].is_topologically_sorted);
     try std.testing.expect(decoded.output_directories[0].root_directory_digest.?.eql(stdout_digest));
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_file_symlinks.len);
+    try std.testing.expectEqualStrings("out/file-link", decoded.output_file_symlinks[0].path);
+    try std.testing.expectEqualStrings("app", decoded.output_file_symlinks[0].target);
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_directory_symlinks.len);
+    try std.testing.expectEqualStrings("out/tree-link", decoded.output_directory_symlinks[0].path);
+    try std.testing.expectEqualStrings("tree", decoded.output_directory_symlinks[0].target);
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_symlinks.len);
+    try std.testing.expectEqualStrings("out/general-link", decoded.output_symlinks[0].path);
+    try std.testing.expectEqualStrings("../input/tool", decoded.output_symlinks[0].target);
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));

@@ -107,6 +107,11 @@ pub const Outcome = struct {
         root_directory_digest: ?cas.Digest = null,
     };
 
+    pub const OutputSymlink = struct {
+        path: []u8,
+        target: []u8,
+    };
+
     status: Status,
     stdout: []u8,
     stderr: []u8,
@@ -114,14 +119,32 @@ pub const Outcome = struct {
     stderr_digest: ?cas.Digest = null,
     output_files: []OutputFile = &.{},
     output_directories: []OutputDirectory = &.{},
+    output_symlinks: []OutputSymlink = &.{},
+    output_file_symlinks: []OutputSymlink = &.{},
+    output_directory_symlinks: []OutputSymlink = &.{},
     execution_metadata: ?reapi.ExecutedActionMetadata = null,
     runner_timing: ?RunTiming = null,
 
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
         for (self.output_files) |output_file| allocator.free(output_file.path);
         for (self.output_directories) |output_directory| allocator.free(output_directory.path);
+        for (self.output_symlinks) |output_symlink| {
+            allocator.free(output_symlink.path);
+            allocator.free(output_symlink.target);
+        }
+        for (self.output_file_symlinks) |output_symlink| {
+            allocator.free(output_symlink.path);
+            allocator.free(output_symlink.target);
+        }
+        for (self.output_directory_symlinks) |output_symlink| {
+            allocator.free(output_symlink.path);
+            allocator.free(output_symlink.target);
+        }
         allocator.free(self.output_files);
         allocator.free(self.output_directories);
+        allocator.free(self.output_symlinks);
+        allocator.free(self.output_file_symlinks);
+        allocator.free(self.output_directory_symlinks);
         allocator.free(self.stdout);
         allocator.free(self.stderr);
         self.* = undefined;
@@ -967,6 +990,35 @@ fn commandPath(command: reapi.Command) ?[]const u8 {
         if (std.mem.eql(u8, variable.name, "PATH")) return variable.value;
     }
     return null;
+}
+
+test "Outcome owns all REAPI output symlink paths and targets" {
+    const allocator = std.testing.allocator;
+    var outcome: Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = &.{},
+        .stderr = &.{},
+    };
+    defer outcome.deinit(allocator);
+
+    outcome.output_symlinks = try allocator.alloc(Outcome.OutputSymlink, 1);
+    outcome.output_symlinks[0] = .{ .path = &.{}, .target = &.{} };
+    outcome.output_symlinks[0].path = try allocator.dupe(u8, "out/link");
+    outcome.output_symlinks[0].target = try allocator.dupe(u8, "../target");
+
+    outcome.output_file_symlinks = try allocator.alloc(Outcome.OutputSymlink, 1);
+    outcome.output_file_symlinks[0] = .{ .path = &.{}, .target = &.{} };
+    outcome.output_file_symlinks[0].path = try allocator.dupe(u8, "out/file-link");
+    outcome.output_file_symlinks[0].target = try allocator.dupe(u8, "target-file");
+
+    outcome.output_directory_symlinks = try allocator.alloc(Outcome.OutputSymlink, 1);
+    outcome.output_directory_symlinks[0] = .{ .path = &.{}, .target = &.{} };
+    outcome.output_directory_symlinks[0].path = try allocator.dupe(u8, "out/directory-link");
+    outcome.output_directory_symlinks[0].target = try allocator.dupe(u8, "target-directory");
+
+    try std.testing.expectEqualStrings("../target", outcome.output_symlinks[0].target);
+    try std.testing.expectEqualStrings("target-file", outcome.output_file_symlinks[0].target);
+    try std.testing.expectEqualStrings("target-directory", outcome.output_directory_symlinks[0].target);
 }
 
 test "appendExecCandidates preserves explicit executable path" {

@@ -214,11 +214,18 @@ pub const Store = struct {
         stat: std.Io.Dir.Stat,
     ) !Digest {
         putFileStatsAdd(&put_file_calls, 1);
+        if (stat.kind != .file) return error.FailedPrecondition;
+
         const open_start = putFileStatsNow(io);
-        var src = try src_dir.openFile(io, src_path, .{});
+        var src = try src_dir.openFile(io, src_path, .{ .follow_symlinks = false });
         addElapsedNs(&put_file_promote_open_ns, open_start, io);
         defer src.close(io);
-        return self.putOpenFilePromote(io, src_dir, src_path, &src, stat);
+
+        const opened_stat = try src.stat(io);
+        if (opened_stat.kind != .file or opened_stat.inode != stat.inode)
+            return error.FailedPrecondition;
+
+        return self.putOpenFilePromote(io, src_dir, src_path, &src, opened_stat);
     }
 
     fn putOpenFilePromote(
@@ -929,6 +936,77 @@ test "Store putFile keeps the source file" {
     try std.testing.expect(try store.has(std.testing.io, digest));
     const stat = try stage.statFile(std.testing.io, "out.txt", .{});
     try std.testing.expectEqual(@as(u64, "copy me".len), stat.size);
+}
+
+test "Store file promotion rejects a symlink replacing the inspected file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "external.txt",
+        .data = "external contents",
+    });
+    const external_before = try tmp.dir.statFile(std.testing.io, "external.txt", .{});
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "staged contents",
+    });
+    const original_stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    try stage.deleteFile(std.testing.io, "out.txt");
+    try stage.symLink(std.testing.io, "../external.txt", "out.txt", .{});
+
+    try std.testing.expectError(
+        error.SymLinkLoop,
+        store.putFilePromoteWithStat(std.testing.io, stage, "out.txt", original_stat),
+    );
+
+    const external_after = try tmp.dir.statFile(std.testing.io, "external.txt", .{});
+    try std.testing.expectEqual(external_before.inode, external_after.inode);
+    try std.testing.expectEqual(external_before.permissions.toMode(), external_after.permissions.toMode());
+    try std.testing.expectEqual(external_before.size, external_after.size);
+    try std.testing.expectEqual(
+        std.Io.File.Kind.sym_link,
+        (try stage.statFile(std.testing.io, "out.txt", .{ .follow_symlinks = false })).kind,
+    );
+    try std.testing.expect(!try store.has(std.testing.io, Digest.fromBytes("external contents")));
+}
+
+test "Store file promotion rejects a different file replacing the inspected file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "original contents",
+    });
+    var original_file = try stage.openFile(std.testing.io, "out.txt", .{});
+    defer original_file.close(std.testing.io);
+    const original_stat = try original_file.stat(std.testing.io);
+    try stage.deleteFile(std.testing.io, "out.txt");
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "replacement contents",
+    });
+
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.putFilePromoteWithStat(std.testing.io, stage, "out.txt", original_stat),
+    );
+
+    const replacement_stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    try std.testing.expectEqual(@as(u64, "replacement contents".len), replacement_stat.size);
+    try std.testing.expect(!try store.has(std.testing.io, Digest.fromBytes("replacement contents")));
 }
 
 test "Store promotes same-filesystem files into CAS" {

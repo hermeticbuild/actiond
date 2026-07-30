@@ -323,9 +323,27 @@ pub fn executeDecodedActionWithOptions(
         if (outcome.stderr_digest) |digest| try index.add(io, allocator, digest);
     }
     try actiondfs_workspace.mountForCollection();
+    var collection_namespace = try ActiondfsCollectionNamespace.init(
+        io,
+        &actiondfs_workspace,
+        work_root,
+        actiondfs_stage_dir,
+        bind_mounts.items,
+        command,
+    );
+    defer collection_namespace.deinit(io);
     var output_dir = try std.Io.Dir.openDirAbsolute(io, actiondfs_workspace.collectionPath(), .{ .iterate = true });
     defer output_dir.close(io);
-    try collectOutputFiles(io, allocator, store, options.staged_cas_index, output_dir, command, &outcome);
+    try collectOutputFilesWithLookup(
+        io,
+        allocator,
+        store,
+        options.staged_cas_index,
+        output_dir,
+        command,
+        collection_namespace.lookup(work_root),
+        &outcome,
+    );
     const output_upload_completed_wall = timestampNow(io);
     const output_upload_completed = executorTimingNow(io);
 
@@ -567,6 +585,112 @@ const ActiondfsWorkspace = struct {
     }
 };
 
+const OutputCollectionLookup = struct {
+    chroot_root: std.Io.Dir,
+    workspace_root: std.Io.Dir,
+};
+
+const ActiondfsCollectionNamespace = struct {
+    workspace: *ActiondfsWorkspace,
+    bind_mounts: []const action_runner.BindMount,
+    mounted_bind_count: usize = 0,
+    strict_workspace_mounted: bool = false,
+    merged_workspace: ?std.Io.Dir = null,
+
+    fn init(
+        io: std.Io,
+        workspace: *ActiondfsWorkspace,
+        chroot_root: std.Io.Dir,
+        stage_root: std.Io.Dir,
+        bind_mounts: []const action_runner.BindMount,
+        command: reapi.Command,
+    ) !ActiondfsCollectionNamespace {
+        var namespace: ActiondfsCollectionNamespace = .{
+            .workspace = workspace,
+            .bind_mounts = bind_mounts,
+        };
+        if (!try needsMergedLegacyOutputLookup(io, stage_root, command)) return namespace;
+        if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+        errdefer namespace.deinit(io);
+
+        const linux = std.os.linux;
+        if (workspace.mode == .actiondfs_strict) {
+            const mount = switch (workspace.mounts[0]) {
+                .strict => |strict| strict,
+                .overlay => unreachable,
+            };
+            const mount_rc = linux.mount(
+                mount.fstype.ptr,
+                mount.target.ptr,
+                mount.fstype.ptr,
+                linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOATIME,
+                @intFromPtr(mount.actiondfs_data.ptr),
+            );
+            if (std.os.linux.errno(mount_rc) != .SUCCESS) return error.MountFailed;
+            namespace.strict_workspace_mounted = true;
+        }
+
+        for (bind_mounts) |bind_mount| {
+            const mount_rc = linux.mount(bind_mount.source.ptr, bind_mount.target.ptr, null, linux.MS.BIND, 0);
+            if (std.os.linux.errno(mount_rc) != .SUCCESS) return error.MountFailed;
+            namespace.mounted_bind_count += 1;
+            if (!bind_mount.read_only) continue;
+
+            const remount_rc = linux.mount(
+                null,
+                bind_mount.target.ptr,
+                null,
+                linux.MS.BIND | linux.MS.REMOUNT | linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV,
+                0,
+            );
+            if (std.os.linux.errno(remount_rc) != .SUCCESS) return error.MountFailed;
+        }
+
+        namespace.merged_workspace = try chroot_root.openDir(io, "workspace", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        return namespace;
+    }
+
+    fn lookup(self: *const ActiondfsCollectionNamespace, chroot_root: std.Io.Dir) ?OutputCollectionLookup {
+        return if (self.merged_workspace) |workspace_root| .{
+            .chroot_root = chroot_root,
+            .workspace_root = workspace_root,
+        } else null;
+    }
+
+    fn deinit(self: *ActiondfsCollectionNamespace, io: std.Io) void {
+        if (self.merged_workspace) |workspace_root| workspace_root.close(io);
+        if (comptime builtin.os.tag == .linux) {
+            while (self.mounted_bind_count != 0) {
+                self.mounted_bind_count -= 1;
+                unmountCollectionTarget(self.bind_mounts[self.mounted_bind_count].target);
+            }
+            if (self.strict_workspace_mounted) {
+                const mount = switch (self.workspace.mounts[0]) {
+                    .strict => |strict| strict,
+                    .overlay => unreachable,
+                };
+                unmountCollectionTarget(mount.target);
+            }
+        }
+        self.* = undefined;
+    }
+};
+
+fn unmountCollectionTarget(target: [:0]const u8) void {
+    if (comptime builtin.os.tag != .linux) return;
+    while (true) switch (std.os.linux.errno(std.os.linux.umount2(target.ptr, std.os.linux.MNT.DETACH))) {
+        .SUCCESS, .INVAL, .NOENT => return,
+        .INTR => continue,
+        else => |err| {
+            std.log.err("failed to unmount output collection target {s}: {s}", .{ target, @tagName(err) });
+            return;
+        },
+    };
+}
+
 fn createActiondfsBasePath(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -745,6 +869,9 @@ pub const OwnedActionResult = struct {
     result: reapi.ActionResult,
     output_files: []reapi.OutputFile,
     output_directories: []reapi.OutputDirectory,
+    output_symlinks: []reapi.OutputSymlink,
+    output_file_symlinks: []reapi.OutputSymlink,
+    output_directory_symlinks: []reapi.OutputSymlink,
     hash_strings: []const []u8,
 
     pub fn deinit(self: *OwnedActionResult, allocator: std.mem.Allocator) void {
@@ -752,6 +879,9 @@ pub const OwnedActionResult = struct {
         allocator.free(self.hash_strings);
         allocator.free(self.output_files);
         allocator.free(self.output_directories);
+        allocator.free(self.output_symlinks);
+        allocator.free(self.output_file_symlinks);
+        allocator.free(self.output_directory_symlinks);
         self.* = undefined;
     }
 };
@@ -770,6 +900,12 @@ pub fn actionResultFromOutcomeOwned(
     errdefer allocator.free(output_files);
     var output_directories = try allocator.alloc(reapi.OutputDirectory, outcome.output_directories.len);
     errdefer allocator.free(output_directories);
+    const output_symlinks = try allocator.alloc(reapi.OutputSymlink, outcome.output_symlinks.len);
+    errdefer allocator.free(output_symlinks);
+    const output_file_symlinks = try allocator.alloc(reapi.OutputSymlink, outcome.output_file_symlinks.len);
+    errdefer allocator.free(output_file_symlinks);
+    const output_directory_symlinks = try allocator.alloc(reapi.OutputSymlink, outcome.output_directory_symlinks.len);
+    errdefer allocator.free(output_directory_symlinks);
 
     for (outcome.output_files, 0..) |output_file, i| {
         output_files[i] = .{
@@ -785,11 +921,17 @@ pub fn actionResultFromOutcomeOwned(
             .root_directory_digest = if (output_directory.root_directory_digest) |digest| try appendDigest(allocator, &hash_strings, digest) else null,
         };
     }
+    copyOutputSymlinks(output_symlinks, outcome.output_symlinks);
+    copyOutputSymlinks(output_file_symlinks, outcome.output_file_symlinks);
+    copyOutputSymlinks(output_directory_symlinks, outcome.output_directory_symlinks);
 
     return .{
         .result = .{
             .output_files = output_files,
             .output_directories = output_directories,
+            .output_symlinks = output_symlinks,
+            .output_file_symlinks = output_file_symlinks,
+            .output_directory_symlinks = output_directory_symlinks,
             .exit_code = switch (outcome.status) {
                 .exited => |code| code,
                 .signaled => |signal| 128 + @as(i32, signal),
@@ -801,8 +943,23 @@ pub fn actionResultFromOutcomeOwned(
         },
         .output_files = output_files,
         .output_directories = output_directories,
+        .output_symlinks = output_symlinks,
+        .output_file_symlinks = output_file_symlinks,
+        .output_directory_symlinks = output_directory_symlinks,
         .hash_strings = try hash_strings.toOwnedSlice(allocator),
     };
+}
+
+fn copyOutputSymlinks(
+    outputs: []reapi.OutputSymlink,
+    collected: []const action_runner.Outcome.OutputSymlink,
+) void {
+    for (outputs, collected) |*output, symlink| {
+        output.* = .{
+            .path = symlink.path,
+            .target = symlink.target,
+        };
+    }
 }
 
 fn appendDigest(
@@ -940,30 +1097,150 @@ fn collectOutputFiles(
     command: reapi.Command,
     outcome: *action_runner.Outcome,
 ) !void {
+    try collectOutputFilesWithLookup(io, allocator, store, staged_index, work_root, command, null, outcome);
+}
+
+fn collectOutputFilesWithLookup(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
+    work_root: std.Io.Dir,
+    command: reapi.Command,
+    lookup: ?OutputCollectionLookup,
+    outcome: *action_runner.Outcome,
+) !void {
     var output_files: std.ArrayListUnmanaged(action_runner.Outcome.OutputFile) = .empty;
     var output_directories: std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory) = .empty;
+    var output_symlinks: std.ArrayListUnmanaged(action_runner.Outcome.OutputSymlink) = .empty;
+    var output_file_symlinks: std.ArrayListUnmanaged(action_runner.Outcome.OutputSymlink) = .empty;
+    var output_directory_symlinks: std.ArrayListUnmanaged(action_runner.Outcome.OutputSymlink) = .empty;
     errdefer {
         for (output_files.items) |output_file| allocator.free(output_file.path);
         for (output_directories.items) |output_directory| allocator.free(output_directory.path);
+        freeCollectedOutputSymlinks(allocator, &output_symlinks);
+        freeCollectedOutputSymlinks(allocator, &output_file_symlinks);
+        freeCollectedOutputSymlinks(allocator, &output_directory_symlinks);
         output_files.deinit(allocator);
         output_directories.deinit(allocator);
     }
 
     if (command.output_paths.len != 0) {
         for (command.output_paths) |path| {
-            try collectOutputPath(io, allocator, store, staged_index, work_root, path, &output_files, &output_directories);
+            try collectOutputPath(io, allocator, store, staged_index, work_root, path, &output_files, &output_directories, &output_symlinks);
         }
     } else {
+        for (command.output_files) |path| {
+            try collectLegacyOutputSymlink(io, allocator, work_root, path, .file, lookup, &output_file_symlinks);
+        }
+        for (command.output_directories) |path| {
+            if (path.len == 0) continue;
+            try collectLegacyOutputSymlink(io, allocator, work_root, path, .directory, lookup, &output_directory_symlinks);
+        }
+        for (command.output_directories) |path| {
+            if (path.len != 0) continue;
+            const root = if (lookup) |value| value.workspace_root else work_root;
+            try collectOpenedOutputDirectory(io, allocator, store, staged_index, root, path, &output_directories);
+        }
         for (command.output_files) |path| {
             try collectOutputFile(io, allocator, store, staged_index, work_root, path, &output_files);
         }
         for (command.output_directories) |path| {
+            if (path.len == 0) continue;
             try collectOutputDirectory(io, allocator, store, staged_index, work_root, path, &output_directories);
         }
     }
 
     outcome.output_files = try output_files.toOwnedSlice(allocator);
     outcome.output_directories = try output_directories.toOwnedSlice(allocator);
+    outcome.output_symlinks = try output_symlinks.toOwnedSlice(allocator);
+    outcome.output_file_symlinks = try output_file_symlinks.toOwnedSlice(allocator);
+    outcome.output_directory_symlinks = try output_directory_symlinks.toOwnedSlice(allocator);
+}
+
+fn freeCollectedOutputSymlinks(
+    allocator: std.mem.Allocator,
+    symlinks: *std.ArrayListUnmanaged(action_runner.Outcome.OutputSymlink),
+) void {
+    for (symlinks.items) |symlink| {
+        allocator.free(symlink.path);
+        allocator.free(symlink.target);
+    }
+    symlinks.deinit(allocator);
+}
+
+const OutputParentDirectory = struct {
+    dir: std.Io.Dir,
+    name: []const u8,
+    owns_dir: bool,
+
+    fn deinit(self: *OutputParentDirectory, io: std.Io) void {
+        if (self.owns_dir) self.dir.close(io);
+    }
+};
+
+fn openOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !OutputParentDirectory {
+    try validatePath(path);
+
+    const parent_end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return .{
+        .dir = work_root,
+        .name = path,
+        .owns_dir = false,
+    };
+
+    var current_dir = work_root;
+    var owns_current_dir = false;
+    errdefer if (owns_current_dir) current_dir.close(io);
+
+    var components = std.mem.splitScalar(u8, path[0..parent_end], '/');
+    while (components.next()) |component| {
+        const next_dir = current_dir.openDir(io, component, .{
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+            else => return err,
+        };
+        if (owns_current_dir) current_dir.close(io);
+        current_dir = next_dir;
+        owns_current_dir = true;
+    }
+
+    return .{
+        .dir = current_dir,
+        .name = path[parent_end + 1 ..],
+        .owns_dir = owns_current_dir,
+    };
+}
+
+fn needsMergedLegacyOutputLookup(io: std.Io, stage_root: std.Io.Dir, command: reapi.Command) !bool {
+    if (command.output_paths.len != 0) return false;
+
+    for (command.output_directories) |path| {
+        if (path.len == 0) return true;
+    }
+    for (command.output_files) |path| {
+        if (try isStagedOutputSymlink(io, stage_root, path)) return true;
+    }
+    for (command.output_directories) |path| {
+        if (try isStagedOutputSymlink(io, stage_root, path)) return true;
+    }
+    return false;
+}
+
+fn isStagedOutputSymlink(io: std.Io, stage_root: std.Io.Dir, path: []const u8) !bool {
+    var parent = openOutputParent(io, stage_root, path) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer parent.deinit(io);
+
+    const stat = parent.dir.statFile(io, parent.name, .{
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return stat.kind == .sym_link;
 }
 
 fn collectOutputPath(
@@ -975,15 +1252,22 @@ fn collectOutputPath(
     path: []const u8,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
+    output_symlinks: *std.ArrayListUnmanaged(action_runner.Outcome.OutputSymlink),
 ) !void {
-    try validatePath(path);
-    const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
+    var parent = openOutputParent(io, work_root, path) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer parent.deinit(io);
+
+    const stat = parent.dir.statFile(io, parent.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     switch (stat.kind) {
-        .file => try collectOutputFileWithStat(io, allocator, store, staged_index, work_root, path, stat, output_files),
-        .directory => try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories),
+        .file => try collectOutputFileWithStat(io, allocator, store, staged_index, parent.dir, parent.name, path, stat, output_files),
+        .directory => try collectOutputDirectoryWithStat(io, allocator, store, staged_index, parent.dir, parent.name, path, output_directories),
+        .sym_link => try collectOutputSymlink(io, allocator, parent.dir, parent.name, path, output_symlinks),
         else => return error.FailedPrecondition,
     }
 }
@@ -997,13 +1281,334 @@ fn collectOutputFile(
     path: []const u8,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
 ) !void {
-    try validatePath(path);
-    const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
+    var parent = openOutputParent(io, work_root, path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
+    defer parent.deinit(io);
+
+    const stat = parent.dir.statFile(io, parent.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind == .sym_link) return;
     if (stat.kind != .file) return error.FailedPrecondition;
-    try collectOutputFileWithStat(io, allocator, store, staged_index, work_root, path, stat, output_files);
+    try collectOutputFileWithStat(io, allocator, store, staged_index, parent.dir, parent.name, path, stat, output_files);
+}
+
+fn collectOutputSymlink(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    work_root: std.Io.Dir,
+    entry_name: []const u8,
+    path: []const u8,
+    output_symlinks: *std.ArrayListUnmanaged(action_runner.Outcome.OutputSymlink),
+) !void {
+    var target_buffer: [std.os.linux.PATH_MAX]u8 = undefined;
+    const target_len = work_root.readLink(io, entry_name, &target_buffer) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (target_len >= target_buffer.len) return error.InvalidSymlinkTarget;
+    const target = target_buffer[0..target_len];
+    try (reapi.OutputSymlink{ .path = path, .target = target }).validate();
+
+    const owned_path = try allocator.dupe(u8, path);
+    errdefer allocator.free(owned_path);
+    const owned_target = try allocator.dupe(u8, target);
+    errdefer allocator.free(owned_target);
+    try output_symlinks.append(allocator, .{
+        .path = owned_path,
+        .target = owned_target,
+    });
+}
+
+fn collectLegacyOutputSymlink(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    work_root: std.Io.Dir,
+    path: []const u8,
+    expected_kind: std.Io.File.Kind,
+    lookup: ?OutputCollectionLookup,
+    output_symlinks: *std.ArrayListUnmanaged(action_runner.Outcome.OutputSymlink),
+) !void {
+    var parent = openOutputParent(io, work_root, path) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer parent.deinit(io);
+
+    const stat = parent.dir.statFile(io, parent.name, .{
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind != .sym_link) return;
+
+    if (lookup) |collection_lookup| {
+        try validateLegacyOutputSymlinkTargetInChroot(
+            io,
+            allocator,
+            collection_lookup,
+            parent.dir,
+            parent.name,
+            path,
+            expected_kind,
+        );
+    } else {
+        try validateLegacyOutputSymlinkTarget(io, allocator, work_root, parent.dir, parent.name, path, expected_kind);
+    }
+    try collectOutputSymlink(io, allocator, parent.dir, parent.name, path, output_symlinks);
+}
+
+const LinuxOpenHow = extern struct {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+};
+
+const openat2_resolve_no_magiclinks: u64 = 0x02;
+const openat2_resolve_in_root: u64 = 0x10;
+const max_output_symlink_expansions: usize = 40;
+
+fn validateLegacyOutputSymlinkTargetInChroot(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    lookup: OutputCollectionLookup,
+    symlink_parent: std.Io.Dir,
+    entry_name: []const u8,
+    path: []const u8,
+    expected_kind: std.Io.File.Kind,
+) !void {
+    var target_buffer: [std.os.linux.PATH_MAX]u8 = undefined;
+    const target_len = symlink_parent.readLink(io, entry_name, &target_buffer) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+        else => return err,
+    };
+    if (target_len == 0 or target_len >= target_buffer.len) return error.FailedPrecondition;
+    const target = target_buffer[0..target_len];
+
+    const resolved_path = if (std.fs.path.isAbsolute(target))
+        try allocator.dupeZ(u8, target)
+    else if (std.mem.lastIndexOfScalar(u8, path, '/')) |parent_end|
+        try std.fmt.allocPrintSentinel(allocator, "/workspace/{s}/{s}", .{ path[0..parent_end], target }, 0)
+    else
+        try std.fmt.allocPrintSentinel(allocator, "/workspace/{s}", .{target}, 0);
+    defer allocator.free(resolved_path);
+
+    const target_kind = if (comptime builtin.os.tag == .linux)
+        try openat2OutputTargetKind(io, lookup.chroot_root, resolved_path)
+    else
+        try resolveOutputTargetKindPortable(io, allocator, lookup.chroot_root, resolved_path);
+    if (target_kind != expected_kind) return error.FailedPrecondition;
+}
+
+fn openat2OutputTargetKind(io: std.Io, root: std.Io.Dir, path: [:0]const u8) !std.Io.File.Kind {
+    if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+    const linux = std.os.linux;
+    const open_flags: linux.O = .{
+        .PATH = true,
+        .CLOEXEC = true,
+    };
+    const flags: u32 = @bitCast(open_flags);
+    const how: LinuxOpenHow = .{
+        .flags = flags,
+        .mode = 0,
+        .resolve = openat2_resolve_in_root | openat2_resolve_no_magiclinks,
+    };
+
+    var attempts: usize = 0;
+    while (true) {
+        const rc = linux.syscall4(
+            .openat2,
+            @bitCast(@as(isize, root.handle)),
+            @intFromPtr(path.ptr),
+            @intFromPtr(&how),
+            @sizeOf(LinuxOpenHow),
+        );
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS => {
+                var target_file: std.Io.File = .{
+                    .handle = @intCast(rc),
+                    .flags = .{ .nonblocking = false },
+                };
+                defer target_file.close(io);
+                return (try target_file.stat(io)).kind;
+            },
+            .INTR, .AGAIN => {
+                attempts += 1;
+                if (attempts >= max_output_symlink_expansions) return error.FailedPrecondition;
+            },
+            .NOENT, .NOTDIR, .LOOP, .XDEV, .ACCES, .PERM, .NAMETOOLONG => return error.FailedPrecondition,
+            .NOSYS, .INVAL => return error.UnsupportedSecureResolution,
+            .MFILE, .NFILE, .NOMEM => return error.SystemResources,
+            else => return error.Unexpected,
+        }
+    }
+}
+
+fn resolveOutputTargetKindPortable(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: std.Io.Dir,
+    initial_path: []const u8,
+) !std.Io.File.Kind {
+    var pending_path = try allocator.dupe(u8, initial_path);
+    defer allocator.free(pending_path);
+
+    var opened_directories: std.ArrayListUnmanaged(std.Io.Dir) = .empty;
+    defer {
+        for (opened_directories.items) |directory| directory.close(io);
+        opened_directories.deinit(allocator);
+    }
+    var current_dir = root;
+    var index: usize = 0;
+    var expansions: usize = 0;
+
+    while (true) {
+        while (index < pending_path.len and pending_path[index] == '/') index += 1;
+        if (index == pending_path.len) return .directory;
+
+        const component_start = index;
+        while (index < pending_path.len and pending_path[index] != '/') index += 1;
+        const component = pending_path[component_start..index];
+        const has_more_components = index < pending_path.len;
+
+        if (std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            if (opened_directories.pop()) |previous| previous.close(io);
+            current_dir = if (opened_directories.items.len == 0)
+                root
+            else
+                opened_directories.items[opened_directories.items.len - 1];
+            continue;
+        }
+
+        const stat = current_dir.statFile(io, component, .{
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+            else => return err,
+        };
+        if (stat.kind == .sym_link) {
+            expansions += 1;
+            if (expansions > max_output_symlink_expansions) return error.FailedPrecondition;
+
+            var target_buffer: [std.os.linux.PATH_MAX]u8 = undefined;
+            const target_len = current_dir.readLink(io, component, &target_buffer) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+                else => return err,
+            };
+            if (target_len == 0 or target_len >= target_buffer.len) return error.FailedPrecondition;
+            const target = target_buffer[0..target_len];
+            const next_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ target, pending_path[index..] });
+            allocator.free(pending_path);
+            pending_path = next_path;
+            index = 0;
+
+            if (std.fs.path.isAbsolute(target)) {
+                while (opened_directories.pop()) |directory| directory.close(io);
+                current_dir = root;
+            }
+            continue;
+        }
+
+        if (!has_more_components) return stat.kind;
+        if (stat.kind != .directory) return error.FailedPrecondition;
+        const next_dir = current_dir.openDir(io, component, .{
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+            else => return err,
+        };
+        opened_directories.append(allocator, next_dir) catch |err| {
+            next_dir.close(io);
+            return err;
+        };
+        current_dir = next_dir;
+    }
+}
+
+fn validateLegacyOutputSymlinkTarget(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    work_root: std.Io.Dir,
+    symlink_parent: std.Io.Dir,
+    entry_name: []const u8,
+    path: []const u8,
+    expected_kind: std.Io.File.Kind,
+) !void {
+    var target_buffer: [std.os.linux.PATH_MAX]u8 = undefined;
+    const target_len = symlink_parent.readLink(io, entry_name, &target_buffer) catch |err| switch (err) {
+        error.FileNotFound => return error.FailedPrecondition,
+        else => return err,
+    };
+    if (target_len == 0 or target_len >= target_buffer.len) return error.FailedPrecondition;
+    const target = target_buffer[0..target_len];
+    if (std.fs.path.isAbsolute(target)) return error.FailedPrecondition;
+
+    var opened_directories: std.ArrayListUnmanaged(std.Io.Dir) = .empty;
+    defer {
+        for (opened_directories.items) |directory| directory.close(io);
+        opened_directories.deinit(allocator);
+    }
+    var current_dir = work_root;
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |parent_end| {
+        var parent_components = std.mem.splitScalar(u8, path[0..parent_end], '/');
+        while (parent_components.next()) |component| {
+            const next_dir = current_dir.openDir(io, component, .{
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+                else => return err,
+            };
+            opened_directories.append(allocator, next_dir) catch |err| {
+                next_dir.close(io);
+                return err;
+            };
+            current_dir = next_dir;
+        }
+    }
+
+    var target_components = std.mem.splitScalar(u8, target, '/');
+    while (target_components.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            const previous = opened_directories.pop() orelse return error.FailedPrecondition;
+            previous.close(io);
+            current_dir = if (opened_directories.items.len == 0)
+                work_root
+            else
+                opened_directories.items[opened_directories.items.len - 1];
+            continue;
+        }
+
+        if (target_components.peek() == null) {
+            const target_stat = current_dir.statFile(io, component, .{
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+                else => return err,
+            };
+            if (target_stat.kind != expected_kind) return error.FailedPrecondition;
+            return;
+        }
+
+        const next_dir = current_dir.openDir(io, component, .{
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+            else => return err,
+        };
+        opened_directories.append(allocator, next_dir) catch |err| {
+            next_dir.close(io);
+            return err;
+        };
+        current_dir = next_dir;
+    }
+
+    if (expected_kind != .directory) return error.FailedPrecondition;
 }
 
 fn collectOutputFileWithStat(
@@ -1012,13 +1617,14 @@ fn collectOutputFileWithStat(
     store: cas.Store,
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
+    entry_name: []const u8,
     path: []const u8,
     stat: std.Io.Dir.Stat,
     output_files: *std.ArrayListUnmanaged(action_runner.Outcome.OutputFile),
 ) !void {
     if (stat.size > max_output_file_bytes) return error.FileTooBig;
 
-    const digest = putOutputFile(io, allocator, store, work_root, path, stat) catch |err| switch (err) {
+    const digest = putOutputFile(io, allocator, store, work_root, entry_name, path, stat) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -1038,12 +1644,31 @@ fn putOutputFile(
     allocator: std.mem.Allocator,
     store: cas.Store,
     work_root: std.Io.Dir,
+    entry_name: []const u8,
     path: []const u8,
     stat: std.Io.Dir.Stat,
 ) !cas.Digest {
-    if (!isDepfileOutput(path)) return store.putFilePromoteWithStat(io, work_root, path, stat);
+    if (!isDepfileOutput(path)) return store.putFilePromoteWithStat(io, work_root, entry_name, stat);
 
-    const bytes = try work_root.readFileAlloc(io, path, allocator, .limited(max_output_file_bytes));
+    var file = work_root.openFile(io, entry_name, .{
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.SymLinkLoop => return error.FailedPrecondition,
+        else => return err,
+    };
+    defer file.close(io);
+    const opened_stat = try file.stat(io);
+    if (opened_stat.kind != .file or
+        opened_stat.inode != stat.inode or
+        opened_stat.size != stat.size)
+    {
+        return error.FailedPrecondition;
+    }
+    var reader = file.reader(io, &.{});
+    const bytes = reader.interface.allocRemaining(allocator, .limited(max_output_file_bytes)) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.OutOfMemory, error.StreamTooLong => return err,
+    };
     defer allocator.free(bytes);
     const normalized = try stripChrootExecrootPrefix(allocator, bytes);
     defer allocator.free(normalized);
@@ -1079,13 +1704,19 @@ fn collectOutputDirectory(
     path: []const u8,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
-    try validatePath(path);
-    const stat = work_root.statFile(io, path, .{}) catch |err| switch (err) {
+    var parent = openOutputParent(io, work_root, path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
+    defer parent.deinit(io);
+
+    const stat = parent.dir.statFile(io, parent.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind == .sym_link) return;
     if (stat.kind != .directory) return error.FailedPrecondition;
-    try collectOutputDirectoryWithStat(io, allocator, store, staged_index, work_root, path, output_directories);
+    try collectOutputDirectoryWithStat(io, allocator, store, staged_index, parent.dir, parent.name, path, output_directories);
 }
 
 fn collectOutputDirectoryWithStat(
@@ -1094,11 +1725,30 @@ fn collectOutputDirectoryWithStat(
     store: cas.Store,
     staged_index: ?*staged_cas_index.Index,
     work_root: std.Io.Dir,
+    entry_name: []const u8,
     path: []const u8,
     output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
 ) !void {
-    var dir = try work_root.openDir(io, path, .{ .iterate = true });
+    var dir = work_root.openDir(io, entry_name, .{
+        .iterate = true,
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+        else => return err,
+    };
     defer dir.close(io);
+    try collectOpenedOutputDirectory(io, allocator, store, staged_index, dir, path, output_directories);
+}
+
+fn collectOpenedOutputDirectory(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    staged_index: ?*staged_cas_index.Index,
+    dir: std.Io.Dir,
+    path: []const u8,
+    output_directories: *std.ArrayListUnmanaged(action_runner.Outcome.OutputDirectory),
+) !void {
     var tree = OutputTreeBuilder{};
     defer tree.deinit(allocator);
     const root_directory_digest = try putOutputDirectoryTree(io, allocator, store, staged_index, dir, &tree, true);
@@ -1172,7 +1822,6 @@ fn isExecutable(stat: std.Io.Dir.Stat) bool {
 
 const DirectoryEntry = struct {
     name: []u8,
-    kind: std.Io.File.Kind,
 };
 
 const OutputTreeBuilder = struct {
@@ -1242,7 +1891,6 @@ fn putOutputDirectoryTree(
     while (try it.next(io)) |entry| {
         try entries.append(allocator, .{
             .name = try allocator.dupe(u8, entry.name),
-            .kind = entry.kind,
         });
     }
 
@@ -1256,12 +1904,20 @@ fn putOutputDirectoryTree(
     errdefer files.deinit(allocator);
     var directories: std.ArrayListUnmanaged(reapi.DirectoryNode) = .empty;
     errdefer directories.deinit(allocator);
+    var symlinks: std.ArrayListUnmanaged(reapi.SymlinkNode) = .empty;
+    errdefer symlinks.deinit(allocator);
 
     for (entries.items) |entry| {
         try validateEntryName(entry.name);
-        switch (entry.kind) {
+        const entry_stat = dir.statFile(io, entry.name, .{
+            .follow_symlinks = false,
+        });
+        const stat = entry_stat catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+            else => return err,
+        };
+        switch (stat.kind) {
             .file => {
-                const stat = try dir.statFile(io, entry.name, .{});
                 const digest = try store.putFilePromoteWithStat(io, dir, entry.name, stat);
                 if (staged_index) |index| try index.add(io, allocator, digest);
                 try files.append(allocator, .{
@@ -1271,12 +1927,32 @@ fn putOutputDirectoryTree(
                 });
             },
             .directory => {
-                var child = try dir.openDir(io, entry.name, .{ .iterate = true });
+                var child = dir.openDir(io, entry.name, .{
+                    .iterate = true,
+                    .follow_symlinks = false,
+                }) catch |err| switch (err) {
+                    error.NotDir, error.SymLinkLoop => return error.FailedPrecondition,
+                    else => return err,
+                };
                 defer child.close(io);
                 const digest = try putOutputDirectoryTree(io, allocator, store, staged_index, child, tree, false);
                 try directories.append(allocator, .{
                     .name = try tree.dupe(allocator, entry.name),
                     .digest = try tree.appendDigest(allocator, digest),
+                });
+            },
+            .sym_link => {
+                var target_buffer: [std.os.linux.PATH_MAX]u8 = undefined;
+                const target_len = try dir.readLink(io, entry.name, &target_buffer);
+                if (target_len >= target_buffer.len) return error.InvalidSymlinkTarget;
+                const symlink = reapi.SymlinkNode{
+                    .name = entry.name,
+                    .target = target_buffer[0..target_len],
+                };
+                try symlink.validate();
+                try symlinks.append(allocator, .{
+                    .name = try tree.dupe(allocator, symlink.name),
+                    .target = try tree.dupe(allocator, symlink.target),
                 });
             },
             else => return error.UnsupportedOutputDirectoryEntry,
@@ -1289,12 +1965,17 @@ fn putOutputDirectoryTree(
     const directory_slice = try directories.toOwnedSlice(allocator);
     var directory_slice_owned = true;
     errdefer if (directory_slice_owned) allocator.free(directory_slice);
+    const symlink_slice = try symlinks.toOwnedSlice(allocator);
+    var symlink_slice_owned = true;
+    errdefer if (symlink_slice_owned) allocator.free(symlink_slice);
     var directory = reapi.Directory{
         .files = file_slice,
         .directories = directory_slice,
+        .symlinks = symlink_slice,
     };
     file_slice_owned = false;
     directory_slice_owned = false;
+    symlink_slice_owned = false;
     var directory_owned = true;
     errdefer if (directory_owned) directory.deinit(allocator);
 
@@ -1566,6 +2247,435 @@ test "collectOutputFiles uploads requested output files and directories" {
     try std.testing.expect(result.result.output_directories[0].root_directory_digest.?.eql(outcome.output_directories[0].root_directory_digest.?.toReapi(&root_hash)));
 }
 
+test "collectOutputFiles reports modern output symlinks without resolving their targets" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+    try work_dir.createDirPath(std.testing.io, "links");
+    try work_dir.writeFile(std.testing.io, .{ .sub_path = "links/actual.txt", .data = "artifact" });
+    try work_dir.symLink(std.testing.io, "actual.txt", "links/file", .{});
+    try work_dir.symLink(std.testing.io, "missing/target", "links/dangling", .{});
+    try work_dir.symLink(std.testing.io, "/workspace/absolute", "links/absolute", .{});
+    try work_dir.symLink(std.testing.io, "../outside", "links/parent", .{});
+
+    var outcome: action_runner.Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = try std.testing.allocator.alloc(u8, 0),
+        .stderr = try std.testing.allocator.alloc(u8, 0),
+    };
+    defer outcome.deinit(std.testing.allocator);
+
+    try collectOutputFiles(std.testing.io, std.testing.allocator, cas.Store.init(cas_dir), null, work_dir, .{
+        .output_paths = &.{ "links/actual.txt", "links/file", "links/dangling", "links/absolute", "links/parent" },
+    }, &outcome);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
+    try std.testing.expectEqual(@as(usize, 0), outcome.output_directories.len);
+    try std.testing.expectEqual(@as(usize, 4), outcome.output_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 0), outcome.output_file_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 0), outcome.output_directory_symlinks.len);
+    try std.testing.expectEqualStrings("actual.txt", outcome.output_symlinks[0].target);
+    try std.testing.expectEqualStrings("missing/target", outcome.output_symlinks[1].target);
+    try std.testing.expectEqualStrings("/workspace/absolute", outcome.output_symlinks[2].target);
+    try std.testing.expectEqualStrings("../outside", outcome.output_symlinks[3].target);
+
+    var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), result.result.output_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 0), result.result.output_file_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 0), result.result.output_directory_symlinks.len);
+    try std.testing.expectEqualStrings("links/dangling", result.result.output_symlinks[1].path);
+    try std.testing.expectEqualStrings("missing/target", result.result.output_symlinks[1].target);
+
+    const encoded = try reapi.encodeAlloc(std.testing.allocator, result.result);
+    defer std.testing.allocator.free(encoded);
+    var reader = protobuf.Reader.init(encoded);
+    var decoded = try reapi.ActionResult.decodeOwned(std.testing.allocator, &reader);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), decoded.output_symlinks.len);
+    try std.testing.expectEqualStrings("/workspace/absolute", decoded.output_symlinks[2].target);
+}
+
+test "collectOutputFiles reports legacy file and directory symlinks separately" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+    try work_dir.createDirPath(std.testing.io, "out/nested");
+    try work_dir.writeFile(std.testing.io, .{ .sub_path = "out/target.txt", .data = "artifact" });
+    try work_dir.createDirPath(std.testing.io, "out/target-dir");
+    try work_dir.symLink(std.testing.io, "../target.txt", "out/nested/file-link", .{});
+    try work_dir.symLink(std.testing.io, "target-dir", "out/directory-link", .{ .is_directory = true });
+
+    var outcome: action_runner.Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = try std.testing.allocator.alloc(u8, 0),
+        .stderr = try std.testing.allocator.alloc(u8, 0),
+    };
+    defer outcome.deinit(std.testing.allocator);
+
+    try collectOutputFiles(std.testing.io, std.testing.allocator, cas.Store.init(cas_dir), null, work_dir, .{
+        .output_files = &.{ "out/target.txt", "out/nested/file-link" },
+        .output_directories = &.{ "out/target-dir", "out/directory-link" },
+    }, &outcome);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
+    try std.testing.expectEqualStrings("out/target.txt", outcome.output_files[0].path);
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
+    try std.testing.expectEqualStrings("out/target-dir", outcome.output_directories[0].path);
+    try std.testing.expectEqual(@as(usize, 0), outcome.output_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_file_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_directory_symlinks.len);
+    try std.testing.expectEqualStrings("out/nested/file-link", outcome.output_file_symlinks[0].path);
+    try std.testing.expectEqualStrings("../target.txt", outcome.output_file_symlinks[0].target);
+    try std.testing.expectEqualStrings("out/directory-link", outcome.output_directory_symlinks[0].path);
+    try std.testing.expectEqualStrings("target-dir", outcome.output_directory_symlinks[0].target);
+
+    var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), result.result.output_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 1), result.result.output_file_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 1), result.result.output_directory_symlinks.len);
+    try std.testing.expectEqualStrings("../target.txt", result.result.output_file_symlinks[0].target);
+    try std.testing.expectEqualStrings("target-dir", result.result.output_directory_symlinks[0].target);
+}
+
+test "collectOutputFiles resolves absolute, input, and runtime legacy symlinks inside the action chroot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var chroot = try tmp.dir.createDirPathOpen(std.testing.io, "chroot", .{});
+    defer chroot.close(std.testing.io);
+    try chroot.createDirPath(std.testing.io, "workspace/out");
+    try chroot.createDirPath(std.testing.io, "workspace/input-directory");
+    try chroot.createDirPath(std.testing.io, "etc/runtime-directory");
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/input.txt", .data = "immutable input" });
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "etc/runtime.txt", .data = "runtime input" });
+    try chroot.symLink(std.testing.io, "/etc/runtime.txt", "workspace/input-alias", .{});
+
+    var workspace = try chroot.openDir(std.testing.io, "workspace", .{ .iterate = true });
+    defer workspace.close(std.testing.io);
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.createDirPath(std.testing.io, "out");
+    try stage.symLink(std.testing.io, "../input.txt", "out/relative-input", .{});
+    try stage.symLink(std.testing.io, "/workspace/input.txt", "out/absolute-input", .{});
+    try stage.symLink(std.testing.io, "/etc/runtime.txt", "out/runtime-file", .{});
+    try stage.symLink(std.testing.io, "../input-alias", "out/input-chain", .{});
+    try stage.symLink(std.testing.io, "/workspace/input-directory", "out/input-directory", .{ .is_directory = true });
+    try stage.symLink(std.testing.io, "/etc/runtime-directory", "out/runtime-directory", .{ .is_directory = true });
+
+    var outcome: action_runner.Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = try std.testing.allocator.alloc(u8, 0),
+        .stderr = try std.testing.allocator.alloc(u8, 0),
+    };
+    defer outcome.deinit(std.testing.allocator);
+    try collectOutputFilesWithLookup(
+        std.testing.io,
+        std.testing.allocator,
+        cas.Store.init(cas_dir),
+        null,
+        stage,
+        .{
+            .output_files = &.{
+                "out/relative-input",
+                "out/absolute-input",
+                "out/runtime-file",
+                "out/input-chain",
+            },
+            .output_directories = &.{ "out/input-directory", "out/runtime-directory" },
+        },
+        .{ .chroot_root = chroot, .workspace_root = workspace },
+        &outcome,
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), outcome.output_file_symlinks.len);
+    try std.testing.expectEqual(@as(usize, 2), outcome.output_directory_symlinks.len);
+    try std.testing.expectEqualStrings("../input.txt", outcome.output_file_symlinks[0].target);
+    try std.testing.expectEqualStrings("/workspace/input.txt", outcome.output_file_symlinks[1].target);
+    try std.testing.expectEqualStrings("/etc/runtime.txt", outcome.output_file_symlinks[2].target);
+    try std.testing.expectEqualStrings("../input-alias", outcome.output_file_symlinks[3].target);
+    try std.testing.expectEqualStrings("/workspace/input-directory", outcome.output_directory_symlinks[0].target);
+    try std.testing.expectEqualStrings("/etc/runtime-directory", outcome.output_directory_symlinks[1].target);
+}
+
+test "collectOutputFiles rejects dangling, incorrectly typed, and invalid traversals in action-visible legacy symlinks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var chroot = try tmp.dir.createDirPathOpen(std.testing.io, "chroot", .{});
+    defer chroot.close(std.testing.io);
+    try chroot.createDirPath(std.testing.io, "workspace/out");
+    try chroot.createDirPath(std.testing.io, "workspace/directory");
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/out/file.txt", .data = "input" });
+    try chroot.symLink(std.testing.io, "/workspace/out/loop", "workspace/out/loop", .{});
+    try chroot.symLink(std.testing.io, "/workspace/directory", "workspace/out/nested-directory", .{ .is_directory = true });
+
+    var workspace = try chroot.openDir(std.testing.io, "workspace", .{ .iterate = true });
+    defer workspace.close(std.testing.io);
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.createDirPath(std.testing.io, "out");
+    try stage.symLink(std.testing.io, "/workspace/missing", "out/dangling", .{});
+    try stage.symLink(std.testing.io, "/workspace/directory", "out/directory-as-file", .{ .is_directory = true });
+    try stage.symLink(std.testing.io, "/workspace/out/file.txt", "out/file-as-directory", .{});
+    try stage.symLink(std.testing.io, "missing/../file.txt", "out/missing-parent", .{});
+    try stage.symLink(std.testing.io, "file.txt/../file.txt", "out/file-parent", .{});
+    try stage.symLink(std.testing.io, "loop", "out/loop", .{});
+    try stage.symLink(std.testing.io, "nested-directory/../file.txt", "out/nested-parent", .{});
+
+    const commands = [_]reapi.Command{
+        .{ .output_files = &.{"out/dangling"} },
+        .{ .output_files = &.{"out/directory-as-file"} },
+        .{ .output_directories = &.{"out/file-as-directory"} },
+        .{ .output_files = &.{"out/missing-parent"} },
+        .{ .output_files = &.{"out/file-parent"} },
+        .{ .output_files = &.{"out/loop"} },
+        .{ .output_files = &.{"out/nested-parent"} },
+    };
+    for (commands) |command| {
+        var outcome: action_runner.Outcome = .{
+            .status = .{ .exited = 0 },
+            .stdout = try std.testing.allocator.alloc(u8, 0),
+            .stderr = try std.testing.allocator.alloc(u8, 0),
+        };
+        defer outcome.deinit(std.testing.allocator);
+        try std.testing.expectError(error.FailedPrecondition, collectOutputFilesWithLookup(
+            std.testing.io,
+            std.testing.allocator,
+            cas.Store.init(cas_dir),
+            null,
+            stage,
+            command,
+            .{ .chroot_root = chroot, .workspace_root = workspace },
+            &outcome,
+        ));
+    }
+}
+
+test "collectOutputFiles rejects unsafe, dangling, and incorrectly typed legacy symlinks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+    try work_dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "artifact" });
+    try work_dir.createDirPath(std.testing.io, "directory");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outside.txt", .data = "secret" });
+    try work_dir.symLink(std.testing.io, "missing", "dangling", .{});
+    try work_dir.symLink(std.testing.io, "directory", "directory-as-file", .{ .is_directory = true });
+    try work_dir.symLink(std.testing.io, "file.txt", "file-as-directory", .{});
+    try work_dir.symLink(std.testing.io, "../outside.txt", "escaping", .{});
+    try work_dir.symLink(std.testing.io, "/etc/passwd", "absolute", .{});
+    try work_dir.symLink(std.testing.io, "absolute", "nested", .{});
+    try work_dir.symLink(std.testing.io, "missing/../file.txt", "missing-parent", .{});
+    try work_dir.symLink(std.testing.io, "file.txt/../file.txt", "file-parent", .{});
+    try work_dir.symLink(std.testing.io, "/etc", "escape-directory", .{ .is_directory = true });
+    try work_dir.symLink(std.testing.io, "escape-directory/../file.txt", "hidden-escape", .{});
+
+    const invalid_commands = [_]reapi.Command{
+        .{ .output_files = &.{"dangling"} },
+        .{ .output_directories = &.{"dangling"} },
+        .{ .output_files = &.{"directory-as-file"} },
+        .{ .output_directories = &.{"file-as-directory"} },
+        .{ .output_files = &.{"escaping"} },
+        .{ .output_files = &.{"absolute"} },
+        .{ .output_files = &.{"nested"} },
+        .{ .output_files = &.{"missing-parent"} },
+        .{ .output_files = &.{"file-parent"} },
+        .{ .output_files = &.{"hidden-escape"} },
+    };
+    for (invalid_commands) |command| {
+        var outcome: action_runner.Outcome = .{
+            .status = .{ .exited = 0 },
+            .stdout = try std.testing.allocator.alloc(u8, 0),
+            .stderr = try std.testing.allocator.alloc(u8, 0),
+        };
+        defer outcome.deinit(std.testing.allocator);
+        try std.testing.expectError(error.FailedPrecondition, collectOutputFiles(
+            std.testing.io,
+            std.testing.allocator,
+            cas.Store.init(cas_dir),
+            null,
+            work_dir,
+            command,
+            &outcome,
+        ));
+    }
+}
+
+test "collectOutputFiles rejects intermediate symlink parents without modifying external files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+    try tmp.dir.createDirPath(std.testing.io, "outside/directory");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "outside/secret.txt",
+        .data = "external contents must not change",
+    });
+    const initial_stat = try tmp.dir.statFile(std.testing.io, "outside/secret.txt", .{});
+    try work_dir.symLink(std.testing.io, "../outside", "out", .{ .is_directory = true });
+
+    const commands = [_]reapi.Command{
+        .{ .output_paths = &.{"out/secret.txt"} },
+        .{ .output_files = &.{"out/secret.txt"} },
+        .{ .output_directories = &.{"out/directory"} },
+    };
+    for (commands) |command| {
+        var outcome: action_runner.Outcome = .{
+            .status = .{ .exited = 0 },
+            .stdout = try std.testing.allocator.alloc(u8, 0),
+            .stderr = try std.testing.allocator.alloc(u8, 0),
+        };
+        defer outcome.deinit(std.testing.allocator);
+        try std.testing.expectError(error.FailedPrecondition, collectOutputFiles(
+            std.testing.io,
+            std.testing.allocator,
+            cas.Store.init(cas_dir),
+            null,
+            work_dir,
+            command,
+            &outcome,
+        ));
+    }
+
+    const final_stat = try tmp.dir.statFile(std.testing.io, "outside/secret.txt", .{});
+    try std.testing.expectEqual(initial_stat.permissions.toMode(), final_stat.permissions.toMode());
+    const contents = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "outside/secret.txt",
+        std.testing.allocator,
+        .limited(1024),
+    );
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("external contents must not change", contents);
+}
+
+test "collectOutputFiles serializes sorted symlinks in output directory trees" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    try work_dir.createDirPath(std.testing.io, "tree/child");
+    try work_dir.writeFile(std.testing.io, .{ .sub_path = "tree/child/file.txt", .data = "artifact" });
+    try work_dir.symLink(std.testing.io, "../outside", "tree/z-link", .{});
+    try work_dir.symLink(std.testing.io, "/workspace/input", "tree/a-link", .{});
+    try work_dir.symLink(std.testing.io, "../missing", "tree/child/nested-link", .{});
+
+    var outcome: action_runner.Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = try std.testing.allocator.alloc(u8, 0),
+        .stderr = try std.testing.allocator.alloc(u8, 0),
+    };
+    defer outcome.deinit(std.testing.allocator);
+    try collectOutputFiles(std.testing.io, std.testing.allocator, store, null, work_dir, .{
+        .output_paths = &.{"tree"},
+    }, &outcome);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
+    const tree_bytes = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_directories[0].tree_digest);
+    defer std.testing.allocator.free(tree_bytes);
+    var reader = protobuf.Reader.init(tree_bytes);
+    var root: ?reapi.Directory = null;
+    defer if (root) |*directory| directory.deinit(std.testing.allocator);
+    var child: ?reapi.Directory = null;
+    defer if (child) |*directory| directory.deinit(std.testing.allocator);
+    while (try reader.next()) |tag| switch (tag.field_number) {
+        1 => {
+            var nested = try reader.readMessage();
+            root = try reapi.Directory.decodeOwned(std.testing.allocator, &nested);
+        },
+        2 => {
+            var nested = try reader.readMessage();
+            child = try reapi.Directory.decodeOwned(std.testing.allocator, &nested);
+        },
+        else => try reader.skipField(tag.wire_type),
+    };
+
+    try std.testing.expectEqual(@as(usize, 2), root.?.symlinks.len);
+    try std.testing.expectEqualStrings("a-link", root.?.symlinks[0].name);
+    try std.testing.expectEqualStrings("/workspace/input", root.?.symlinks[0].target);
+    try std.testing.expectEqualStrings("z-link", root.?.symlinks[1].name);
+    try std.testing.expectEqualStrings("../outside", root.?.symlinks[1].target);
+    try std.testing.expectEqual(@as(usize, 1), child.?.symlinks.len);
+    try std.testing.expectEqualStrings("nested-link", child.?.symlinks[0].name);
+    try std.testing.expectEqualStrings("../missing", child.?.symlinks[0].target);
+}
+
+test "collectOutputFiles supports the empty legacy output directory with merged inputs and staged outputs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    var chroot = try tmp.dir.createDirPathOpen(std.testing.io, "chroot", .{});
+    defer chroot.close(std.testing.io);
+    try chroot.createDirPath(std.testing.io, "workspace");
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/input.txt", .data = "immutable input" });
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/output.txt", .data = "generated output" });
+    var workspace = try chroot.openDir(std.testing.io, "workspace", .{ .iterate = true });
+    defer workspace.close(std.testing.io);
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{ .sub_path = "output.txt", .data = "generated output" });
+
+    var outcome: action_runner.Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = try std.testing.allocator.alloc(u8, 0),
+        .stderr = try std.testing.allocator.alloc(u8, 0),
+    };
+    defer outcome.deinit(std.testing.allocator);
+    try collectOutputFilesWithLookup(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        null,
+        stage,
+        .{
+            .output_files = &.{"output.txt"},
+            .output_directories = &.{""},
+        },
+        .{ .chroot_root = chroot, .workspace_root = workspace },
+        &outcome,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_files.len);
+    try std.testing.expectEqual(@as(usize, 1), outcome.output_directories.len);
+    try std.testing.expectEqualStrings("", outcome.output_directories[0].path);
+
+    const bytes = try store.readAlloc(std.testing.io, std.testing.allocator, outcome.output_directories[0].root_directory_digest.?);
+    defer std.testing.allocator.free(bytes);
+    var reader = protobuf.Reader.init(bytes);
+    var directory = try reapi.Directory.decodeOwned(std.testing.allocator, &reader);
+    defer directory.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), directory.files.len);
+    try std.testing.expectEqualStrings("input.txt", directory.files[0].name);
+    try std.testing.expectEqualStrings("output.txt", directory.files[1].name);
+}
+
 test "collectOutputFiles includes root directory digest for tree-only output directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1631,6 +2741,36 @@ test "collectOutputFiles strips chroot execroot prefix from depfiles" {
         "bazel-out/pkg/file.o: external/tool/include/stddef.h pkg/input.c\n",
         depfile,
     );
+}
+
+test "needsMergedLegacyOutputLookup mounts only for actual legacy symlinks or the empty root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.createDirPath(std.testing.io, "out");
+    try stage.writeFile(std.testing.io, .{ .sub_path = "out/regular.txt", .data = "regular" });
+    try stage.symLink(std.testing.io, "regular.txt", "out/link", .{});
+
+    try std.testing.expect(!try needsMergedLegacyOutputLookup(std.testing.io, stage, .{
+        .output_files = &.{"out/regular.txt"},
+        .output_directories = &.{"out/missing-directory"},
+    }));
+    try std.testing.expect(!try needsMergedLegacyOutputLookup(std.testing.io, stage, .{
+        .output_paths = &.{"out/regular.txt"},
+        .output_files = &.{"out/link"},
+        .output_directories = &.{""},
+    }));
+    try std.testing.expect(try needsMergedLegacyOutputLookup(std.testing.io, stage, .{
+        .output_files = &.{"out/link"},
+    }));
+    try std.testing.expect(try needsMergedLegacyOutputLookup(std.testing.io, stage, .{
+        .output_directories = &.{"out/link"},
+    }));
+    try std.testing.expect(try needsMergedLegacyOutputLookup(std.testing.io, stage, .{
+        .output_directories = &.{""},
+    }));
 }
 
 test "prepareOutputParents creates parent directories for declared outputs" {
