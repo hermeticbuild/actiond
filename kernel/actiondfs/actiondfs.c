@@ -1098,14 +1098,35 @@ static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 	unsigned int stale_attempts = 0;
 	char path[ACTIONDFS_SHARDED_HASH_PATH_LEN + 1];
 	struct file *file;
+	struct inode *real_inode;
+	struct path real_path;
 	int err;
 
 	actiondfs_sharded_hash_path(hash, path);
 	while (true) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_OPEN_ATTEMPTS);
-		file = file_open_root(&sbi->cas_path, path, O_RDONLY, 0);
-		if (!IS_ERR(file))
+		err = vfs_path_lookup(sbi->cas_path.dentry, sbi->cas_path.mnt,
+				      path, LOOKUP_FOLLOW | LOOKUP_NO_SYMLINKS |
+					    LOOKUP_NO_XDEV, &real_path);
+		if (err) {
+			file = ERR_PTR(err);
+		} else {
+			real_inode = d_inode(real_path.dentry);
+			if (!real_inode || !S_ISREG(real_inode->i_mode)) {
+				path_put(&real_path);
+				return ERR_PTR(-EIO);
+			}
+			file = dentry_open(&real_path, O_RDONLY | O_NONBLOCK,
+					   current_cred());
+			path_put(&real_path);
+		}
+		if (!IS_ERR(file)) {
+			if (!S_ISREG(file_inode(file)->i_mode)) {
+				fput(file);
+				return ERR_PTR(-EIO);
+			}
 			return file;
+		}
 
 		err = PTR_ERR(file);
 		if (!actiondfs_retry_open_stale(err, &stale_attempts))
@@ -1115,11 +1136,14 @@ static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 
 static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sbi,
 						    const char *hash,
-						    const struct path *user_path)
+						    const struct path *user_path,
+						    u64 expected_size)
 {
 	unsigned int stale_attempts = 0;
 	struct file *file;
+	struct inode *real_inode;
 	struct path real_path;
+	loff_t real_size;
 	u64 total_start = actiondfs_stat_time_start();
 	int err;
 
@@ -1140,6 +1164,16 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 				return ERR_PTR(err);
 			}
 			continue;
+		}
+
+		real_inode = d_inode(real_path.dentry);
+		real_size = real_inode ? i_size_read(real_inode) : -1;
+		if (!real_inode || !S_ISREG(real_inode->i_mode) ||
+		    real_size < 0 || (u64)real_size != expected_size) {
+			path_put(&real_path);
+			actiondfs_stat_add_elapsed(
+				ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS, total_start);
+			return ERR_PTR(-EIO);
 		}
 
 		open_start = actiondfs_stat_time_start();
@@ -1195,7 +1229,7 @@ static int actiondfs_reopen_node_blob_if_current(struct actiondfs_sb_info *sbi,
 	if (actiondfs_file->private_data == current_file) {
 		actiondfs_drop_cached_blob_path(node->hash);
 		replacement = actiondfs_open_backing_cas_blob(
-			sbi, node->hash, file_user_path(actiondfs_file));
+			sbi, node->hash, file_user_path(actiondfs_file), node->size);
 		if (IS_ERR(replacement)) {
 			err = PTR_ERR(replacement);
 		} else {
@@ -2150,7 +2184,8 @@ static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_MISSES);
 	actiondfs_sharded_hash_path(hash, path);
 	err = vfs_path_lookup(sbi->cas_path.dentry, sbi->cas_path.mnt,
-			      path, LOOKUP_FOLLOW, &real_path);
+			      path, LOOKUP_FOLLOW | LOOKUP_NO_SYMLINKS |
+				    LOOKUP_NO_XDEV, &real_path);
 	if (err)
 		return err;
 
@@ -3064,7 +3099,7 @@ static int actiondfs_open(struct inode *inode, struct file *file)
 			return err;
 		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES);
 		backing_file = actiondfs_open_backing_cas_blob(
-			sbi, node->hash, file_user_path(file));
+			sbi, node->hash, file_user_path(file), node->size);
 	} else {
 		backing_file = actiondfs_open_staged_backing(
 			sbi, file, actiondfs_staged_backing_flags(file));
