@@ -223,6 +223,7 @@ pub fn executeDecodedActionWithOptions(
         .actiondfs_overlay
     else
         .actiondfs_strict;
+    try validateOutputParentsAgainstInputs(io, allocator, store, input_root_digest, command);
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
@@ -1764,6 +1765,114 @@ fn collectOpenedOutputDirectory(
     });
 }
 
+const OutputParentInputDirectory = struct {
+    bytes: []u8,
+    directory: reapi.Directory,
+
+    fn deinit(self: *OutputParentInputDirectory, allocator: std.mem.Allocator) void {
+        self.directory.deinit(allocator);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+const OutputParentValidator = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    root_digest: cas.Digest,
+    directories: std.AutoHashMapUnmanaged(cas.Digest, OutputParentInputDirectory) = .empty,
+
+    fn deinit(self: *OutputParentValidator) void {
+        var values = self.directories.valueIterator();
+        while (values.next()) |entry| entry.deinit(self.allocator);
+        self.directories.deinit(self.allocator);
+    }
+
+    fn getDirectory(self: *OutputParentValidator, digest: cas.Digest) !*const reapi.Directory {
+        const entry = try self.directories.getOrPut(self.allocator, digest);
+        if (entry.found_existing) return &entry.value_ptr.directory;
+        errdefer _ = self.directories.remove(digest);
+
+        const bytes = self.store.readAlloc(self.io, self.allocator, digest) catch |err| switch (err) {
+            error.FileNotFound => return error.MissingInputDirectoryBlob,
+            else => return err,
+        };
+        errdefer self.allocator.free(bytes);
+        var reader = protobuf.Reader.init(bytes);
+        var directory = try reapi.Directory.decodeOwned(self.allocator, &reader);
+        errdefer directory.deinit(self.allocator);
+
+        entry.value_ptr.* = .{
+            .bytes = bytes,
+            .directory = directory,
+        };
+        return &entry.value_ptr.directory;
+    }
+
+    fn validate(self: *OutputParentValidator, path: []const u8) !void {
+        if (path.len == 0) return;
+        try validatePath(path);
+        const parent_end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
+        if (parent_end == 0) return;
+
+        var current_digest = self.root_digest;
+        var components = std.mem.splitScalar(u8, path[0..parent_end], '/');
+        while (components.next()) |component| {
+            const directory = try self.getDirectory(current_digest);
+            if (findInputDirectoryEntry(reapi.FileNode, directory.files, component) != null)
+                return error.OutputParentConflictsWithInputFile;
+            if (findInputDirectoryEntry(reapi.SymlinkNode, directory.symlinks, component) != null)
+                return error.OutputParentConflictsWithInputSymlink;
+
+            const child = findInputDirectoryEntry(reapi.DirectoryNode, directory.directories, component) orelse return;
+            current_digest = try cas.Digest.fromReapi(child.digest orelse return error.MissingInputDirectoryDigest);
+        }
+    }
+};
+
+fn findInputDirectoryEntry(comptime Entry: type, entries: []const Entry, name: []const u8) ?*const Entry {
+    var first: usize = 0;
+    var remaining = entries.len;
+    while (remaining != 0) {
+        const offset = remaining / 2;
+        const index = first + offset;
+        switch (std.mem.order(u8, entries[index].name, name)) {
+            .eq => return &entries[index],
+            .lt => {
+                first = index + 1;
+                remaining -= offset + 1;
+            },
+            .gt => remaining = offset,
+        }
+    }
+    return null;
+}
+
+fn validateOutputParentsAgainstInputs(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    root_digest: cas.Digest,
+    command: reapi.Command,
+) !void {
+    var validator: OutputParentValidator = .{
+        .io = io,
+        .allocator = allocator,
+        .store = store,
+        .root_digest = root_digest,
+    };
+    defer validator.deinit();
+
+    if (command.output_paths.len != 0) {
+        for (command.output_paths) |path| try validator.validate(path);
+        return;
+    }
+
+    for (command.output_files) |path| try validator.validate(path);
+    for (command.output_directories) |path| try validator.validate(path);
+}
+
 fn prepareOutputParents(
     io: std.Io,
     work_root: std.Io.Dir,
@@ -2740,6 +2849,126 @@ test "collectOutputFiles strips chroot execroot prefix from depfiles" {
     try std.testing.expectEqualStrings(
         "bazel-out/pkg/file.o: external/tool/include/stddef.h pkg/input.c\n",
         depfile,
+    );
+}
+
+test "validateOutputParentsAgainstInputs rejects an immutable root file as an output parent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    const file_digest = try store.putBytes(std.testing.io, "input");
+    var file_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{.{ .name = "foo", .digest = file_digest.toReapi(&file_hash) }},
+    });
+
+    try std.testing.expectError(error.OutputParentConflictsWithInputFile, validateOutputParentsAgainstInputs(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        root_digest,
+        .{ .output_paths = &.{"foo/bar"} },
+    ));
+}
+
+test "validateOutputParentsAgainstInputs rejects a nested immutable file as a legacy output parent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    const file_digest = try store.putBytes(std.testing.io, "input");
+    var file_hash: [64]u8 = undefined;
+    const child_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{.{ .name = "generated", .digest = file_digest.toReapi(&file_hash) }},
+    });
+    var child_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{.{ .name = "src", .digest = child_digest.toReapi(&child_hash) }},
+    });
+
+    try std.testing.expectError(error.OutputParentConflictsWithInputFile, validateOutputParentsAgainstInputs(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        root_digest,
+        .{ .output_files = &.{"src/generated/output.txt"} },
+    ));
+}
+
+test "validateOutputParentsAgainstInputs rejects an immutable symlink as an output parent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .symlinks = &.{.{ .name = "alias", .target = "real" }},
+    });
+
+    try std.testing.expectError(error.OutputParentConflictsWithInputSymlink, validateOutputParentsAgainstInputs(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        root_digest,
+        .{ .output_directories = &.{"alias/tree"} },
+    ));
+}
+
+test "validateOutputParentsAgainstInputs accepts existing input directories and missing descendants" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    const file_digest = try store.putBytes(std.testing.io, "input");
+    var file_hash: [64]u8 = undefined;
+    const child_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{.{ .name = "input.txt", .digest = file_digest.toReapi(&file_hash) }},
+    });
+    var child_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{.{ .name = "src", .digest = child_digest.toReapi(&child_hash) }},
+    });
+
+    try validateOutputParentsAgainstInputs(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        root_digest,
+        .{ .output_paths = &.{ "src/new/a.txt", "src/other/b.txt" } },
+    );
+}
+
+test "validateOutputParentsAgainstInputs ignores legacy output conflicts when output_paths is present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    const file_digest = try store.putBytes(std.testing.io, "input");
+    var file_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{.{ .name = "legacy", .digest = file_digest.toReapi(&file_hash) }},
+    });
+
+    try validateOutputParentsAgainstInputs(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        root_digest,
+        .{
+            .output_paths = &.{"new/output.txt"},
+            .output_files = &.{"legacy/output.txt"},
+            .output_directories = &.{"legacy/tree"},
+        },
     );
 }
 
