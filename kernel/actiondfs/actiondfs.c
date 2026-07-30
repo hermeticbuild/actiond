@@ -3534,6 +3534,41 @@ static int actiondfs_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int actiondfs_fsync(struct file *file, loff_t start, loff_t end,
+			   int datasync)
+{
+	struct inode *inode = file_inode(file);
+	struct actiondfs_node *node = inode->i_private;
+	struct file *backing_file;
+	struct path real_path;
+	int err;
+
+	if (S_ISDIR(inode->i_mode)) {
+		err = actiondfs_stage_node_path(actiondfs_sbi(inode->i_sb), node,
+					       &real_path);
+		if (err == -ENOENT || err == -EROFS)
+			return 0;
+		if (err)
+			return err;
+		backing_file = dentry_open(&real_path, O_RDONLY | O_DIRECTORY,
+					   current_cred());
+		path_put(&real_path);
+		if (IS_ERR(backing_file))
+			return PTR_ERR(backing_file);
+	} else {
+		if (node->origin != ACTIONDFS_NODE_STAGED)
+			return 0;
+		backing_file = file->private_data;
+		if (!backing_file)
+			return -EBADF;
+		get_file(backing_file);
+	}
+
+	err = vfs_fsync_range(backing_file, start, end, datasync);
+	fput(backing_file);
+	return err;
+}
+
 static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			     struct iattr *attr)
 {
@@ -3954,6 +3989,7 @@ static const struct inode_operations actiondfs_symlink_iops = {
 static const struct file_operations actiondfs_file_fops = {
 	.open = actiondfs_open,
 	.release = actiondfs_release,
+	.fsync = actiondfs_fsync,
 	.llseek = generic_file_llseek,
 	.read_iter = actiondfs_read_iter,
 	.write_iter = actiondfs_write_iter,
@@ -3977,6 +4013,7 @@ static const struct inode_operations actiondfs_dir_iops = {
 static const struct file_operations actiondfs_dir_fops = {
 	.open = actiondfs_dir_open,
 	.release = actiondfs_dir_release,
+	.fsync = actiondfs_fsync,
 	.llseek = generic_file_llseek,
 	.read = generic_read_dir,
 	.iterate_shared = actiondfs_iterate_shared,
