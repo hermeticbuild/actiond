@@ -874,7 +874,7 @@ static int actiondfs_valid_component(const char *name, size_t len)
 	if ((len == 1 && name[0] == '.') ||
 	    (len == 2 && name[0] == '.' && name[1] == '.'))
 		return -EINVAL;
-	if (memchr(name, '\0', len))
+	if (memchr(name, '\0', len) || memchr(name, '/', len))
 		return -EINVAL;
 	return 0;
 }
