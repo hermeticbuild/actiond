@@ -108,6 +108,7 @@ struct actiondfs_node {
 	char hash[65];
 	struct file *blob_file;
 	struct mutex blob_lock;
+	struct mutex load_lock;
 	bool loaded;
 	struct actiondfs_node *parent;
 	struct dentry *stage_dentry;
@@ -121,7 +122,6 @@ struct actiondfs_sb_info {
 	struct actiondfs_node *root;
 	struct actiondfs_cached_dir *root_cached_dir;
 	atomic64_t next_ino;
-	struct mutex load_lock;
 };
 
 struct actiondfs_mount_options {
@@ -451,6 +451,7 @@ static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi
 	node->mode = mode;
 	node->loaded = true;
 	mutex_init(&node->blob_lock);
+	mutex_init(&node->load_lock);
 	return node;
 }
 
@@ -2381,7 +2382,7 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 {
 	int err;
 
-	if (dir->loaded)
+	if (smp_load_acquire(&dir->loaded))
 		return 0;
 
 	if (dir->parent) {
@@ -2392,7 +2393,7 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 		if (err)
 			return err;
 		dir->cached_dir = cached;
-		dir->loaded = true;
+		smp_store_release(&dir->loaded, true);
 		return 0;
 	}
 
@@ -2402,7 +2403,7 @@ static int actiondfs_load_reapi_directory_locked(struct actiondfs_sb_info *sbi,
 	if (err)
 		return err;
 	sbi->root_cached_dir = dir->cached_dir;
-	dir->loaded = true;
+	smp_store_release(&dir->loaded, true);
 	return 0;
 }
 
@@ -2414,15 +2415,15 @@ static int actiondfs_ensure_loaded(struct super_block *sb,
 
 	if (!actiondfs_is_dir(dir))
 		return -ENOTDIR;
-	if (dir->loaded)
+	if (smp_load_acquire(&dir->loaded))
 		return 0;
 
-	mutex_lock(&sbi->load_lock);
-	if (!dir->loaded) {
+	mutex_lock(&dir->load_lock);
+	if (!smp_load_acquire(&dir->loaded)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_DIR_LOADS);
 		err = actiondfs_load_reapi_directory_locked(sbi, dir);
 	}
-	mutex_unlock(&sbi->load_lock);
+	mutex_unlock(&dir->load_lock);
 	return err;
 }
 
@@ -2634,7 +2635,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		memcpy(node->hash, input_lookup.record->hash, 64);
 		node->hash[64] = '\0';
 		node->cached_dir = input_cached;
-		node->loaded = true;
+		smp_store_release(&node->loaded, true);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES);
 	}
 	return inode;
@@ -3514,7 +3515,6 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -ENOMEM;
 
 	sb->s_fs_info = sbi;
-	mutex_init(&sbi->load_lock);
 	atomic64_set(&sbi->next_ino, 0);
 	sb->s_magic = ACTIONDFS_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
