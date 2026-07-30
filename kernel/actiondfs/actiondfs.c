@@ -2821,8 +2821,6 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 		inode_unlock(d_inode(parent_path.dentry));
 	}
 	if (err)
-		dput(real_dentry);
-	if (err)
 		goto out_drop_write;
 
 	{
