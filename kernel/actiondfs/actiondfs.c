@@ -2851,27 +2851,19 @@ out_put_inode:
 	return ERR_PTR(err);
 }
 
-static int actiondfs_unlink(struct inode *dir, struct dentry *dentry)
+static int actiondfs_remove_staged_child(struct inode *dir,
+					 struct dentry *dentry, bool directory)
 {
 	struct inode *inode = d_inode(dentry);
-	struct actiondfs_node *node = inode->i_private;
 	struct actiondfs_node *parent = dir->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
 	struct path parent_path;
 	struct dentry *real_dentry;
 	int err;
 
-	if (node->origin != ACTIONDFS_NODE_STAGED)
-		return -EROFS;
-	if (S_ISDIR(node->mode))
-		return -EISDIR;
-
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_UNLINK_CALLS);
 	err = actiondfs_stage_node_path(sbi, parent, &parent_path);
-	if (err) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_UNLINK_FAILURES);
+	if (err)
 		return err;
-	}
 	err = mnt_want_write(parent_path.mnt);
 	if (err)
 		goto out_put_path;
@@ -2881,6 +2873,9 @@ static int actiondfs_unlink(struct inode *dir, struct dentry *dentry)
 		goto out_drop_write;
 	if (!d_inode(real_dentry)) {
 		err = -ENOENT;
+	} else if (directory) {
+		err = vfs_rmdir(mnt_idmap(parent_path.mnt),
+				d_inode(parent_path.dentry), real_dentry);
 	} else {
 		err = vfs_unlink(mnt_idmap(parent_path.mnt),
 				 d_inode(parent_path.dentry), real_dentry,
@@ -2889,27 +2884,37 @@ static int actiondfs_unlink(struct inode *dir, struct dentry *dentry)
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
 	if (!err) {
 		clear_nlink(inode);
+		if (directory)
+			drop_nlink(dir);
 		actiondfs_note_stage_change(parent);
 	}
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
 out_put_path:
 	path_put(&parent_path);
-	if (err)
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_UNLINK_FAILURES);
-	else
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_UNLINK_SUCCESS);
+	return err;
+}
+
+static int actiondfs_unlink(struct inode *dir, struct dentry *dentry)
+{
+	struct actiondfs_node *node = d_inode(dentry)->i_private;
+	int err;
+
+	if (node->origin != ACTIONDFS_NODE_STAGED)
+		return -EROFS;
+	if (S_ISDIR(node->mode))
+		return -EISDIR;
+
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_UNLINK_CALLS);
+	err = actiondfs_remove_staged_child(dir, dentry, false);
+	actiondfs_stat_inc(err ? ACTIONDFS_STAT_STAGE_UNLINK_FAILURES :
+			  ACTIONDFS_STAT_STAGE_UNLINK_SUCCESS);
 	return err;
 }
 
 static int actiondfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
-	struct actiondfs_node *node = inode->i_private;
-	struct actiondfs_node *parent = dir->i_private;
-	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
-	struct path parent_path;
-	struct dentry *real_dentry;
+	struct actiondfs_node *node = d_inode(dentry)->i_private;
 	int err;
 
 	if (node->origin != ACTIONDFS_NODE_STAGED)
@@ -2920,38 +2925,9 @@ static int actiondfs_rmdir(struct inode *dir, struct dentry *dentry)
 		return -EROFS;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RMDIR_CALLS);
-	err = actiondfs_stage_node_path(sbi, parent, &parent_path);
-	if (err) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RMDIR_FAILURES);
-		return err;
-	}
-	err = mnt_want_write(parent_path.mnt);
-	if (err)
-		goto out_put_path;
-	err = actiondfs_stage_lookup_child(&parent_path, dentry->d_name.name,
-					   dentry->d_name.len, &real_dentry);
-	if (err)
-		goto out_drop_write;
-	if (!d_inode(real_dentry)) {
-		err = -ENOENT;
-	} else {
-		err = vfs_rmdir(mnt_idmap(parent_path.mnt),
-				d_inode(parent_path.dentry), real_dentry);
-	}
-	actiondfs_stage_unlock_child(&parent_path, real_dentry);
-	if (!err) {
-		clear_nlink(inode);
-		drop_nlink(dir);
-		actiondfs_note_stage_change(parent);
-	}
-out_drop_write:
-	mnt_drop_write(parent_path.mnt);
-out_put_path:
-	path_put(&parent_path);
-	if (err)
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RMDIR_FAILURES);
-	else
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RMDIR_SUCCESS);
+	err = actiondfs_remove_staged_child(dir, dentry, true);
+	actiondfs_stat_inc(err ? ACTIONDFS_STAT_STAGE_RMDIR_FAILURES :
+			  ACTIONDFS_STAT_STAGE_RMDIR_SUCCESS);
 	return err;
 }
 
