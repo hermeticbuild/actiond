@@ -61,7 +61,6 @@
 #define ACTIONDFS_PROC_STATS "actiondfs_stats"
 #define ACTIONDFS_HASH_HEX_LEN 64
 #define ACTIONDFS_SHARDED_HASH_PATH_LEN (2 + 1 + ACTIONDFS_HASH_HEX_LEN)
-#define ACTIONDFS_MAX_STAGE_DEPTH ((PATH_MAX + 1) / 2)
 #define ACTIONDFS_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 #define ACTIONDFS_UNKNOWN_SIZE (~(u64)0)
 
@@ -112,8 +111,7 @@ struct actiondfs_node {
 	u64 size;
 	char *link_target;
 	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
-	const char *input_name;
-	size_t input_name_len;
+	const struct actiondfs_cached_child *input_child;
 	struct mutex load_lock;
 	struct actiondfs_node *parent;
 	struct dentry *stage_dentry;
@@ -428,7 +426,8 @@ static void actiondfs_free_node(struct actiondfs_node *node)
 		return;
 	if (node->stage_dentry)
 		dput(node->stage_dentry);
-	kfree(node->link_target);
+	if (node->origin == ACTIONDFS_NODE_STAGED)
+		kfree(node->link_target);
 	kfree(node);
 }
 
@@ -590,19 +589,12 @@ out_drop_write:
 	return err;
 }
 
-struct actiondfs_stage_ancestor {
-	struct actiondfs_node *node;
-	struct dentry *dentry;
-};
-
 static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 					      struct actiondfs_node *node,
-					      struct dentry *dentry,
 					      struct path *path)
 {
-	struct actiondfs_stage_ancestor *ancestors;
+	struct actiondfs_node **ancestors;
 	struct actiondfs_node *ancestor_node;
-	struct dentry *ancestor_dentry;
 	struct path current_path;
 	size_t depth = 0;
 	size_t path_len = 0;
@@ -620,18 +612,17 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 	}
 
 	ancestor_node = node;
-	ancestor_dentry = dentry;
 	while (!smp_load_acquire(&ancestor_node->stage_dentry)) {
+		const struct actiondfs_cached_child *child;
 		size_t name_len;
 
-		if (!ancestor_node->parent ||
-		    ancestor_dentry->d_parent == ancestor_dentry) {
+		child = ancestor_node->input_child;
+		if (!ancestor_node->parent || !child) {
 			err = -ESTALE;
 			goto out_error;
 		}
-		name_len = ancestor_dentry->d_name.len;
+		name_len = child->name_len;
 		if (!name_len || name_len > NAME_MAX ||
-		    depth == ACTIONDFS_MAX_STAGE_DEPTH ||
 		    name_len + 1 > PATH_MAX - path_len) {
 			err = -ENAMETOOLONG;
 			goto out_error;
@@ -639,7 +630,6 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		path_len += name_len + 1;
 		depth++;
 		ancestor_node = ancestor_node->parent;
-		ancestor_dentry = ancestor_dentry->d_parent;
 	}
 
 	ancestors = kcalloc(depth, sizeof(*ancestors), GFP_KERNEL);
@@ -648,12 +638,9 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		goto out_error;
 	}
 	ancestor_node = node;
-	ancestor_dentry = dentry;
 	for (i = 0; i < depth; i++) {
-		ancestors[i].node = ancestor_node;
-		ancestors[i].dentry = ancestor_dentry;
+		ancestors[i] = ancestor_node;
 		ancestor_node = ancestor_node->parent;
-		ancestor_dentry = ancestor_dentry->d_parent;
 	}
 
 	err = actiondfs_stage_node_path(sbi, ancestor_node, &current_path);
@@ -661,30 +648,30 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		goto out_free;
 
 	while (depth) {
-		struct actiondfs_stage_ancestor *ancestor = &ancestors[--depth];
+		struct actiondfs_node *ancestor = ancestors[--depth];
+		const struct actiondfs_cached_child *child =
+			ancestor->input_child;
 		struct path next_path;
 
-		if (smp_load_acquire(&ancestor->node->stage_dentry)) {
-			err = actiondfs_stage_node_path(sbi, ancestor->node,
+		if (smp_load_acquire(&ancestor->stage_dentry)) {
+			err = actiondfs_stage_node_path(sbi, ancestor,
 							  &next_path);
 		} else {
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_ENSURE_DIR_COMPONENTS);
 			err = vfs_path_lookup(current_path.dentry, current_path.mnt,
-					      ancestor->dentry->d_name.name,
+					      child->name,
 					      LOOKUP_DIRECTORY | LOOKUP_NO_SYMLINKS |
 					      LOOKUP_NO_XDEV, &next_path);
 			if (err == -ENOENT) {
 				err = actiondfs_stage_mkdir_child(
-					&current_path,
-					ancestor->dentry->d_name.name,
-					ancestor->dentry->d_name.len,
-					ancestor->node->mode & S_IALLUGO);
+					&current_path, child->name, child->name_len,
+					ancestor->mode & S_IALLUGO);
 				if (!err) {
 					actiondfs_stat_inc(
 						ACTIONDFS_STAT_STAGE_ENSURE_DIR_CREATED);
 					err = vfs_path_lookup(
 						current_path.dentry, current_path.mnt,
-						ancestor->dentry->d_name.name,
+						child->name,
 						LOOKUP_DIRECTORY | LOOKUP_NO_SYMLINKS |
 						LOOKUP_NO_XDEV, &next_path);
 				}
@@ -693,7 +680,7 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 					ACTIONDFS_STAT_STAGE_ENSURE_DIR_EXISTING);
 			}
 			if (!err)
-				actiondfs_set_stage_dentry(ancestor->node,
+				actiondfs_set_stage_dentry(ancestor,
 							  next_path.dentry);
 		}
 		if (err) {
@@ -784,19 +771,13 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 		return ERR_PTR(-ENOMEM);
 
 	node->parent = parent;
-	node->input_name = record->name;
-	node->input_name_len = record->name_len;
+	node->input_child = record;
 	node->ino = actiondfs_input_child_ino(parent, record->name,
 					     record->name_len,
 					     S_ISDIR(record->mode));
 	node->size = record->size;
-	if (S_ISLNK(record->mode)) {
-		node->link_target = kstrdup(record->link_target, GFP_KERNEL);
-		if (!node->link_target) {
-			actiondfs_free_node(node);
-			return ERR_PTR(-ENOMEM);
-		}
-	}
+	if (S_ISLNK(record->mode))
+		node->link_target = record->link_target;
 	actiondfs_copy_hash(node->hash, record->hash);
 	return node;
 }
@@ -2329,10 +2310,7 @@ static int actiondfs_test_input_inode(struct inode *inode, void *data)
 	return existing && existing->origin == ACTIONDFS_NODE_INPUT &&
 	       existing->ino == candidate->ino &&
 	       existing->parent == candidate->parent &&
-	       (existing->mode & S_IFMT) == (candidate->mode & S_IFMT) &&
-	       existing->input_name_len == candidate->input_name_len &&
-	       !memcmp(existing->input_name, candidate->input_name,
-		       candidate->input_name_len);
+	       existing->input_child == candidate->input_child;
 }
 
 static int actiondfs_set_input_inode(struct inode *inode, void *data)
@@ -2683,8 +2661,7 @@ static int actiondfs_create_staged_file(struct inode *dir,
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
-	err = actiondfs_ensure_stage_parent_path(sbi, parent, dentry->d_parent,
-							 &parent_path);
+	err = actiondfs_ensure_stage_parent_path(sbi, parent, &parent_path);
 	if (err)
 		goto out_put_inode;
 	err = mnt_want_write(parent_path.mnt);
@@ -2783,8 +2760,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 		return ERR_PTR(err);
 	}
 
-	err = actiondfs_ensure_stage_parent_path(sbi, parent, dentry->d_parent,
-							 &parent_path);
+	err = actiondfs_ensure_stage_parent_path(sbi, parent, &parent_path);
 	if (err)
 		goto out_put_inode;
 	err = mnt_want_write(parent_path.mnt);
@@ -2943,7 +2919,6 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	if (err)
 		goto out_done;
 	err = actiondfs_ensure_stage_parent_path(sbi, new_parent,
-						 new_dentry->d_parent,
 						 &new_parent_path);
 	if (err)
 		goto out_put_old_path;
