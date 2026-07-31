@@ -100,11 +100,6 @@ struct actiondfs_blob_path_cache_entry {
 	struct dentry *dentry;
 };
 
-struct actiondfs_cached_lookup {
-	struct actiondfs_cached_child *record;
-	bool is_dir;
-};
-
 enum actiondfs_node_origin {
 	ACTIONDFS_NODE_INPUT,
 	ACTIONDFS_NODE_STAGED,
@@ -738,15 +733,9 @@ static int actiondfs_compare_name(const char *lhs, size_t lhs_len,
 	int cmp;
 
 	cmp = memcmp(lhs, rhs, common);
-	if (cmp < 0)
-		return -1;
-	if (cmp > 0)
-		return 1;
-	if (lhs_len < rhs_len)
-		return -1;
-	if (lhs_len > rhs_len)
-		return 1;
-	return 0;
+	if (cmp)
+		return cmp;
+	return (lhs_len > rhs_len) - (lhs_len < rhs_len);
 }
 
 static bool actiondfs_find_cached_child_in(struct actiondfs_cached_child *children,
@@ -776,48 +765,32 @@ static bool actiondfs_find_cached_child_in(struct actiondfs_cached_child *childr
 	return false;
 }
 
-static bool actiondfs_find_cached_child(struct actiondfs_node *dir,
-					const char *name,
-					size_t len,
-					struct actiondfs_cached_lookup *out)
+static struct actiondfs_cached_child *
+actiondfs_find_cached_child(struct actiondfs_node *dir,
+			    const char *name, size_t len)
 {
 	struct actiondfs_cached_dir *cached = dir->cached_dir;
 	size_t index;
 
 	if (!cached)
-		return false;
+		return NULL;
 
 	if (actiondfs_find_cached_child_in(cached->file_children,
 					   cached->file_count,
-					   name, len, &index)) {
-		*out = (struct actiondfs_cached_lookup){
-			.record = &cached->file_children[index],
-			.is_dir = false,
-		};
-		return true;
-	}
+					   name, len, &index))
+		return &cached->file_children[index];
 
 	if (actiondfs_find_cached_child_in(cached->dir_children,
 						   cached->dir_count,
-						   name, len, &index)) {
-		*out = (struct actiondfs_cached_lookup){
-			.record = &cached->dir_children[index],
-			.is_dir = true,
-		};
-		return true;
-	}
+						   name, len, &index))
+		return &cached->dir_children[index];
 
 	if (actiondfs_find_cached_child_in(cached->symlink_children,
 						   cached->symlink_count,
-						   name, len, &index)) {
-		*out = (struct actiondfs_cached_lookup){
-			.record = &cached->symlink_children[index],
-			.is_dir = false,
-		};
-		return true;
-	}
+						   name, len, &index))
+		return &cached->symlink_children[index];
 
-	return false;
+	return NULL;
 }
 
 static struct actiondfs_node *
@@ -867,45 +840,43 @@ static int actiondfs_validate_next_cached_child(struct actiondfs_cached_child *c
 	return 0;
 }
 
+static bool actiondfs_cached_children_overlap(
+	const struct actiondfs_cached_child *lhs, size_t lhs_count,
+	const struct actiondfs_cached_child *rhs, size_t rhs_count)
+{
+	while (lhs_count && rhs_count) {
+		int cmp = actiondfs_compare_name(lhs->name, lhs->name_len,
+						 rhs->name, rhs->name_len);
+
+		if (!cmp)
+			return true;
+		if (cmp < 0) {
+			lhs++;
+			lhs_count--;
+		} else {
+			rhs++;
+			rhs_count--;
+		}
+	}
+	return false;
+}
+
 static int
 actiondfs_validate_no_cross_type_cached_duplicates(struct actiondfs_cached_dir *dir)
 {
-	size_t file_index = 0;
-	size_t dir_index = 0;
-	size_t symlink_index;
-
-	while (file_index < dir->file_count && dir_index < dir->dir_count) {
-		struct actiondfs_cached_child *file = &dir->file_children[file_index];
-		struct actiondfs_cached_child *child_dir = &dir->dir_children[dir_index];
-		int cmp = actiondfs_compare_name(file->name, file->name_len,
-						 child_dir->name,
-						 child_dir->name_len);
-
-		if (!cmp)
-			return -EEXIST;
-		if (cmp < 0)
-			file_index++;
-		else
-			dir_index++;
-	}
-	for (symlink_index = 0; symlink_index < dir->symlink_count;
-	     symlink_index++) {
-		struct actiondfs_cached_child *symlink =
-			&dir->symlink_children[symlink_index];
-		size_t index;
-
-		if (actiondfs_find_cached_child_in(dir->file_children,
-							   dir->file_count,
-							   symlink->name,
-							   symlink->name_len,
-							   &index) ||
-		    actiondfs_find_cached_child_in(dir->dir_children,
-							   dir->dir_count,
-							   symlink->name,
-							   symlink->name_len,
-							   &index))
-			return -EEXIST;
-	}
+	if (actiondfs_cached_children_overlap(dir->file_children,
+					      dir->file_count,
+					      dir->dir_children,
+					      dir->dir_count) ||
+	    actiondfs_cached_children_overlap(dir->file_children,
+					      dir->file_count,
+					      dir->symlink_children,
+					      dir->symlink_count) ||
+	    actiondfs_cached_children_overlap(dir->dir_children,
+					      dir->dir_count,
+					      dir->symlink_children,
+					      dir->symlink_count))
+		return -EEXIST;
 	return 0;
 }
 
@@ -2806,7 +2777,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 						   struct actiondfs_node *parent)
 {
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
-	struct actiondfs_cached_lookup input_lookup;
+	struct actiondfs_cached_child *input_child = NULL;
 	struct actiondfs_cached_dir *input_cached = NULL;
 	struct path parent_path;
 	struct dentry *real_dentry;
@@ -2854,13 +2825,13 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	mode = real_inode->i_mode;
 	if (S_ISDIR(mode)) {
 		mode = S_IFDIR | (mode & S_IALLUGO);
-		if (actiondfs_find_cached_child(parent, dentry->d_name.name,
-						 dentry->d_name.len,
-						 &input_lookup) &&
-		    input_lookup.is_dir) {
+		input_child = actiondfs_find_cached_child(parent,
+						 dentry->d_name.name,
+						 dentry->d_name.len);
+		if (input_child && S_ISDIR(input_child->mode)) {
 			merged_input = true;
-			err = actiondfs_get_cached_dir(sbi, input_lookup.record->hash,
-						       input_lookup.record->size,
+			err = actiondfs_get_cached_dir(sbi, input_child->hash,
+						       input_child->size,
 						       &input_cached);
 			if (err) {
 				actiondfs_stage_unlock_child(&parent_path, real_dentry);
@@ -2900,8 +2871,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 
 	if (merged_input) {
-		node = actiondfs_materialize_cached_child(parent,
-							  input_lookup.record);
+		node = actiondfs_materialize_cached_child(parent, input_child);
 		if (IS_ERR(node)) {
 			err = PTR_ERR(node);
 			node = NULL;
@@ -2956,7 +2926,6 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 				       unsigned int flags)
 {
 	struct actiondfs_node *parent = dir->i_private;
-	struct actiondfs_node *child;
 	struct inode *inode = NULL;
 	int err;
 
@@ -2973,15 +2942,16 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 		return ERR_CAST(inode);
 	if (inode) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUP_HITS);
-		child = NULL;
 	} else {
-		struct actiondfs_cached_lookup input_lookup;
+		struct actiondfs_cached_child *record;
 
-		if (actiondfs_find_cached_child(parent, dentry->d_name.name,
-						 dentry->d_name.len,
-						 &input_lookup)) {
-			child = actiondfs_materialize_cached_child(
-				parent, input_lookup.record);
+		record = actiondfs_find_cached_child(parent,
+						     dentry->d_name.name,
+						     dentry->d_name.len);
+		if (record) {
+			struct actiondfs_node *child;
+
+			child = actiondfs_materialize_cached_child(parent, record);
 			if (IS_ERR(child))
 				return ERR_CAST(child);
 			actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUP_HITS);
@@ -3004,7 +2974,6 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 {
 	struct actiondfs_node *parent = dir->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
-	struct actiondfs_cached_lookup input_lookup;
 	struct inode *inode;
 	struct path parent_path;
 	struct dentry *real_dentry;
@@ -3019,7 +2988,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 		return err;
 	}
 	if (actiondfs_find_cached_child(parent, dentry->d_name.name,
-						dentry->d_name.len, &input_lookup)) {
+						dentry->d_name.len)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_FAILURES);
 		return -EROFS;
 	}
@@ -3081,7 +3050,6 @@ static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 {
 	struct actiondfs_node *parent = dir->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
-	struct actiondfs_cached_lookup input_lookup;
 	struct inode *inode;
 	struct path parent_path;
 	struct dentry *real_dentry;
@@ -3097,7 +3065,7 @@ static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	if (err)
 		return err;
 	if (actiondfs_find_cached_child(parent, dentry->d_name.name,
-						dentry->d_name.len, &input_lookup))
+						dentry->d_name.len))
 		return -EROFS;
 	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent,
 					       S_IFLNK | 0777, target, target_len);
@@ -3151,7 +3119,6 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 {
 	struct actiondfs_node *parent = dir->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
-	struct actiondfs_cached_lookup input_lookup;
 	struct inode *inode;
 	struct path parent_path;
 	struct dentry *real_dentry;
@@ -3167,7 +3134,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 		return ERR_PTR(err);
 	}
 	if (actiondfs_find_cached_child(parent, dentry->d_name.name,
-						dentry->d_name.len, &input_lookup)) {
+						dentry->d_name.len)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MKDIR_FAILURES);
 		return ERR_PTR(-EROFS);
 	}
@@ -3619,15 +3586,13 @@ static bool actiondfs_stage_emit_filldir(struct dir_context *ctx,
 	struct actiondfs_stage_emit_ctx *stage_ctx =
 		container_of(ctx, struct actiondfs_stage_emit_ctx, ctx);
 	struct actiondfs_dir_file *dir_file = stage_ctx->dir_file;
-	struct actiondfs_cached_lookup input_lookup;
 	loff_t requested_pos = stage_ctx->output->pos - stage_ctx->base;
 
 	if ((namelen == 1 && name[0] == '.') ||
 	    (namelen == 2 && name[0] == '.' && name[1] == '.'))
 		return true;
 
-	if (actiondfs_find_cached_child(stage_ctx->dir, name, namelen,
-					&input_lookup))
+	if (actiondfs_find_cached_child(stage_ctx->dir, name, namelen))
 		return true;
 
 	if (dir_file->stage_logical_pos < requested_pos) {
