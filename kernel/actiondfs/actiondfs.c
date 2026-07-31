@@ -66,10 +66,10 @@
 
 struct actiondfs_cached_child {
 	char *name;
-	size_t name_len;
 	char *link_target;
-	umode_t mode;
 	u64 size;
+	u16 name_len;
+	umode_t mode;
 	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
 };
 
