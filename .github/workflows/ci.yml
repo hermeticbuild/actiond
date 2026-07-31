@@ -75,6 +75,7 @@ jobs:
           ACTIOND_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
           ACTIOND_VM_CAS_IMAGE_SIZE_MIB: 8192
           ACTIOND_VM_MEMORY_MIB: 4096
+          ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS: "1"
         run: e2e/run_llvm_linux_vm_smoke.sh "$RUNNER_TEMP/actiond-linux-llvm-${{ matrix.architecture }}"
 
       - name: Upload Linux LLVM smoke results
@@ -86,6 +87,7 @@ jobs:
           path: |
             ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.md
             ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.log
+            ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.txt
 
   windows-llvm-smoke:
     name: Windows ${{ matrix.mode }} (${{ matrix.architecture }})
