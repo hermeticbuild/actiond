@@ -2485,20 +2485,20 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 			if (err)
 				goto out_buffer;
 			break;
-			case 3:
-				if ((key & 7) != 2) {
-					err = -EINVAL;
-					goto out_buffer;
-				}
-				err = actiondfs_pb_read_len(buffer, len, &pos, &field,
-							    &field_len);
-				if (err)
-					goto out_buffer;
-				err = actiondfs_parse_reapi_cached_symlink(entry, field,
-								       field_len);
-				if (err)
-					goto out_buffer;
-				break;
+		case 3:
+			if ((key & 7) != 2) {
+				err = -EINVAL;
+				goto out_buffer;
+			}
+			err = actiondfs_pb_read_len(buffer, len, &pos, &field,
+						    &field_len);
+			if (err)
+				goto out_buffer;
+			err = actiondfs_parse_reapi_cached_symlink(entry, field,
+							       field_len);
+			if (err)
+				goto out_buffer;
+			break;
 		default:
 			err = actiondfs_pb_skip(buffer, len, &pos, key & 7);
 			if (err)
