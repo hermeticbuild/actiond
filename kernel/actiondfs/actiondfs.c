@@ -897,17 +897,23 @@ static void actiondfs_release_blob_path_cache_entry(
 	call_rcu(&entry->rcu, actiondfs_release_blob_path_cache_entry_rcu);
 }
 
+static void actiondfs_unlink_blob_path_cache_entry_locked(
+	struct actiondfs_blob_path_cache_entry *entry)
+{
+	hash_del_rcu(&entry->hnode);
+	list_del(&entry->list);
+	actiondfs_blob_path_cache_count--;
+}
+
 static void actiondfs_destroy_blob_path_cache(void)
 {
 	struct actiondfs_blob_path_cache_entry *entry;
-	struct hlist_node *tmp;
-	unsigned int bucket;
+	struct actiondfs_blob_path_cache_entry *next;
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
-	hash_for_each_safe(actiondfs_blob_path_cache, bucket, tmp, entry, hnode) {
-		hash_del_rcu(&entry->hnode);
-		list_del(&entry->list);
-		actiondfs_blob_path_cache_count--;
+	list_for_each_entry_safe(entry, next, &actiondfs_blob_path_cache_list,
+				 list) {
+		actiondfs_unlink_blob_path_cache_entry_locked(entry);
 		actiondfs_release_blob_path_cache_entry(entry);
 	}
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
@@ -1963,9 +1969,7 @@ static void actiondfs_evict_blob_path_cache_one_locked(void)
 	if (!victim)
 		return;
 
-	hash_del_rcu(&victim->hnode);
-	list_del(&victim->list);
-	actiondfs_blob_path_cache_count--;
+	actiondfs_unlink_blob_path_cache_entry_locked(victim);
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_EVICTIONS);
 	actiondfs_release_blob_path_cache_entry(victim);
 }
@@ -2055,11 +2059,8 @@ static void actiondfs_drop_cached_blob_path(struct actiondfs_sb_info *sbi,
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
 	entry = actiondfs_find_blob_path_cache_locked(sbi, hash);
-	if (entry) {
-		hash_del_rcu(&entry->hnode);
-		list_del(&entry->list);
-		actiondfs_blob_path_cache_count--;
-	}
+	if (entry)
+		actiondfs_unlink_blob_path_cache_entry_locked(entry);
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
 	if (entry)
 		actiondfs_release_blob_path_cache_entry(entry);
