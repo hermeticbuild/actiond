@@ -133,7 +133,6 @@ struct actiondfs_sb_info {
 	struct path stage_path;
 	bool stage_path_valid;
 	struct actiondfs_node *root;
-	atomic64_t next_ino;
 };
 
 struct actiondfs_mount_options {
@@ -435,7 +434,7 @@ static bool actiondfs_is_dir(const struct actiondfs_node *node)
 	return S_ISDIR(node->mode);
 }
 
-static void actiondfs_free_tree(struct actiondfs_node *node)
+static void actiondfs_free_node(struct actiondfs_node *node)
 {
 	if (!node)
 		return;
@@ -445,8 +444,7 @@ static void actiondfs_free_tree(struct actiondfs_node *node)
 	kfree(node);
 }
 
-static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi,
-						   umode_t mode)
+static struct actiondfs_node *actiondfs_alloc_node(umode_t mode)
 {
 	struct actiondfs_node *node;
 
@@ -455,7 +453,6 @@ static struct actiondfs_node *actiondfs_alloc_node(struct actiondfs_sb_info *sbi
 		return NULL;
 
 	node->origin = ACTIONDFS_NODE_INPUT;
-	node->ino = atomic64_inc_return(&sbi->next_ino);
 	node->mode = mode;
 	node->loaded = true;
 	mutex_init(&node->load_lock);
@@ -481,21 +478,20 @@ static u64 actiondfs_input_child_ino(struct actiondfs_node *parent,
 	}
 
 	/*
-	 * Keep synthetic input inode numbers separate from the monotonically
-	 * allocated staged/root inode range, and never emit zero.  Directory
+	 * Keep synthetic input inode numbers separate from staged and root
+	 * inode numbers, and never emit zero. Directory
 	 * iteration clients are allowed to ignore zero-inode dirents.
 	 */
 	return hash | (1ULL << 63);
 }
 
 static struct actiondfs_node *
-actiondfs_alloc_staged_node(struct actiondfs_sb_info *sbi,
-			    struct actiondfs_node *parent,
+actiondfs_alloc_staged_node(struct actiondfs_node *parent,
 			    umode_t mode, u64 size, u64 real_ino)
 {
 	struct actiondfs_node *node;
 
-	node = actiondfs_alloc_node(sbi, mode);
+	node = actiondfs_alloc_node(mode);
 	if (!node)
 		return NULL;
 	node->origin = ACTIONDFS_NODE_STAGED;
@@ -825,13 +821,12 @@ static bool actiondfs_find_cached_child(struct actiondfs_node *dir,
 }
 
 static struct actiondfs_node *
-actiondfs_materialize_cached_child(struct actiondfs_sb_info *sbi,
-				   struct actiondfs_node *parent,
+actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 				   struct actiondfs_cached_child *record)
 {
 	struct actiondfs_node *node;
 
-	node = actiondfs_alloc_node(sbi, record->mode);
+	node = actiondfs_alloc_node(record->mode);
 	if (!node)
 		return ERR_PTR(-ENOMEM);
 
@@ -845,7 +840,7 @@ actiondfs_materialize_cached_child(struct actiondfs_sb_info *sbi,
 	if (S_ISLNK(record->mode)) {
 		node->link_target = kstrdup(record->link_target, GFP_KERNEL);
 		if (!node->link_target) {
-			actiondfs_free_tree(node);
+			actiondfs_free_node(node);
 			return ERR_PTR(-ENOMEM);
 		}
 	}
@@ -2721,7 +2716,7 @@ static struct inode *actiondfs_iget(struct super_block *sb,
 		return ERR_PTR(-ENOMEM);
 	if (!(inode->i_state & I_NEW)) {
 		if (input_child)
-			actiondfs_free_tree(node);
+			actiondfs_free_node(node);
 		return inode;
 	}
 
@@ -2731,14 +2726,14 @@ static struct inode *actiondfs_iget(struct super_block *sb,
 }
 
 static struct inode *actiondfs_prealloc_staged_inode(
-	struct super_block *sb, struct actiondfs_sb_info *sbi,
-	struct actiondfs_node *parent, umode_t mode, const char *link_target,
+	struct super_block *sb, struct actiondfs_node *parent,
+	umode_t mode, const char *link_target,
 	size_t link_target_len)
 {
 	struct actiondfs_node *node;
 	struct inode *inode;
 
-	node = actiondfs_alloc_staged_node(sbi, parent, mode,
+	node = actiondfs_alloc_staged_node(parent, mode,
 					   link_target_len, 0);
 	if (!node)
 		return ERR_PTR(-ENOMEM);
@@ -2746,14 +2741,14 @@ static struct inode *actiondfs_prealloc_staged_inode(
 		node->link_target = kmemdup_nul(link_target, link_target_len,
 					       GFP_KERNEL);
 		if (!node->link_target) {
-			actiondfs_free_tree(node);
+			actiondfs_free_node(node);
 			return ERR_PTR(-ENOMEM);
 		}
 	}
 
 	inode = new_inode(sb);
 	if (!inode) {
-		actiondfs_free_tree(node);
+		actiondfs_free_node(node);
 		return ERR_PTR(-ENOMEM);
 	}
 	actiondfs_init_inode(inode, node);
@@ -2905,7 +2900,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 
 	if (merged_input) {
-		node = actiondfs_materialize_cached_child(sbi, parent,
+		node = actiondfs_materialize_cached_child(parent,
 							  input_lookup.record);
 		if (IS_ERR(node)) {
 			err = PTR_ERR(node);
@@ -2914,7 +2909,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 			node->mode = mode;
 		}
 	} else {
-		node = actiondfs_alloc_staged_node(sbi, parent, mode, size,
+		node = actiondfs_alloc_staged_node(parent, mode, size,
 						   real_inode->i_ino);
 		if (!node)
 			err = -ENOMEM;
@@ -2929,14 +2924,14 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	node->link_target = link_target;
 	inode = actiondfs_iget(dir->i_sb, node);
 	if (IS_ERR(inode)) {
-		actiondfs_free_tree(node);
+		actiondfs_free_node(node);
 		actiondfs_stage_unlock_child(&parent_path, real_dentry);
 		path_put(&parent_path);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
 	} else {
 		if (inode->i_private != node) {
 			if (!merged_input)
-				actiondfs_free_tree(node);
+				actiondfs_free_node(node);
 			node = inode->i_private;
 		}
 		if (S_ISDIR(mode)) {
@@ -2986,14 +2981,13 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 						 dentry->d_name.len,
 						 &input_lookup)) {
 			child = actiondfs_materialize_cached_child(
-				actiondfs_sbi(dir->i_sb), parent,
-				input_lookup.record);
+				parent, input_lookup.record);
 			if (IS_ERR(child))
 				return ERR_CAST(child);
 			actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUP_HITS);
 			inode = actiondfs_iget(dir->i_sb, child);
 			if (IS_ERR(inode)) {
-				actiondfs_free_tree(child);
+				actiondfs_free_node(child);
 				return ERR_CAST(inode);
 			}
 		} else {
@@ -3029,7 +3023,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_FAILURES);
 		return -EROFS;
 	}
-	inode = actiondfs_prealloc_staged_inode(dir->i_sb, sbi, parent,
+	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent,
 					       S_IFREG | (mode & 0777), NULL, 0);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
@@ -3105,7 +3099,7 @@ static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	if (actiondfs_find_cached_child(parent, dentry->d_name.name,
 						dentry->d_name.len, &input_lookup))
 		return -EROFS;
-	inode = actiondfs_prealloc_staged_inode(dir->i_sb, sbi, parent,
+	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent,
 					       S_IFLNK | 0777, target, target_len);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
@@ -3177,7 +3171,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MKDIR_FAILURES);
 		return ERR_PTR(-EROFS);
 	}
-	inode = actiondfs_prealloc_staged_inode(dir->i_sb, sbi, parent,
+	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent,
 					       S_IFDIR | (mode & S_IALLUGO), NULL, 0);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
@@ -4009,8 +4003,7 @@ static void actiondfs_free_inode(struct inode *inode)
 
 	if (node) {
 		WARN_ON_ONCE(node->stage_dentry);
-		kfree(node->link_target);
-		kfree(node);
+		actiondfs_free_node(node);
 	}
 	free_inode_nonrcu(inode);
 }
@@ -4021,7 +4014,7 @@ static void actiondfs_put_super(struct super_block *sb)
 
 	if (!sbi)
 		return;
-	actiondfs_free_tree(sbi->root);
+	actiondfs_free_node(sbi->root);
 	if (sbi->cas_path.dentry)
 		path_put(&sbi->cas_path);
 	if (sbi->stage_path_valid)
@@ -4056,7 +4049,6 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -ENOMEM;
 
 	sb->s_fs_info = sbi;
-	atomic64_set(&sbi->next_ino, 0);
 	sb->s_magic = ACTIONDFS_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_blocksize = PAGE_SIZE;
@@ -4065,11 +4057,12 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_op = &actiondfs_super_ops;
 	sb->s_time_gran = 1;
 
-	sbi->root = actiondfs_alloc_node(sbi, S_IFDIR | ACTIONDFS_DIR_MODE);
+	sbi->root = actiondfs_alloc_node(S_IFDIR | ACTIONDFS_DIR_MODE);
 	if (!sbi->root) {
 		err = -ENOMEM;
 		goto fail;
 	}
+	sbi->root->ino = 1;
 
 	err = actiondfs_parse_options(&opts, ctx ? ctx->options : NULL);
 	if (err)
