@@ -1717,15 +1717,14 @@ struct actiondfs_reapi_digest {
 struct actiondfs_parsed_child {
 	const u8 *name;
 	size_t name_len;
-	struct actiondfs_reapi_digest digest;
+	union {
+		struct actiondfs_reapi_digest digest;
+		struct {
+			const u8 *target;
+			size_t target_len;
+		} symlink;
+	};
 	bool executable;
-};
-
-struct actiondfs_parsed_symlink {
-	const u8 *name;
-	size_t name_len;
-	const u8 *target;
-	size_t target_len;
 };
 
 static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
@@ -1781,7 +1780,7 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 
 static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 					      struct actiondfs_parsed_child *out,
-					      bool parse_executable)
+					      umode_t mode)
 {
 	size_t pos = 0;
 	int err;
@@ -1808,6 +1807,9 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 			if ((key >> 3) == 1) {
 				out->name = field;
 				out->name_len = field_len;
+			} else if (S_ISLNK(mode)) {
+				out->symlink.target = field;
+				out->symlink.target_len = field_len;
 			} else {
 				err = actiondfs_parse_reapi_digest(field, field_len,
 								 &out->digest);
@@ -1816,7 +1818,7 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 			}
 			break;
 		case 4:
-			if (!parse_executable) {
+			if (!S_ISREG(mode)) {
 				err = actiondfs_pb_skip(data, len, &pos, key & 7);
 				if (err)
 					return err;
@@ -1836,7 +1838,11 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 		}
 	}
 
-	return out->name && out->digest.hash[0] ? 0 : -EINVAL;
+	if (!out->name)
+		return -EINVAL;
+	if (S_ISLNK(mode))
+		return out->symlink.target ? 0 : -EINVAL;
+	return out->digest.hash[0] ? 0 : -EINVAL;
 }
 
 static int actiondfs_parse_reapi_cached_file(struct actiondfs_cached_dir *parent,
@@ -1845,7 +1851,7 @@ static int actiondfs_parse_reapi_cached_file(struct actiondfs_cached_dir *parent
 	struct actiondfs_parsed_child file;
 	int err;
 
-	err = actiondfs_parse_reapi_child_fields(data, len, &file, true);
+	err = actiondfs_parse_reapi_child_fields(data, len, &file, S_IFREG);
 	if (err)
 		return err;
 
@@ -1866,7 +1872,7 @@ static int actiondfs_parse_reapi_cached_dir(struct actiondfs_cached_dir *parent,
 	struct actiondfs_parsed_child dir;
 	int err;
 
-	err = actiondfs_parse_reapi_child_fields(data, len, &dir, false);
+	err = actiondfs_parse_reapi_child_fields(data, len, &dir, S_IFDIR);
 	if (err)
 		return err;
 
@@ -1884,50 +1890,17 @@ static int actiondfs_parse_reapi_cached_dir(struct actiondfs_cached_dir *parent,
 static int actiondfs_parse_reapi_cached_symlink(struct actiondfs_cached_dir *parent,
 						const u8 *data, size_t len)
 {
-	struct actiondfs_parsed_symlink symlink = {};
-	size_t pos = 0;
+	struct actiondfs_parsed_child symlink;
 	int err;
 
-	while (pos < len) {
-		const u8 *field;
-		size_t field_len;
-		u64 key;
-
-		err = actiondfs_pb_read_varint(data, len, &pos, &key);
-		if (err)
-			return err;
-
-		switch (key >> 3) {
-		case 1:
-		case 2:
-			if ((key & 7) != 2)
-				return -EINVAL;
-			err = actiondfs_pb_read_len(data, len, &pos, &field,
-						   &field_len);
-			if (err)
-				return err;
-			if ((key >> 3) == 1) {
-				symlink.name = field;
-				symlink.name_len = field_len;
-			} else {
-				symlink.target = field;
-				symlink.target_len = field_len;
-			}
-			break;
-		default:
-			err = actiondfs_pb_skip(data, len, &pos, key & 7);
-			if (err)
-				return err;
-		}
-	}
-
-	if (!symlink.name || !symlink.target)
-		return -EINVAL;
+	err = actiondfs_parse_reapi_child_fields(data, len, &symlink, S_IFLNK);
+	if (err)
+		return err;
 	return actiondfs_append_cached_symlink_child(parent,
 							     symlink.name,
 							     symlink.name_len,
-							     symlink.target,
-							     symlink.target_len);
+							     symlink.symlink.target,
+							     symlink.symlink.target_len);
 }
 
 static int actiondfs_read_cas_blob_once(struct actiondfs_sb_info *sbi,
