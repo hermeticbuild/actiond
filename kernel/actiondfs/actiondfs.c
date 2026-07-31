@@ -118,7 +118,6 @@ struct actiondfs_node {
 	bool loaded;
 	struct actiondfs_node *parent;
 	struct dentry *stage_dentry;
-	bool stage_parent_ready;
 	struct actiondfs_cached_dir *cached_dir;
 	atomic64_t stage_generation;
 };
@@ -451,7 +450,6 @@ static struct actiondfs_node *actiondfs_alloc_node(umode_t mode)
 	node->loaded = true;
 	mutex_init(&node->load_lock);
 	atomic64_set(&node->stage_generation, 0);
-	node->stage_parent_ready = false;
 	return node;
 }
 
@@ -504,7 +502,6 @@ static void actiondfs_set_stage_dentry(struct actiondfs_node *node,
 	old = cmpxchg(&node->stage_dentry, NULL, dentry);
 	if (old)
 		dput(dentry);
-	smp_store_release(&node->stage_parent_ready, true);
 }
 
 static void actiondfs_note_stage_change(struct actiondfs_node *node)
@@ -623,14 +620,14 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_ENSURE_DIR_ERRORS);
 		return -EROFS;
 	}
-	if (smp_load_acquire(&node->stage_parent_ready)) {
+	if (smp_load_acquire(&node->stage_dentry)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_PARENT_DENTRY_HITS);
 		return actiondfs_stage_node_path(sbi, node, path);
 	}
 
 	ancestor_node = node;
 	ancestor_dentry = dentry;
-	while (!smp_load_acquire(&ancestor_node->stage_parent_ready)) {
+	while (!smp_load_acquire(&ancestor_node->stage_dentry)) {
 		size_t name_len;
 
 		if (!ancestor_node->parent ||
@@ -673,7 +670,7 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		struct actiondfs_stage_ancestor *ancestor = &ancestors[--depth];
 		struct path next_path;
 
-		if (smp_load_acquire(&ancestor->node->stage_parent_ready)) {
+		if (smp_load_acquire(&ancestor->node->stage_dentry)) {
 			err = actiondfs_stage_node_path(sbi, ancestor->node,
 							  &next_path);
 		} else {
