@@ -1019,23 +1019,12 @@ static int actiondfs_append_cached_symlink_child(struct actiondfs_cached_dir *pa
 	return 0;
 }
 
-static int actiondfs_hex_nibble(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
 static int actiondfs_valid_hash(const char *hash)
 {
 	size_t i;
 
 	for (i = 0; i < ACTIONDFS_HASH_HEX_LEN; i++) {
-		if (actiondfs_hex_nibble(hash[i]) < 0)
+		if (hex_to_bin(hash[i]) < 0)
 			return -EINVAL;
 	}
 	return hash[ACTIONDFS_HASH_HEX_LEN] ? -EINVAL : 0;
@@ -1153,13 +1142,8 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_BLOB_OPEN_BACKING_PATH_NS,
 					   path_start);
 		if (err) {
-			if (!actiondfs_retry_open_stale(err, &stale_attempts)) {
-				actiondfs_stat_add_elapsed(
-					ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS,
-					total_start);
-				return ERR_PTR(err);
-			}
-			continue;
+			file = ERR_PTR(err);
+			goto retry;
 		}
 
 		real_inode = d_inode(real_path.dentry);
@@ -1167,9 +1151,8 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		if (!real_inode || !S_ISREG(real_inode->i_mode) ||
 		    real_size < 0 || (u64)real_size != expected_size) {
 			path_put(&real_path);
-			actiondfs_stat_add_elapsed(
-				ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS, total_start);
-			return ERR_PTR(-EIO);
+			file = ERR_PTR(-EIO);
+			break;
 		}
 
 		open_start = actiondfs_stat_time_start();
@@ -1178,23 +1161,19 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_BLOB_OPEN_BACKING_FILE_NS,
 					   open_start);
 		path_put(&real_path);
-		if (!IS_ERR(file)) {
-			actiondfs_stat_add_elapsed(
-				ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS,
-				total_start);
-			return file;
-		}
+		if (!IS_ERR(file))
+			break;
 
 		err = PTR_ERR(file);
 		if (err == -ESTALE)
 			actiondfs_drop_cached_blob_path(sbi, hash);
-		if (!actiondfs_retry_open_stale(err, &stale_attempts)) {
-			actiondfs_stat_add_elapsed(
-				ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS,
-				total_start);
-			return file;
-		}
+retry:
+		if (!actiondfs_retry_open_stale(err, &stale_attempts))
+			break;
 	}
+	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS,
+				   total_start);
+	return file;
 }
 
 static struct file *actiondfs_get_node_blob_file(struct actiondfs_node *node,
@@ -1249,10 +1228,8 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS);
 	if (!sbi->stage_path.dentry) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
-		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
-					   total_start);
-		return ERR_PTR(-EROFS);
+		file = ERR_PTR(-EROFS);
+		goto out;
 	}
 
 	phase_start = actiondfs_stat_time_start();
@@ -1260,10 +1237,8 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS,
 				   phase_start);
 	if (err) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
-		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
-					   total_start);
-		return ERR_PTR(err);
+		file = ERR_PTR(err);
+		goto out;
 	}
 
 	phase_start = actiondfs_stat_time_start();
@@ -1272,6 +1247,7 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
 				   phase_start);
 	path_put(&real_path);
+out:
 	if (IS_ERR(file))
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
@@ -1947,7 +1923,7 @@ static int actiondfs_read_cas_blob_once(struct actiondfs_sb_info *sbi,
 	}
 
 	nread = kernel_read(file, buffer, (size_t)size, &pos);
-	if (nread < 0 || nread != size) {
+	if (nread != size) {
 		err = nread < 0 ? nread : -EIO;
 		kvfree(buffer);
 		goto out_close;
@@ -1973,12 +1949,11 @@ static int actiondfs_read_cas_blob(struct actiondfs_sb_info *sbi,
 	unsigned int stale_attempts = 0;
 	int err;
 
-	while (true) {
+	do {
 		err = actiondfs_read_cas_blob_once(sbi, hash, expected_size,
 						   out, out_len);
-		if (!actiondfs_retry_stale(err, &stale_attempts))
-			return err;
-	}
+	} while (actiondfs_retry_stale(err, &stale_attempts));
+	return err;
 }
 
 static unsigned long actiondfs_digest_cache_key(const char *hash)
@@ -1987,7 +1962,7 @@ static unsigned long actiondfs_digest_cache_key(const char *hash)
 	size_t i;
 
 	for (i = 0; i < 2 * sizeof(key); i++)
-		key = (key << 4) | actiondfs_hex_nibble(hash[i]);
+		key = (key << 4) | hex_to_bin(hash[i]);
 	return key;
 }
 
