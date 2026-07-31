@@ -9,7 +9,11 @@ const Options = struct {
     out_file: ?[]const u8 = null,
     out_dir: ?[]const u8 = null,
     out_count: usize = 16,
+    sleep_ms: ?i64 = null,
+    escape_process_group: bool = false,
     exercise_filesystem: bool = false,
+    expect_action_signals: bool = false,
+    expect_cgroup_limits: bool = false,
     expect_network_blocked: bool = false,
     expect_loopback: bool = false,
     expect_localhost_hosts: bool = false,
@@ -35,9 +39,17 @@ pub fn main(init: std.process.Init) !void {
     var options = try parseArgs(allocator, args.items);
     defer options.deinit(allocator);
 
-    if (options.expect_network_blocked) try expectNetworkBlocked();
+    if (options.expect_network_blocked) {
+        try expectNetworkBlocked();
+        try expectVsockBlocked();
+        try expectBpfProgramsBlocked();
+    }
     if (options.expect_loopback) try expectLoopbackTcp();
     if (options.expect_localhost_hosts) try expectLocalhostHosts(io, allocator);
+    if (options.expect_action_signals) try expectActionSignals(io);
+    if (options.expect_cgroup_limits) try expectCgroupLimits(io);
+    if (options.escape_process_group) try escapeProcessGroup(io, options.sleep_ms orelse 30_000);
+    if (options.sleep_ms) |milliseconds| try io.sleep(.fromMilliseconds(milliseconds), .awake);
 
     const cwd = std.Io.Dir.cwd();
     var hash = std.hash.Wyhash.init(0xaca1_0d5eed);
@@ -99,6 +111,13 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
             i += 1;
             if (i >= args.len) return error.MissingArgumentValue;
             options.out_count = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--sleep-ms")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgumentValue;
+            options.sleep_ms = try std.fmt.parseInt(i64, args[i], 10);
+            if (options.sleep_ms.? < 0) return error.InvalidSleepDuration;
+        } else if (std.mem.eql(u8, arg, "--escape-process-group")) {
+            options.escape_process_group = true;
         } else if (std.mem.eql(u8, arg, "--out-extra-file")) {
             i += 1;
             if (i >= args.len) return error.MissingArgumentValue;
@@ -120,6 +139,10 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
             try options.scans.append(allocator, args[i]);
         } else if (std.mem.eql(u8, arg, "--exercise-filesystem")) {
             options.exercise_filesystem = true;
+        } else if (std.mem.eql(u8, arg, "--expect-action-signals")) {
+            options.expect_action_signals = true;
+        } else if (std.mem.eql(u8, arg, "--expect-cgroup-limits")) {
+            options.expect_cgroup_limits = true;
         } else if (std.mem.eql(u8, arg, "--expect-network-blocked")) {
             options.expect_network_blocked = true;
         } else if (std.mem.eql(u8, arg, "--expect-loopback")) {
@@ -200,6 +223,261 @@ fn expectNetworkBlocked() !void {
             return error.NetworkCheckFailed;
         },
     }
+}
+
+fn expectVsockBlocked() !void {
+    const linux = std.os.linux;
+    if (@import("builtin").os.tag != .linux) return;
+
+    const socket_rc = linux.socket(
+        linux.AF.VSOCK,
+        linux.SOCK.STREAM | linux.SOCK.CLOEXEC,
+        0,
+    );
+    switch (std.os.linux.errno(socket_rc)) {
+        .PERM, .ACCES, .AFNOSUPPORT, .PROTONOSUPPORT => return,
+        .SUCCESS => {
+            const fd: i32 = @intCast(socket_rc);
+            _ = linux.close(fd);
+            std.debug.print("sandboxed action unexpectedly opened an AF_VSOCK socket\n", .{});
+            return error.NetworkReachable;
+        },
+        else => |err| {
+            std.debug.print("AF_VSOCK block check returned unexpected socket errno: {s}\n", .{@tagName(err)});
+            return error.NetworkCheckFailed;
+        },
+    }
+}
+
+fn expectBpfProgramsBlocked() !void {
+    const linux = std.os.linux;
+    if (@import("builtin").os.tag != .linux) return;
+
+    const seccomp_mode = linux.prctl(@intFromEnum(linux.PR.GET_SECCOMP), 0, 0, 0, 0);
+    if (linux.errno(seccomp_mode) != .SUCCESS or seccomp_mode != linux.SECCOMP.MODE.FILTER) {
+        std.debug.print("sandboxed action does not have an active seccomp filter\n", .{});
+        return error.SeccompCheckFailed;
+    }
+
+    const blocked_calls = [_]struct { name: []const u8, result: usize }{
+        .{
+            .name = "seccomp",
+            .result = linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, null),
+        },
+        .{
+            .name = "prctl(PR_SET_SECCOMP)",
+            .result = linux.prctl(
+                @intFromEnum(linux.PR.SET_SECCOMP),
+                linux.SECCOMP.MODE.FILTER,
+                0,
+                0,
+                0,
+            ),
+        },
+        .{
+            .name = "bpf",
+            .result = linux.syscall3(.bpf, 0, 0, 0),
+        },
+    };
+    for (blocked_calls) |blocked_call| {
+        switch (linux.errno(blocked_call.result)) {
+            .PERM, .ACCES => {},
+            else => |err| {
+                std.debug.print(
+                    "sandboxed action unexpectedly reached {s}: {s}\n",
+                    .{ blocked_call.name, @tagName(err) },
+                );
+                return error.SeccompCheckFailed;
+            },
+        }
+    }
+
+    const socket_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(socket_rc) != .SUCCESS) {
+        std.debug.print("BPF restriction check could not create an IPv4 socket\n", .{});
+        return error.SeccompCheckFailed;
+    }
+    const fd: i32 = @intCast(socket_rc);
+    defer _ = linux.close(fd);
+
+    var enabled: c_int = 1;
+    const enabled_bytes = std.mem.asBytes(&enabled);
+    const denied_options = [_]u32{ linux.SO.ATTACH_FILTER, linux.SO.ATTACH_REUSEPORT_CBPF };
+    for (denied_options) |option| {
+        switch (linux.errno(linux.setsockopt(
+            fd,
+            linux.SOL.SOCKET,
+            option,
+            enabled_bytes.ptr,
+            @intCast(enabled_bytes.len),
+        ))) {
+            .PERM, .ACCES => {},
+            else => |err| {
+                std.debug.print(
+                    "sandboxed action unexpectedly reached BPF socket option {d}: {s}\n",
+                    .{ option, @tagName(err) },
+                );
+                return error.SeccompCheckFailed;
+            },
+        }
+    }
+
+    const reuse_address = linux.setsockopt(
+        fd,
+        linux.SOL.SOCKET,
+        linux.SO.REUSEADDR,
+        enabled_bytes.ptr,
+        @intCast(enabled_bytes.len),
+    );
+    if (linux.errno(reuse_address) != .SUCCESS) {
+        std.debug.print("sandbox seccomp filter rejected SO_REUSEADDR\n", .{});
+        return error.SeccompCheckFailed;
+    }
+}
+
+fn expectCgroupLimits(io: std.Io) !void {
+    if (@import("builtin").os.tag != .linux) return;
+
+    var file = std.Io.Dir.cwd().openFile(io, "/proc/self/cgroup", .{}) catch |err| {
+        std.debug.print("cgroup limit check could not read /proc/self/cgroup: {s}\n", .{@errorName(err)});
+        return error.CgroupCheckFailed;
+    };
+    defer file.close(io);
+
+    var buffer: [4096]u8 = undefined;
+    const size = readFd(file.handle, &buffer) catch |err| {
+        std.debug.print("cgroup limit check could not read /proc/self/cgroup: {s}\n", .{@errorName(err)});
+        return error.CgroupCheckFailed;
+    };
+    const membership = buffer[0..size];
+
+    if (std.mem.indexOf(u8, membership, "0::/actiond/action-") == null) {
+        std.debug.print("sandboxed action is not in its requested cgroup: {s}\n", .{membership});
+        return error.CgroupCheckFailed;
+    }
+}
+
+fn expectActionSignals(io: std.Io) !void {
+    const linux = std.os.linux;
+    if (@import("builtin").os.tag != .linux) return;
+
+    const threaded: *std.Io.Threaded = @ptrCast(@alignCast(io.userdata orelse
+        return error.ActionSignalCheckFailed));
+    if (threaded.old_sig_pipe.handler.handler != linux.SIG.DFL) {
+        std.debug.print("sandboxed action did not inherit the default SIGPIPE disposition\n", .{});
+        return error.ActionSignalCheckFailed;
+    }
+
+    if (linux.getpid() == 1) {
+        std.debug.print("sandboxed action is PID 1 and does not receive default fatal signals\n", .{});
+        return error.ActionSignalCheckFailed;
+    }
+
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    switch (linux.errno(linux.pipe2(&pipe_fds, .{ .CLOEXEC = true }))) {
+        .SUCCESS => {},
+        else => return error.ActionSignalCheckFailed,
+    }
+    _ = linux.close(pipe_fds[0]);
+
+    const fork_rc = linux.fork();
+    switch (linux.errno(fork_rc)) {
+        .SUCCESS => {},
+        else => {
+            _ = linux.close(pipe_fds[1]);
+            return error.ActionSignalCheckFailed;
+        },
+    }
+    const child_pid: linux.pid_t = @intCast(fork_rc);
+    if (child_pid == 0) {
+        const action: linux.Sigaction = .{
+            .handler = .{ .handler = linux.SIG.DFL },
+            .mask = linux.sigemptyset(),
+            .flags = 0,
+        };
+        if (linux.errno(linux.sigaction(.PIPE, &action, null)) != .SUCCESS)
+            linux.exit(124);
+        _ = linux.write(pipe_fds[1], "x", 1);
+        linux.exit(125);
+    }
+
+    _ = linux.close(pipe_fds[1]);
+    var status: u32 = 0;
+    while (true) switch (linux.errno(linux.waitpid(child_pid, &status, 0))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        else => return error.ActionSignalCheckFailed,
+    };
+
+    if (!linux.W.IFSIGNALED(status) or linux.W.TERMSIG(status) != linux.SIG.PIPE) {
+        std.debug.print("sandboxed action descendant did not terminate on default SIGPIPE: status={d}\n", .{status});
+        return error.ActionSignalCheckFailed;
+    }
+}
+
+fn escapeProcessGroup(io: std.Io, milliseconds: i64) !void {
+    const linux = std.os.linux;
+    if (@import("builtin").os.tag != .linux) return error.UnsupportedHost;
+
+    switch (linux.errno(linux.setsid())) {
+        .SUCCESS => {},
+        else => return error.TimeoutEscapeSessionFailed,
+    }
+
+    var ready_pipe: [2]std.posix.fd_t = undefined;
+    switch (linux.errno(linux.pipe2(&ready_pipe, .{ .CLOEXEC = true }))) {
+        .SUCCESS => {},
+        else => return error.TimeoutEscapePipeFailed,
+    }
+    const fork_rc = linux.fork();
+    switch (linux.errno(fork_rc)) {
+        .SUCCESS => {},
+        else => {
+            _ = linux.close(ready_pipe[0]);
+            _ = linux.close(ready_pipe[1]);
+            return error.TimeoutEscapeForkFailed;
+        },
+    }
+    const pid: linux.pid_t = @intCast(fork_rc);
+    if (pid != 0) {
+        _ = linux.close(ready_pipe[1]);
+        defer _ = linux.close(ready_pipe[0]);
+        var ready: [1]u8 = undefined;
+        while (true) {
+            const read_rc = linux.read(ready_pipe[0], &ready, 1);
+            switch (linux.errno(read_rc)) {
+                .SUCCESS => {
+                    if (read_rc != 1 or ready[0] != '1') return error.TimeoutEscapeNotReady;
+                    return;
+                },
+                .INTR => continue,
+                else => return error.TimeoutEscapeNotReady,
+            }
+        }
+    }
+
+    _ = linux.close(ready_pipe[0]);
+    switch (linux.errno(linux.setsid())) {
+        .SUCCESS => {},
+        else => linux.exit(126),
+    }
+    while (true) switch (linux.errno(linux.write(ready_pipe[1], "1", 1))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        else => linux.exit(124),
+    };
+    _ = linux.close(ready_pipe[1]);
+    _ = io;
+    var duration = linux.timespec{
+        .sec = @divTrunc(milliseconds, 1_000),
+        .nsec = @intCast(@mod(milliseconds, 1_000) * std.time.ns_per_ms),
+    };
+    while (true) switch (linux.errno(linux.nanosleep(&duration, &duration))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        else => linux.exit(125),
+    };
+    linux.exit(0);
 }
 
 fn isBlockedLocalIpv4(address_be: u32) bool {
@@ -490,6 +768,7 @@ fn exerciseFilesystem(
     var dir = try output_dir.openDir(io, "filesystem", .{ .iterate = true });
     defer dir.close(io);
 
+    try exerciseDirectoryPermissions(io, dir);
     try exerciseFileMetadata(io, dir);
     try exerciseDirectoryIteration(io, dir);
     try exerciseLinkCounts(io, dir);
@@ -497,6 +776,38 @@ fn exerciseFilesystem(
     try exerciseImmutableInputAuthorization(io, allocator, root, inputs);
     try syncDirectory(dir);
     try syncDirectory(output_dir);
+}
+
+fn exerciseDirectoryPermissions(io: std.Io, dir: std.Io.Dir) !void {
+    try dir.createDir(io, "private-mode", .fromMode(0o700));
+    try requireFilesystem(
+        ((try dir.statFile(io, "private-mode", .{})).permissions.toMode() & 0o7777) == 0o700,
+        "staged mkdir did not preserve the requested directory permissions",
+    );
+
+    var private = try dir.openDir(io, "private-mode", .{ .iterate = true });
+    defer private.close(io);
+    try requireFilesystem(
+        ((try private.stat(io)).permissions.toMode() & 0o7777) == 0o700,
+        "opened staged directory did not preserve the requested permissions",
+    );
+
+    try dir.createDir(io, "sticky-mode", .fromMode(0o1700));
+    try requireFilesystem(
+        ((try dir.statFile(io, "sticky-mode", .{})).permissions.toMode() & 0o7777) == 0o1700,
+        "staged mkdir did not preserve the requested sticky directory permission",
+    );
+
+    if (comptime @import("builtin").os.tag == .linux) {
+        switch (std.os.linux.errno(std.os.linux.fchmod(private.handle, 0o750))) {
+            .SUCCESS => {},
+            else => return filesystemFailure("chmod failed for a staged directory"),
+        }
+        try requireFilesystem(
+            ((try dir.statFile(io, "private-mode", .{})).permissions.toMode() & 0o7777) == 0o750,
+            "staged directory chmod did not preserve updated permissions",
+        );
+    }
 }
 
 fn exerciseInputDirectoryLinkCounts(io: std.Io, root: std.Io.Dir) !void {
@@ -517,6 +828,20 @@ fn exerciseInputDirectoryLinkCounts(io: std.Io, root: std.Io.Dir) !void {
             return filesystemFailure("immutable input directory reported an incorrect link count");
         }
     }
+
+    var nested = try root.openDir(io, "nested_files/group_001/foo/bar/baz", .{ .iterate = true });
+    defer nested.close(io);
+    var created = try nested.createFile(io, "actiondfs-stage-ancestry-check.txt", .{
+        .read = true,
+        .permissions = .default_file,
+    });
+    try created.writeStreamingAll(io, "iterative actiondfs staged ancestry\n");
+    created.close(io);
+    try nested.deleteFile(io, "actiondfs-stage-ancestry-check.txt");
+    try requireFilesystem(
+        (try nested.statFile(io, "0001.txt", .{})).kind == .file,
+        "staging nested input-directory ancestry hid an immutable input",
+    );
 }
 
 fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
@@ -587,6 +912,39 @@ fn expectFileSize(
 
 fn exerciseDirectoryIteration(io: std.Io, dir: std.Io.Dir) !void {
     try expectDirectoryEntry(io, dir, "payload.txt", .file, true);
+
+    const streamed_count = 128;
+    for (0..streamed_count) |index| {
+        var name_buffer: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "stream-{d:0>4}-entry-for-getdents.txt", .{index});
+        try writeDefaultFile(io, dir, name, "streamed directory entry\n");
+    }
+
+    var iterator = dir.iterate();
+    var streamed_seen = [_]bool{false} ** streamed_count;
+    var streamed_found: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "stream-")) continue;
+        const suffix = entry.name["stream-".len..];
+        const separator = std.mem.indexOfScalar(u8, suffix, '-') orelse
+            return filesystemFailure("streamed directory entry has an invalid name");
+        const index = std.fmt.parseInt(usize, suffix[0..separator], 10) catch
+            return filesystemFailure("streamed directory entry has an invalid index");
+        try requireFilesystem(index < streamed_count, "streamed directory entry index exceeded its expected range");
+        try requireFilesystem(!streamed_seen[index], "streamed directory iteration emitted the same entry twice");
+        streamed_seen[index] = true;
+        streamed_found += 1;
+        const stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+        try requireFilesystem(entry.inode == stat.inode, "streamed directory inode did not match lstat inode");
+        try requireFilesystem(entry.kind == stat.kind, "streamed directory type did not match lstat type");
+    }
+    try requireFilesystem(streamed_found == streamed_count, "streamed directory iteration omitted entries across getdents buffers");
+
+    for (0..streamed_count) |index| {
+        var name_buffer: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "stream-{d:0>4}-entry-for-getdents.txt", .{index});
+        try dir.deleteFile(io, name);
+    }
 
     try writeDefaultFile(io, dir, "created-after-rewind.txt", "created after the initial directory listing\n");
     try expectDirectoryEntry(io, dir, "created-after-rewind.txt", .file, true);
@@ -808,12 +1166,14 @@ fn readFd(fd: std.Io.File.Handle, buffer: []u8) !usize {
     }
 }
 
-test "parseArgs accepts network block check" {
-    var options = try parseArgs(std.testing.allocator, &.{ "--expect-network-blocked", "--expect-loopback", "--expect-localhost-hosts", "--out-extra-file", "out/a.txt" });
+test "parseArgs accepts network and cgroup checks" {
+    var options = try parseArgs(std.testing.allocator, &.{ "--expect-network-blocked", "--expect-loopback", "--expect-localhost-hosts", "--expect-action-signals", "--expect-cgroup-limits", "--out-extra-file", "out/a.txt" });
     defer options.deinit(std.testing.allocator);
     try std.testing.expect(options.expect_network_blocked);
     try std.testing.expect(options.expect_loopback);
     try std.testing.expect(options.expect_localhost_hosts);
+    try std.testing.expect(options.expect_action_signals);
+    try std.testing.expect(options.expect_cgroup_limits);
     try std.testing.expectEqual(@as(usize, 1), options.extra_out_files.items.len);
     try std.testing.expectEqualStrings("out/a.txt", options.extra_out_files.items[0]);
 }
@@ -838,6 +1198,19 @@ test "parseArgs accepts filesystem checks and declared output symlinks" {
     try std.testing.expectEqualStrings("file.txt", options.out_symlinks.items[0].target.?);
     try std.testing.expectEqualStrings("out/directory.symlink", options.out_symlinks.items[1].path);
     try std.testing.expectEqualStrings("directory", options.out_symlinks.items[1].target.?);
+}
+
+test "parseArgs accepts a detached deadline regression" {
+    var options = try parseArgs(std.testing.allocator, &.{
+        "--escape-process-group",
+        "--sleep-ms",
+        "30000",
+    });
+    defer options.deinit(std.testing.allocator);
+
+    try std.testing.expect(options.escape_process_group);
+    try std.testing.expectEqual(@as(i64, 30_000), options.sleep_ms.?);
+    try std.testing.expectError(error.InvalidSleepDuration, parseArgs(std.testing.allocator, &.{ "--sleep-ms", "-1" }));
 }
 
 test "parseArgs rejects incomplete declared output symlinks" {

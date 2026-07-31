@@ -27,7 +27,7 @@ def _pad4(value):
         return "0%d" % value
     return "%d" % value
 
-def _add_common_args(args, out_file, out_dir, files, srcs, trees, expect_network_blocked, expect_loopback, expect_localhost_hosts, exercise_filesystem = False):
+def _add_common_args(args, out_file, out_dir, files, srcs, trees, expect_network_blocked, expect_loopback, expect_localhost_hosts, exercise_filesystem = False, expect_action_signals = False, expect_cgroup_limits = False):
     args.add("--out-file", out_file)
     if out_dir:
         args.add("--out-dir", out_dir)
@@ -40,6 +40,10 @@ def _add_common_args(args, out_file, out_dir, files, srcs, trees, expect_network
         args.add("--expect-loopback")
     if expect_localhost_hosts:
         args.add("--expect-localhost-hosts")
+    if expect_action_signals:
+        args.add("--expect-action-signals")
+    if expect_cgroup_limits:
+        args.add("--expect-cgroup-limits")
     for src in srcs:
         args.add("--scan", src.path)
     for tree in trees:
@@ -195,7 +199,7 @@ def _stress_consumer_impl(ctx):
     inputs = depset(ctx.files.srcs, transitive = transitive)
 
     args = ctx.actions.args()
-    _add_common_args(args, out_file.path, out_dir.path, ctx.attr.files, ctx.files.srcs, ctx.files.trees, ctx.attr.expect_network_blocked, ctx.attr.expect_loopback, ctx.attr.expect_localhost_hosts)
+    _add_common_args(args, out_file.path, out_dir.path, ctx.attr.files, ctx.files.srcs, ctx.files.trees, ctx.attr.expect_network_blocked, ctx.attr.expect_loopback, ctx.attr.expect_localhost_hosts, expect_action_signals = ctx.attr.expect_action_signals, expect_cgroup_limits = ctx.attr.expect_cgroup_limits)
     ctx.actions.run(
         executable = ctx.executable.tool,
         inputs = inputs,
@@ -216,9 +220,39 @@ stress_consumer = rule(
         "files": attr.int(default = 16),
         "stress_case": attr.string(),
         "execution_requirements": attr.string_dict(),
+        "expect_action_signals": attr.bool(default = False),
+        "expect_cgroup_limits": attr.bool(default = False),
         "expect_network_blocked": attr.bool(default = False),
         "expect_loopback": attr.bool(default = False),
         "expect_localhost_hosts": attr.bool(default = False),
+        "tool": attr.label(
+            allow_single_file = True,
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
+def _stress_timeout_impl(ctx):
+    out_file = ctx.actions.declare_file(ctx.label.name + ".txt")
+    args = ctx.actions.args()
+    args.add("--out-file", out_file.path)
+    args.add("--escape-process-group")
+    args.add("--sleep-ms", "30000")
+    ctx.actions.run(
+        executable = ctx.executable.tool,
+        outputs = [out_file],
+        arguments = [args],
+        env = _stress_env(ctx),
+        mnemonic = "ActiondStressDeadline",
+        progress_message = "Checking action timeout and detached descendants %{label}",
+    )
+    return DefaultInfo(files = depset([out_file]))
+
+stress_timeout = rule(
+    implementation = _stress_timeout_impl,
+    attrs = {
+        "stress_case": attr.string(default = "deadline_regression"),
         "tool": attr.label(
             allow_single_file = True,
             executable = True,
@@ -266,6 +300,34 @@ stress_aggregate = rule(
 
 def stress_workload(name, tool):
     stress_targets = []
+
+    stress_timeout(
+        name = "timeout_regression",
+        exec_properties = {
+            "libc": "glibc2.35",
+            "timeout": "3",
+        },
+        tool = tool,
+    )
+
+    stress_consumer(
+        name = "timeout_recovery",
+        execution_requirements = {"libc": "glibc2.35"},
+        files = 1,
+        srcs = [":bare_inputs"],
+        stress_case = "timeout_recovery",
+        tool = tool,
+    )
+
+    stress_consumer(
+        name = "pids_one_regression",
+        execution_requirements = {"libc": "glibc2.35"},
+        expect_cgroup_limits = True,
+        files = 1,
+        srcs = [":bare_inputs"],
+        stress_case = "pids_one_regression",
+        tool = tool,
+    )
 
     stress_symlinks(
         name = "filesystem_regression",
@@ -354,8 +416,10 @@ def stress_workload(name, tool):
     stress_consumer(
         name = "mixed_all",
         execution_requirements = {"libc": "glibc2.35"},
+        expect_action_signals = True,
         expect_localhost_hosts = True,
         expect_loopback = True,
+        expect_cgroup_limits = True,
         expect_network_blocked = True,
         files = 64,
         srcs = [
