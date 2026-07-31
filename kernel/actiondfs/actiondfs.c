@@ -125,7 +125,6 @@ struct actiondfs_node {
 struct actiondfs_sb_info {
 	struct path cas_path;
 	struct path stage_path;
-	bool stage_path_valid;
 	struct actiondfs_node *root;
 };
 
@@ -515,7 +514,7 @@ static int actiondfs_stage_node_path(struct actiondfs_sb_info *sbi,
 {
 	struct dentry *dentry;
 
-	if (!sbi->stage_path_valid)
+	if (!sbi->stage_path.dentry)
 		return -EROFS;
 
 	dentry = READ_ONCE(node->stage_dentry);
@@ -616,7 +615,7 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 	int err;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_ENSURE_DIR_CALLS);
-	if (!sbi->stage_path_valid) {
+	if (!sbi->stage_path.dentry) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_ENSURE_DIR_ERRORS);
 		return -EROFS;
 	}
@@ -1319,7 +1318,7 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	int err;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS);
-	if (!sbi->stage_path_valid) {
+	if (!sbi->stage_path.dentry) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_TOTAL_NS,
 					   total_start);
@@ -2660,7 +2659,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	bool merged_input = false;
 	int err;
 
-	if (!sbi->stage_path_valid)
+	if (!sbi->stage_path.dentry)
 		return NULL;
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUPS);
 	if (!READ_ONCE(parent->stage_dentry)) {
@@ -2838,7 +2837,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 	struct dentry *real_dentry;
 	int err;
 
-	if (!sbi->stage_path_valid)
+	if (!sbi->stage_path.dentry)
 		return -EROFS;
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_CALLS);
 	err = actiondfs_ensure_loaded(dir->i_sb, parent);
@@ -2915,7 +2914,7 @@ static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	size_t target_len;
 	int err;
 
-	if (!sbi->stage_path_valid)
+	if (!sbi->stage_path.dentry)
 		return -EROFS;
 	target_len = strnlen(target, PATH_MAX);
 	if (!target_len || target_len >= PATH_MAX)
@@ -2984,7 +2983,7 @@ static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
 	struct dentry *created;
 	int err;
 
-	if (!sbi->stage_path_valid)
+	if (!sbi->stage_path.dentry)
 		return ERR_PTR(-EROFS);
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MKDIR_CALLS);
 	err = actiondfs_ensure_loaded(dir->i_sb, parent);
@@ -3506,7 +3505,7 @@ static int actiondfs_open_stage_file(struct inode *inode,
 		actiondfs_reset_stage_file(dir_file);
 	dir_file->stage_loaded = true;
 	dir_file->stage_generation = generation;
-	if (!sbi->stage_path_valid) {
+	if (!sbi->stage_path.dentry) {
 		dir_file->stage_eof = true;
 		return 0;
 	}
@@ -3817,7 +3816,7 @@ static void actiondfs_put_super(struct super_block *sb)
 	actiondfs_free_node(sbi->root);
 	if (sbi->cas_path.dentry)
 		path_put(&sbi->cas_path);
-	if (sbi->stage_path_valid)
+	if (sbi->stage_path.dentry)
 		path_put(&sbi->stage_path);
 	kfree(sbi);
 	sb->s_fs_info = NULL;
@@ -3871,7 +3870,6 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 				&sbi->stage_path);
 		if (err)
 			goto fail;
-		sbi->stage_path_valid = true;
 		actiondfs_set_stage_dentry(sbi->root, sbi->stage_path.dentry);
 	} else {
 		sb->s_flags |= SB_RDONLY;
