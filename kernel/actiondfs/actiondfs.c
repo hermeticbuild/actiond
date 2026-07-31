@@ -2423,66 +2423,30 @@ static int actiondfs_ensure_loaded(struct super_block *sb,
 	return err;
 }
 
-static void actiondfs_free_mount_options(struct actiondfs_mount_options *opts)
+static int actiondfs_parse_options(struct actiondfs_mount_options *opts,
+				   char *options)
 {
-	kfree(opts->cas_root);
-	kfree(opts->root_hash);
-	kfree(opts->stage_root);
-}
-
-static int actiondfs_parse_options(struct actiondfs_mount_options *opts, void *data)
-{
-	char *options;
-	char *cursor;
 	char *token;
-	int err = 0;
 
-	if (!data)
+	if (!options)
 		return -EINVAL;
 
-	options = kstrdup(data, GFP_KERNEL);
-	if (!options)
-		return -ENOMEM;
-	cursor = options;
-
-	while ((token = strsep(&cursor, ",")) != NULL) {
+	while ((token = strsep(&options, ",")) != NULL) {
 		if (str_has_prefix(token, "root=")) {
-			kfree(opts->root_hash);
-			opts->root_hash = kstrdup(token + 5, GFP_KERNEL);
-			if (!opts->root_hash) {
-				err = -ENOMEM;
-				goto out_options;
-			}
+			opts->root_hash = token + 5;
 		} else if (str_has_prefix(token, "root_size=")) {
 			if (kstrtoull(token + 10, 10, &opts->root_size) ||
-			    opts->root_size > MAX_LFS_FILESIZE) {
-				err = -EINVAL;
-				goto out_options;
-			}
+			    opts->root_size > MAX_LFS_FILESIZE)
+				return -EINVAL;
 		} else if (str_has_prefix(token, "cas=")) {
-			kfree(opts->cas_root);
-			opts->cas_root = kstrdup(token + 4, GFP_KERNEL);
-			if (!opts->cas_root) {
-				err = -ENOMEM;
-				goto out_options;
-			}
+			opts->cas_root = token + 4;
 		} else if (str_has_prefix(token, "stage=")) {
-			kfree(opts->stage_root);
-			opts->stage_root = kstrdup(token + 6, GFP_KERNEL);
-			if (!opts->stage_root) {
-				err = -ENOMEM;
-				goto out_options;
-			}
+			opts->stage_root = token + 6;
 		} else if (*token) {
-			err = -EINVAL;
-			goto out_options;
+			return -EINVAL;
 		}
 	}
 
-out_options:
-	kfree(options);
-	if (err)
-		return err;
 	if (!opts->cas_root || !opts->root_hash)
 		return -EINVAL;
 	if (actiondfs_valid_hash(opts->root_hash))
@@ -3890,11 +3854,9 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto fail;
 	}
 	actiondfs_stat_inc(ACTIONDFS_STAT_MOUNTS);
-	actiondfs_free_mount_options(&opts);
 	return 0;
 
 fail:
-	actiondfs_free_mount_options(&opts);
 	actiondfs_put_super(sb);
 	return err;
 }
