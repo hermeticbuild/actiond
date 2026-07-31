@@ -1,163 +1,169 @@
 # Executor Timing Summary
 
-- Generated: `2026-07-30 18:17:59 EDT`
+- Generated: `2026-07-30 21:27:31 EDT`
 - Mode: `vm`
-- Execute records parsed: `34`
-- Unique action digests: `34`
-- Source log: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-vm-e2e.BbaPL1/darwin-actiond-vm.log`
+- Execute records parsed: `36`
+- Unique action digests: `36`
+- Source log: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-vm-e2e.0KEOIs/darwin-actiond-vm.log`
 - Command: `ACTIOND_E2E_KEEP_TMP=1 ACTIOND_REPO_BAZEL_FLAGS="--config=remote --config=executor_timing_logs" tools/e2e.sh vm`
 
 ## Stage Timing
 
 All timing values are milliseconds unless noted.
 
-| Stage                 |   Min |   p25 |   p50 |   p75 |    p95 |  Mean |    Max | Share of summed total |
-| --------------------- | ----: | ----: | ----: | ----: | -----: | ----: | -----: | --------------------: |
-| total                 | 1.847 | 3.912 | 5.596 | 8.848 | 21.592 | 9.518 | 86.606 |                100.0% |
-| input fetch/setup     | 0.272 | 0.293 | 0.321 | 0.732 |  1.862 | 0.684 |  3.117 |                  7.2% |
-| execute               | 1.346 | 3.138 | 4.595 | 6.383 | 12.631 | 7.477 | 85.866 |                 78.6% |
-| output upload/collect | 0.062 | 0.141 | 0.459 | 1.138 |  6.805 | 1.357 |  9.963 |                 14.3% |
+| Stage                 |   Min |    p25 |    p50 |    p75 |    p95 |   Mean |     Max | Share of summed total |
+| --------------------- | ----: | -----: | -----: | -----: | -----: | -----: | ------: | --------------------: |
+| total                 | 4.168 | 20.570 | 31.554 | 39.426 | 57.708 | 37.878 | 284.074 |                100.0% |
+| input fetch/setup     | 0.271 |  0.302 |  0.354 |  0.737 |  3.949 |  0.999 |   7.604 |                  2.6% |
+| execute               | 3.484 | 18.485 | 27.423 | 35.506 | 51.711 | 34.130 | 281.650 |                 90.1% |
+| output upload/collect | 0.083 |  0.153 |  0.791 |  2.121 | 15.584 |  2.748 |  20.587 |                  7.3% |
 
 ## Mount And Output Counts
 
 | Metric             | Min | p25 | p50 | p75 | p95 | Mean | Max |
 | ------------------ | --: | --: | --: | --: | --: | ---: | --: |
 | bind mounts        |   4 |   4 |   4 |   4 |   4 |  4.0 |   4 |
-| output files       |   1 |   1 |   1 |   1 |   1 |  3.8 |  97 |
+| output files       |   1 |   1 |   1 |   1 |   1 |  3.7 |  97 |
 | output directories |   0 |   1 |   1 |   1 |   1 |  0.9 |   1 |
 
 ## Stage Timing By Stress Case
 
 | Stress Case                | Actions | Total p25 | Total p50 | Total p75 | Total p95 | Input p50 | Execute p50 | Output p50 | Mounts p50 |
 | -------------------------- | ------: | --------: | --------: | --------: | --------: | --------: | ----------: | ---------: | ---------: |
-| aggregate                  |       1 |     2.992 |     2.992 |     2.992 |     2.992 |     0.290 |       2.641 |      0.062 |          4 |
-| bare_individual_files      |       4 |     3.336 |     3.721 |     5.416 |     9.118 |     0.315 |       2.384 |      0.773 |          4 |
-| filesystem_regression      |       1 |    86.606 |    86.606 |    86.606 |    86.606 |     0.302 |      85.866 |      0.438 |          4 |
-| generated_file_producer    |       1 |    16.612 |    16.612 |    16.612 |    16.612 |     0.658 |       7.656 |      8.298 |          4 |
-| generated_individual_files |       4 |     4.039 |     4.612 |     5.226 |     5.991 |     0.362 |       3.832 |      0.349 |          4 |
-| generated_tree_producer    |       1 |    21.361 |    21.361 |    21.361 |    21.361 |     1.572 |       9.825 |      9.963 |          4 |
-| generated_tree_reuse       |       8 |     5.076 |     5.596 |     7.510 |     8.772 |     0.294 |       5.170 |      0.139 |          4 |
-| mixed_all                  |       1 |    22.021 |    22.021 |    22.021 |    22.021 |     0.299 |      17.843 |      3.879 |          4 |
-| nested_individual_files    |       8 |     5.928 |     8.349 |    11.552 |    12.181 |     0.934 |       5.306 |      1.091 |          4 |
-| source_dir_tree            |       4 |     3.784 |     4.313 |     5.136 |     6.114 |     0.549 |       3.534 |      0.420 |          4 |
-| symlink_input_consumer     |       1 |     1.847 |     1.847 |     1.847 |     1.847 |     0.295 |       1.346 |      0.206 |          4 |
+| aggregate                  |       1 |    26.055 |    26.055 |    26.055 |    26.055 |     0.285 |      25.686 |      0.083 |          4 |
+| bare_individual_files      |       4 |    27.443 |    32.164 |    33.786 |    34.289 |     0.317 |      29.378 |      0.468 |          4 |
+| filesystem_regression      |       1 |   284.074 |   284.074 |   284.074 |   284.074 |     0.308 |     281.650 |      2.116 |          4 |
+| generated_file_producer    |       1 |    34.346 |    34.346 |    34.346 |    34.346 |     0.645 |      26.347 |      7.354 |          4 |
+| generated_individual_files |       4 |    32.756 |    39.116 |    45.676 |    56.690 |     0.559 |      36.750 |      1.019 |          4 |
+| generated_tree_producer    |       1 |    44.460 |    44.460 |    44.460 |    44.460 |     1.335 |      32.007 |     11.117 |          4 |
+| generated_tree_reuse       |       8 |    13.997 |    26.427 |    41.653 |    55.203 |     0.655 |      24.178 |      0.603 |          4 |
+| mixed_all                  |       1 |    20.897 |    20.897 |    20.897 |    20.897 |     0.271 |      17.814 |      2.812 |          4 |
+| nested_individual_files    |       8 |    26.163 |    32.731 |    43.742 |    57.088 |     0.318 |      30.859 |      1.144 |          4 |
+| pids_one_regression        |       1 |    13.369 |    13.369 |    13.369 |    13.369 |     0.305 |      12.916 |      0.148 |          4 |
+| source_dir_tree            |       4 |    23.606 |    23.986 |    27.969 |    37.392 |     0.543 |      22.857 |      0.377 |          4 |
+| symlink_input_consumer     |       1 |     4.168 |     4.168 |     4.168 |     4.168 |     0.272 |       3.484 |      0.412 |          4 |
+| timeout_recovery           |       1 |    27.716 |    27.716 |    27.716 |    27.716 |     3.338 |      23.844 |      0.533 |          4 |
 
 ## Visible Overhead Estimate
 
 `process/io` is excluded here because it is mostly the action process runtime plus stdout/stderr drain.
 
-| Metric                    |   Min |   p25 |   p50 |   p75 |   p95 |  Mean |    Max | Share of summed total |
-| ------------------------- | ----: | ----: | ----: | ----: | ----: | ----: | -----: | --------------------: |
-| fixed overhead, no wait   | 0.922 | 1.711 | 2.634 | 5.190 | 9.093 | 3.660 | 13.723 |                 38.5% |
-| fixed overhead, with wait | 0.922 | 1.711 | 2.634 | 5.190 | 9.093 | 3.660 | 13.723 |                 38.5% |
+| Metric                    |   Min |    p25 |    p50 |    p75 |    p95 |   Mean |    Max | Share of summed total |
+| ------------------------- | ----: | -----: | -----: | -----: | -----: | -----: | -----: | --------------------: |
+| fixed overhead, no wait   | 2.646 | 11.225 | 21.477 | 32.465 | 48.440 | 23.086 | 53.829 |                 60.9% |
+| fixed overhead, with wait | 2.646 | 12.156 | 21.477 | 32.465 | 49.602 | 23.380 | 53.829 |                 61.7% |
 
 ## Runner Timing
 
-These values split the `execute` bucket. `process/io` starts after child setup signals right before `execve`; it includes the action process runtime and stdout/stderr drain.
+These values split the `execute` bucket. `child setup` includes successful `execve`; `process/io` starts after close-on-exec confirmation and includes action runtime and stdout/stderr drain.
 
-| Runner Stage   |   Min |   p25 |   p50 |   p75 |    p95 |  Mean |    Max | Share of execute |
-| -------------- | ----: | ----: | ----: | ----: | -----: | ----: | -----: | ---------------: |
-| parent prepare | 0.040 | 0.045 | 0.049 | 0.057 |  0.100 | 0.058 |  0.203 |             0.8% |
-| fork           | 0.067 | 0.092 | 0.109 | 0.156 |  1.824 | 0.342 |  2.783 |             4.6% |
-| child setup    | 0.002 | 0.544 | 1.066 | 1.555 |  2.927 | 1.218 |  4.730 |            16.3% |
-| process/io     | 0.105 | 1.535 | 2.722 | 4.976 | 10.942 | 5.841 | 80.997 |            78.1% |
-| wait           | 0.000 | 0.000 | 0.000 | 0.000 |  0.000 | 0.000 |  0.000 |             0.0% |
-| stdio digest   | 0.000 | 0.000 | 0.000 | 0.000 |  0.001 | 0.000 |  0.001 |             0.0% |
+| Runner Stage   |   Min |   p25 |   p50 |    p75 |    p95 |   Mean |     Max | Share of execute |
+| -------------- | ----: | ----: | ----: | -----: | -----: | -----: | ------: | ---------------: |
+| parent prepare | 0.088 | 0.121 | 0.502 | 10.362 | 27.204 |  6.767 |  27.793 |            19.8% |
+| fork           | 0.313 | 0.521 | 0.928 |  1.645 |  3.923 |  1.339 |   5.006 |             3.9% |
+| child setup    | 0.946 | 4.264 | 7.329 | 19.516 | 28.501 | 11.233 |  31.908 |            32.9% |
+| process/io     | 0.034 | 2.374 | 5.509 |  9.156 | 22.220 | 14.455 | 272.967 |            42.4% |
+| wait           | 0.000 | 0.000 | 0.000 |  0.000 |  3.067 |  0.294 |   4.203 |             0.9% |
+| stdio digest   | 0.000 | 0.000 | 0.000 |  0.001 |  0.001 |  0.000 |   0.001 |             0.0% |
 
 | Stress Case                | Digest         | Parent Prep |  Fork | Child Setup | Process/IO |  Wait | Stdio Digest | Setup Signaled |
 | -------------------------- | -------------- | ----------: | ----: | ----------: | ---------: | ----: | -----------: | -------------- |
-| aggregate                  | `531499425ba1` |       0.047 | 0.105 |       0.427 |      2.051 | 0.000 |        0.000 | True           |
-| bare_individual_files      | `4dfded667523` |       0.060 | 0.120 |       0.444 |      1.529 | 0.000 |        0.000 | True           |
-| bare_individual_files      | `91b290b62cf9` |       0.049 | 0.096 |       0.561 |      1.491 | 0.000 |        0.001 | True           |
-| bare_individual_files      | `a65352596937` |       0.054 | 0.070 |       0.442 |      2.568 | 0.000 |        0.000 | True           |
-| bare_individual_files      | `ee8f5e8ccce1` |       0.046 | 0.086 |       0.624 |      1.792 | 0.000 |        0.000 | True           |
-| filesystem_regression      | `d28c89b62ab2` |       0.043 | 0.087 |       4.730 |     80.997 | 0.000 |        0.000 | True           |
-| generated_file_producer    | `a1e8a56eb257` |       0.074 | 0.090 |       1.561 |      5.925 | 0.000 |        0.000 | True           |
-| generated_individual_files | `14eed6a406a0` |       0.044 | 0.067 |       1.319 |      1.357 | 0.000 |        0.000 | True           |
-| generated_individual_files | `7cda6d5de197` |       0.049 | 0.159 |       3.036 |      1.479 | 0.000 |        0.001 | True           |
-| generated_individual_files | `d0f36724e5c0` |       0.051 | 0.101 |       1.775 |      2.525 | 0.000 |        0.000 | True           |
-| generated_individual_files | `d2dd425c67cf` |       0.048 | 0.112 |       1.463 |      1.552 | 0.000 |        0.001 | True           |
-| generated_tree_producer    | `cd5680b62147` |       0.043 | 0.082 |       2.062 |      7.633 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `0ca41d6371f8` |       0.043 | 0.076 |       0.643 |      3.248 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `65fc05d2421b` |       0.042 | 0.128 |       0.344 |      3.031 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `7952d1b17b5f` |       0.045 | 0.108 |       1.096 |      2.419 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `b866619f2e83` |       0.041 | 0.504 |       0.239 |      4.197 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `db8495a88c1c` |       0.135 | 0.111 |       1.580 |      3.460 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `e652390a3757` |       0.060 | 0.147 |       0.539 |      5.013 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `f898b88e8806` |       0.042 | 0.100 |       0.620 |      7.778 | 0.000 |        0.000 | True           |
-| generated_tree_reuse       | `fa3cf567d406` |       0.066 | 0.096 |       0.975 |      5.422 | 0.000 |        0.000 | True           |
-| mixed_all                  | `be4a1954bc6c` |       0.203 | 0.099 |       0.715 |     16.817 | 0.000 |        0.000 | True           |
-| nested_individual_files    | `062c10b5bb96` |       0.040 | 0.076 |       1.093 |      6.000 | 0.000 |        0.001 | True           |
-| nested_individual_files    | `0b94d4fb63fc` |       0.058 | 2.662 |       0.002 |      6.964 | 0.000 |        0.000 | True           |
-| nested_individual_files    | `40fe49279c9f` |       0.046 | 0.114 |       1.050 |      4.572 | 0.000 |        0.000 | True           |
-| nested_individual_files    | `42efdfabf2c4` |       0.053 | 0.729 |       2.869 |      1.083 | 0.000 |        0.000 | True           |
-| nested_individual_files    | `7c3a4e1e703b` |       0.045 | 0.106 |       0.409 |      1.002 | 0.000 |        0.000 | True           |
-| nested_individual_files    | `99cad005580b` |       0.052 | 2.783 |       1.686 |      4.867 | 0.000 |        0.000 | True           |
-| nested_individual_files    | `ca2ed43c0d8a` |       0.058 | 1.372 |       1.081 |      2.295 | 0.000 |        0.000 | True           |
-| nested_individual_files    | `f3aa1f29ef28` |       0.047 | 0.079 |       1.315 |      1.601 | 0.000 |        0.000 | True           |
-| source_dir_tree            | `2f1264644774` |       0.080 | 0.191 |       1.536 |      0.462 | 0.000 |        0.001 | True           |
-| source_dir_tree            | `9e67e0ecc571` |       0.054 | 0.484 |       1.096 |      3.812 | 0.000 |        0.000 | True           |
-| source_dir_tree            | `baa7f7f64245` |       0.049 | 0.250 |       2.729 |      0.105 | 0.000 |        0.000 | True           |
-| source_dir_tree            | `c5f34558150f` |       0.050 | 0.137 |       0.850 |      2.876 | 0.000 |        0.000 | True           |
-| symlink_input_consumer     | `1ee4fbe0e858` |       0.046 | 0.116 |       0.508 |      0.665 | 0.000 |        0.000 | True           |
+| aggregate                  | `2fa3a4511718` |       0.109 | 0.404 |      22.475 |      2.673 | 0.000 |        0.001 | True           |
+| bare_individual_files      | `1a9a1d7d45e4` |      26.561 | 0.862 |       4.883 |      0.125 | 0.000 |        0.001 | True           |
+| bare_individual_files      | `293475ee06bb` |      14.018 | 5.006 |       1.000 |     10.215 | 0.000 |        0.001 | True           |
+| bare_individual_files      | `96c424f1edad` |       4.347 | 0.547 |       8.585 |      1.354 | 0.000 |        0.001 | True           |
+| bare_individual_files      | `ccdb7626dedd` |       0.119 | 1.077 |      24.906 |      2.374 | 0.000 |        0.000 | True           |
+| filesystem_regression      | `9a580d312f78` |       4.558 | 1.515 |       2.578 |    272.967 | 0.000 |        0.001 | True           |
+| generated_file_producer    | `174bffc360c9` |       9.937 | 0.459 |       2.482 |     13.451 | 0.000 |        0.000 | True           |
+| generated_individual_files | `2d4ce7a45898` |       0.180 | 1.661 |      28.695 |      7.672 | 0.000 |        0.001 | True           |
+| generated_individual_files | `58d933f8a1cc` |       0.234 | 0.522 |      28.436 |     22.490 | 0.000 |        0.001 | True           |
+| generated_individual_files | `ebe0486999bc` |      11.639 | 1.753 |       2.042 |      3.249 | 0.000 |        0.000 | True           |
+| generated_individual_files | `ef34017f746a` |      27.624 | 1.523 |       4.050 |      2.008 | 0.000 |        0.001 | True           |
+| generated_tree_producer    | `db960becfd36` |       7.452 | 0.519 |       8.340 |     15.662 | 0.000 |        0.001 | True           |
+| generated_tree_reuse       | `056bce18df22` |      19.927 | 1.252 |       4.336 |      8.929 | 0.000 |        0.000 | True           |
+| generated_tree_reuse       | `1c8778f3cc78` |       0.101 | 0.447 |       7.538 |      0.034 | 0.000 |        0.000 | True           |
+| generated_tree_reuse       | `21983588efc6` |       1.900 | 0.559 |      27.173 |     22.093 | 0.000 |        0.000 | True           |
+| generated_tree_reuse       | `46d362087f03` |       0.099 | 0.333 |       6.882 |     22.130 | 4.203 |        0.000 | True           |
+| generated_tree_reuse       | `5eba25364668` |       0.088 | 3.770 |       6.620 |      3.326 | 0.000 |        0.000 | True           |
+| generated_tree_reuse       | `94a4a5794423` |       0.223 | 1.235 |       6.501 |      6.261 | 0.000 |        0.001 | True           |
+| generated_tree_reuse       | `e89401eb9021` |      26.148 | 2.621 |       3.050 |      6.616 | 0.000 |        0.000 | True           |
+| generated_tree_reuse       | `f433d0b3a994` |       0.111 | 2.246 |       5.474 |      4.559 | 0.000 |        0.000 | True           |
+| mixed_all                  | `c91e0b696fc8` |       0.100 | 0.735 |       7.120 |      9.836 | 0.000 |        0.001 | True           |
+| nested_individual_files    | `3dff464548c3` |       0.116 | 0.638 |      31.908 |      5.219 | 0.000 |        0.000 | True           |
+| nested_individual_files    | `624772a8ae88` |       0.925 | 1.559 |       4.860 |      3.957 | 3.424 |        0.001 | True           |
+| nested_individual_files    | `6875f2d910c8` |      27.793 | 2.406 |       2.728 |      3.273 | 0.000 |        0.000 | True           |
+| nested_individual_files    | `7c722534d2c8` |       1.890 | 1.640 |      18.237 |      2.374 | 0.000 |        0.001 | True           |
+| nested_individual_files    | `b77221109b6c` |       0.181 | 0.512 |       7.987 |     21.800 | 0.000 |        0.001 | True           |
+| nested_individual_files    | `c66b33449ee8` |       1.744 | 0.641 |      15.435 |      6.701 | 0.000 |        0.000 | True           |
+| nested_individual_files    | `e9b5b4f432a6` |      27.063 | 4.382 |       1.346 |      5.800 | 2.948 |        0.000 | True           |
+| nested_individual_files    | `f904af8dd963` |       0.091 | 2.044 |      20.130 |      8.925 | 0.000 |        0.000 | True           |
+| pids_one_regression        | `cd3cb4b17ba0` |       0.142 | 0.519 |      11.147 |      1.071 | 0.000 |        0.000 | True           |
+| source_dir_tree            | `0744164ec172` |       0.121 | 0.354 |      19.792 |      2.694 | 0.000 |        0.001 | True           |
+| source_dir_tree            | `25d07a1a15b9` |       0.676 | 0.313 |      19.439 |      2.239 | 0.000 |        0.000 | True           |
+| source_dir_tree            | `5d07305214c6` |       0.128 | 0.824 |      12.161 |      8.702 | 0.000 |        0.000 | True           |
+| source_dir_tree            | `c7d0b3212bf8` |      26.715 | 0.993 |       5.355 |      5.927 | 0.000 |        0.000 | True           |
+| symlink_input_consumer     | `5c31db5029b1` |       0.234 | 0.781 |       0.946 |      1.482 | 0.000 |        0.001 | True           |
+| timeout_recovery           | `01ac7dd6dd9b` |       0.328 | 1.536 |      19.747 |      2.189 | 0.000 |        0.001 | True           |
 
 ## VM Bridge Timing
 
 These are raw TCP-to-vsock pump connection measurements logged by `darwin-actiond serve-vm`.
 
-- Bridge connections logged: `4`
-- Total client to guest bytes: `1.37 MiB`
+- Bridge connections logged: `9`
+- Total client to guest bytes: `1.47 MiB`
 - Total guest to client bytes: `0.30 MiB`
 - Pump errors: read=`0`, write=`0`
 
-| Bridge Metric          |     Min |     p25 |      p50 |      p75 |      p95 |     Mean |      Max |
-| ---------------------- | ------: | ------: | -------: | -------: | -------: | -------: | -------: |
-| connection elapsed     | 517.872 | 536.204 | 2019.130 | 4001.256 | 5214.005 | 2518.331 | 5517.192 |
-| client to guest KiB    |     0.0 |   210.4 |    287.9 |    429.1 |    750.6 |    351.7 |    831.0 |
-| guest to client KiB    |     0.0 |    44.9 |     73.7 |    104.6 |    145.4 |     75.8 |    155.6 |
-| client to guest reads  |       1 |     264 |      418 |      487 |      497 |    334.0 |      500 |
-| client to guest writes |       1 |     264 |      418 |      487 |      497 |    334.0 |      500 |
-| guest to client reads  |       0 |     154 |      224 |      248 |      262 |    178.5 |      266 |
-| guest to client writes |       0 |     154 |      224 |      248 |      262 |    178.5 |      266 |
+| Bridge Metric          |     Min |     p25 |     p50 |     p75 |      p95 |     Mean |      Max |
+| ---------------------- | ------: | ------: | ------: | ------: | -------: | -------: | -------: |
+| connection elapsed     | 142.430 | 728.515 | 773.341 | 810.956 | 3337.637 | 1197.899 | 3512.199 |
+| client to guest KiB    |     2.5 |    19.7 |   126.2 |   172.2 |    503.7 |    167.1 |    705.4 |
+| guest to client KiB    |     0.9 |     2.3 |    37.6 |    43.9 |     81.1 |     34.3 |     96.5 |
+| client to guest reads  |      11 |      18 |     184 |     241 |      252 |    148.3 |      253 |
+| client to guest writes |      11 |      18 |     184 |     241 |      252 |    148.3 |      253 |
+| guest to client reads  |       9 |      21 |     106 |     128 |      136 |     85.4 |      138 |
+| guest to client writes |       9 |      21 |     106 |     128 |      136 |     85.4 |      138 |
 
 ## Per Action
 
-| Stress Case                | Digest         |  Total | Input | Execute | Output | Bind Mounts |        Outputs |
-| -------------------------- | -------------- | -----: | ----: | ------: | -----: | ----------: | -------------: |
-| aggregate                  | `531499425ba1` |  2.992 | 0.290 |   2.641 |  0.062 |           4 |  1 file, 0 dir |
-| bare_individual_files      | `4dfded667523` |  2.637 | 0.307 |   2.167 |  0.163 |           4 |  1 file, 1 dir |
-| bare_individual_files      | `91b290b62cf9` |  3.873 | 0.286 |   2.205 |  1.382 |           4 |  1 file, 1 dir |
-| bare_individual_files      | `a65352596937` |  3.568 | 0.323 |   3.138 |  0.108 |           4 |  1 file, 1 dir |
-| bare_individual_files      | `ee8f5e8ccce1` | 10.044 | 1.480 |   2.564 |  6.000 |           4 |  1 file, 1 dir |
-| filesystem_regression      | `d28c89b62ab2` | 86.606 | 0.302 |  85.866 |  0.438 |           4 |  1 file, 1 dir |
-| generated_file_producer    | `a1e8a56eb257` | 16.612 | 0.658 |   7.656 |  8.298 |           4 | 97 file, 0 dir |
-| generated_individual_files | `14eed6a406a0` |  3.203 | 0.279 |   2.794 |  0.130 |           4 |  1 file, 1 dir |
-| generated_individual_files | `7cda6d5de197` |  6.182 | 0.883 |   4.732 |  0.567 |           4 |  1 file, 1 dir |
-| generated_individual_files | `d0f36724e5c0` |  4.907 | 0.354 |   4.457 |  0.096 |           4 |  1 file, 1 dir |
-| generated_individual_files | `d2dd425c67cf` |  4.318 | 0.370 |   3.207 |  0.740 |           4 |  1 file, 1 dir |
-| generated_tree_producer    | `cd5680b62147` | 21.361 | 1.572 |   9.825 |  9.963 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `0ca41d6371f8` |  5.425 | 0.272 |   4.018 |  1.135 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `65fc05d2421b` |  3.959 | 0.275 |   3.551 |  0.132 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `7952d1b17b5f` |  4.118 | 0.293 |   3.684 |  0.140 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `b866619f2e83` |  5.395 | 0.295 |   4.984 |  0.115 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `db8495a88c1c` |  5.768 | 0.293 |   5.355 |  0.119 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `e652390a3757` |  8.346 | 2.299 |   5.766 |  0.280 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `f898b88e8806` |  9.001 | 0.319 |   8.545 |  0.137 |           4 |  1 file, 1 dir |
-| generated_tree_reuse       | `fa3cf567d406` |  7.232 | 0.512 |   6.577 |  0.143 |           4 |  1 file, 1 dir |
-| mixed_all                  | `be4a1954bc6c` | 22.021 | 0.299 |  17.843 |  3.879 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `062c10b5bb96` | 11.356 | 0.276 |   7.215 |  3.865 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `0b94d4fb63fc` | 12.140 | 1.407 |   9.689 |  1.044 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `40fe49279c9f` |  8.310 | 1.369 |   5.801 |  1.139 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `42efdfabf2c4` |  6.340 | 0.292 |   4.744 |  1.304 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `7c3a4e1e703b` |  2.352 | 0.283 |   1.567 |  0.502 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `99cad005580b` | 12.204 | 1.626 |   9.395 |  1.183 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `ca2ed43c0d8a` |  8.388 | 3.117 |   4.811 |  0.460 |           4 |  1 file, 1 dir |
-| nested_individual_files    | `f3aa1f29ef28` |  4.694 | 0.499 |   3.265 |  0.929 |           4 |  1 file, 1 dir |
-| source_dir_tree            | `2f1264644774` |  3.445 | 0.678 |   2.279 |  0.488 |           4 |  1 file, 1 dir |
-| source_dir_tree            | `9e67e0ecc571` |  6.358 | 0.750 |   5.460 |  0.148 |           4 |  1 file, 1 dir |
-| source_dir_tree            | `baa7f7f64245` |  3.897 | 0.298 |   3.140 |  0.458 |           4 |  1 file, 1 dir |
-| source_dir_tree            | `c5f34558150f` |  4.729 | 0.420 |   3.927 |  0.382 |           4 |  1 file, 1 dir |
-| symlink_input_consumer     | `1ee4fbe0e858` |  1.847 | 0.295 |   1.346 |  0.206 |           4 |  1 file, 1 dir |
+| Stress Case                | Digest         |   Total | Input | Execute | Output | Bind Mounts |        Outputs |
+| -------------------------- | -------------- | ------: | ----: | ------: | -----: | ----------: | -------------: |
+| aggregate                  | `2fa3a4511718` |  26.055 | 0.285 |  25.686 |  0.083 |           4 |  1 file, 0 dir |
+| bare_individual_files      | `1a9a1d7d45e4` |  33.577 | 0.290 |  32.505 |  0.782 |           4 |  1 file, 1 dir |
+| bare_individual_files      | `293475ee06bb` |  30.751 | 0.340 |  30.257 |  0.154 |           4 |  1 file, 1 dir |
+| bare_individual_files      | `96c424f1edad` |  17.519 | 0.295 |  14.856 |  2.368 |           4 |  1 file, 1 dir |
+| bare_individual_files      | `ccdb7626dedd` |  34.415 | 5.781 |  28.500 |  0.134 |           4 |  1 file, 1 dir |
+| filesystem_regression      | `9a580d312f78` | 284.074 | 0.308 | 281.650 |  2.116 |           4 |  1 file, 1 dir |
+| generated_file_producer    | `174bffc360c9` |  34.346 | 0.645 |  26.347 |  7.354 |           4 | 97 file, 0 dir |
+| generated_individual_files | `2d4ce7a45898` |  41.087 | 0.715 |  38.235 |  2.136 |           4 |  1 file, 1 dir |
+| generated_individual_files | `58d933f8a1cc` |  59.443 | 7.604 |  51.703 |  0.137 |           4 |  1 file, 1 dir |
+| generated_individual_files | `ebe0486999bc` |  19.589 | 0.402 |  18.708 |  0.478 |           4 |  1 file, 1 dir |
+| generated_individual_files | `ef34017f746a` |  37.145 | 0.321 |  35.265 |  1.559 |           4 |  1 file, 1 dir |
+| generated_tree_producer    | `db960becfd36` |  44.460 | 1.335 |  32.007 | 11.117 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `056bce18df22` |  37.129 | 0.804 |  34.458 |  1.867 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `1c8778f3cc78` |   9.727 | 0.506 |   8.142 |  1.078 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `21983588efc6` |  54.266 | 2.430 |  51.738 |  0.098 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `46d362087f03` |  37.448 | 0.284 |  34.119 |  3.045 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `5eba25364668` |  14.213 | 0.277 |  13.823 |  0.113 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `94a4a5794423` |  15.725 | 1.360 |  14.238 |  0.127 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `e89401eb9021` |  55.707 | 0.279 |  38.448 | 16.980 |           4 |  1 file, 1 dir |
+| generated_tree_reuse       | `f433d0b3a994` |  13.349 | 0.803 |  12.424 |  0.122 |           4 |  1 file, 1 dir |
+| mixed_all                  | `c91e0b696fc8` |  20.897 | 0.271 |  17.814 |  2.812 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `3dff464548c3` |  39.318 | 0.306 |  37.921 |  1.092 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `624772a8ae88` |  15.882 | 0.273 |  14.809 |  0.800 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `6875f2d910c8` |  57.129 | 0.315 |  36.228 | 20.587 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `7c722534d2c8` |  26.195 | 0.354 |  24.169 |  1.673 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `b77221109b6c` |  33.105 | 2.097 |  30.510 |  0.499 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `c66b33449ee8` |  26.067 | 0.318 |  24.554 |  1.196 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `e9b5b4f432a6` |  57.012 | 0.318 |  41.575 | 15.118 |           4 |  1 file, 1 dir |
+| nested_individual_files    | `f904af8dd963` |  32.356 | 0.689 |  31.209 |  0.458 |           4 |  1 file, 1 dir |
+| pids_one_regression        | `cd3cb4b17ba0` |  13.369 | 0.305 |  12.916 |  0.148 |           4 |  1 file, 1 dir |
+| source_dir_tree            | `0744164ec172` |  23.930 | 0.619 |  23.008 |  0.302 |           4 |  1 file, 1 dir |
+| source_dir_tree            | `25d07a1a15b9` |  24.043 | 0.467 |  22.706 |  0.869 |           4 |  1 file, 1 dir |
+| source_dir_tree            | `5d07305214c6` |  22.636 | 0.354 |  21.831 |  0.451 |           4 |  1 file, 1 dir |
+| source_dir_tree            | `c7d0b3212bf8` |  39.748 | 0.619 |  39.009 |  0.120 |           4 |  1 file, 1 dir |
+| symlink_input_consumer     | `5c31db5029b1` |   4.168 | 0.272 |   3.484 |  0.412 |           4 |  1 file, 1 dir |
+| timeout_recovery           | `01ac7dd6dd9b` |  27.716 | 3.338 |  23.844 |  0.533 |           4 |  1 file, 1 dir |
 
 ## Notes
 
