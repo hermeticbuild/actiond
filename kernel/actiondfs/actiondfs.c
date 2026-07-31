@@ -2679,106 +2679,32 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 	return NULL;
 }
 
-static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
-				    struct dentry *dentry, umode_t mode, bool excl)
+static int actiondfs_create_staged_file(struct inode *dir,
+					struct dentry *dentry, umode_t mode,
+					const char *target, bool excl)
 {
 	struct actiondfs_node *parent = dir->i_private;
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
 	struct inode *inode;
 	struct path parent_path;
 	struct dentry *real_dentry;
+	size_t target_len = 0;
 	int err;
 
-	if (!sbi->stage_path.dentry)
-		return -EROFS;
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_CALLS);
-	err = actiondfs_ensure_loaded(dir->i_sb, parent);
-	if (err) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_FAILURES);
-		return err;
-	}
-	if (actiondfs_find_cached_child(parent, dentry->d_name.name,
-						dentry->d_name.len)) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_FAILURES);
-		return -EROFS;
-	}
-	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent,
-					       S_IFREG | (mode & 0777), NULL, 0);
-	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
-		goto out_fail;
+	if (target) {
+		target_len = strnlen(target, PATH_MAX);
+		if (!target_len || target_len >= PATH_MAX)
+			return -EINVAL;
 	}
 
-	err = actiondfs_ensure_stage_parent_path(sbi, parent, dentry->d_parent,
-							 &parent_path);
-	if (err)
-		goto out_put_inode;
-	err = mnt_want_write(parent_path.mnt);
-	if (err)
-		goto out_put_path;
-	err = actiondfs_stage_lookup_child(&parent_path, dentry->d_name.name,
-					   dentry->d_name.len, &real_dentry);
-	if (err)
-		goto out_drop_write;
-	if (d_inode(real_dentry)) {
-		err = -EEXIST;
-		actiondfs_stage_unlock_child(&parent_path, real_dentry);
-		goto out_drop_write;
-	}
-	err = vfs_create(mnt_idmap(parent_path.mnt),
-			 d_inode(parent_path.dentry), real_dentry,
-			 mode & 0777, excl);
-	inode_unlock(d_inode(parent_path.dentry));
-	if (err) {
-		dput(real_dentry);
-		goto out_drop_write;
-	}
-	actiondfs_insert_staged_inode(inode, real_dentry);
-	dput(real_dentry);
-	d_instantiate(dentry, inode);
-	inode = NULL;
-	actiondfs_note_stage_change(parent);
-	err = 0;
-
-out_drop_write:
-	mnt_drop_write(parent_path.mnt);
-out_put_path:
-	path_put(&parent_path);
-out_put_inode:
-	if (inode)
-		iput(inode);
-out_fail:
-	if (err)
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_FAILURES);
-	else
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_SUCCESS);
-	return err;
-}
-
-static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
-			     struct dentry *dentry, const char *target)
-{
-	struct actiondfs_node *parent = dir->i_private;
-	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
-	struct inode *inode;
-	struct path parent_path;
-	struct dentry *real_dentry;
-	size_t target_len;
-	int err;
-
-	if (!sbi->stage_path.dentry)
-		return -EROFS;
-	target_len = strnlen(target, PATH_MAX);
-	if (!target_len || target_len >= PATH_MAX)
-		return -EINVAL;
 	err = actiondfs_ensure_loaded(dir->i_sb, parent);
 	if (err)
 		return err;
 	if (actiondfs_find_cached_child(parent, dentry->d_name.name,
 						dentry->d_name.len))
 		return -EROFS;
-	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent,
-					       S_IFLNK | 0777, target, target_len);
+	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent, mode,
+					       target, target_len);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
@@ -2798,29 +2724,55 @@ static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 		actiondfs_stage_unlock_child(&parent_path, real_dentry);
 		goto out_drop_write;
 	}
-	err = vfs_symlink(mnt_idmap(parent_path.mnt),
-			  d_inode(parent_path.dentry), real_dentry, target);
+	if (target)
+		err = vfs_symlink(mnt_idmap(parent_path.mnt),
+				  d_inode(parent_path.dentry), real_dentry,
+				  target);
+	else
+		err = vfs_create(mnt_idmap(parent_path.mnt),
+				 d_inode(parent_path.dentry), real_dentry,
+				 mode & 0777, excl);
 	inode_unlock(d_inode(parent_path.dentry));
-	if (err) {
-		dput(real_dentry);
-		goto out_drop_write;
-	}
-
-	actiondfs_insert_staged_inode(inode, real_dentry);
+	if (!err)
+		actiondfs_insert_staged_inode(inode, real_dentry);
 	dput(real_dentry);
+	if (err)
+		goto out_drop_write;
 	d_instantiate(dentry, inode);
 	inode = NULL;
 	actiondfs_note_stage_change(parent);
-	err = 0;
 
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
 out_put_path:
 	path_put(&parent_path);
 out_put_inode:
-	if (inode)
-		iput(inode);
+	iput(inode);
 	return err;
+}
+
+static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
+				    struct dentry *dentry, umode_t mode, bool excl)
+{
+	int err;
+
+	if (!actiondfs_sbi(dir->i_sb)->stage_path.dentry)
+		return -EROFS;
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_CALLS);
+	err = actiondfs_create_staged_file(dir, dentry,
+					  S_IFREG | (mode & 0777), NULL, excl);
+	actiondfs_stat_inc(err ? ACTIONDFS_STAT_STAGE_CREATE_FAILURES :
+			  ACTIONDFS_STAT_STAGE_CREATE_SUCCESS);
+	return err;
+}
+
+static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
+			     struct dentry *dentry, const char *target)
+{
+	if (!actiondfs_sbi(dir->i_sb)->stage_path.dentry)
+		return -EROFS;
+	return actiondfs_create_staged_file(dir, dentry, S_IFLNK | 0777,
+					    target, false);
 }
 
 static struct dentry *actiondfs_mkdir(struct mnt_idmap *idmap,
