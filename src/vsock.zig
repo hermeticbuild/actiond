@@ -42,7 +42,7 @@ pub const Listener = struct {
     pub fn accept(self: Listener) !Connection {
         if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
-        const rc = linux.accept(self.fd, null, null);
+        const rc = linux.accept4(self.fd, null, null, linux.SOCK.CLOEXEC);
         switch (linux.errno(rc)) {
             .SUCCESS => return .{ .fd = @intCast(rc) },
             else => return error.AcceptFailed,
