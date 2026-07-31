@@ -15,6 +15,7 @@ pub const digest_hex_len = 64;
 pub const digest_shard_hex_len = 2;
 pub const digest_sharded_path_len = digest_shard_hex_len + 1 + digest_hex_len;
 pub const blob_path_len = blob_prefix.len + digest_sharded_path_len;
+pub const max_alloc_blob_bytes: usize = 64 * 1024 * 1024;
 const hex_chars = "0123456789abcdef";
 const copy_buffer_len = 128 * 1024;
 const temp_path_prefix = blob_prefix ++ ".tmp-";
@@ -161,11 +162,11 @@ pub const Store = struct {
 
         var path_buffer: [blob_path_len]u8 = undefined;
         const path = blobSubPath(digest, &path_buffer);
-        self.root.access(io, path, .{}) catch |err| switch (err) {
+        const stat = self.root.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => |e| return e,
         };
-        return true;
+        return stat.kind == .file and stat.size == digest.size_bytes;
     }
 
     pub fn readAlloc(
@@ -174,8 +175,18 @@ pub const Store = struct {
         allocator: std.mem.Allocator,
         digest: Digest,
     ) ![]u8 {
+        return self.readAllocLimit(io, allocator, digest, max_alloc_blob_bytes);
+    }
+
+    pub fn readAllocLimit(
+        self: Store,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        digest: Digest,
+        max_bytes: usize,
+    ) ![]u8 {
         if (digest.isEmpty()) return try allocator.alloc(u8, 0);
-        return self.readAllocOnce(io, allocator, digest);
+        return self.readAllocOnce(io, allocator, digest, max_bytes);
     }
 
     fn readAllocOnce(
@@ -183,10 +194,13 @@ pub const Store = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         digest: Digest,
+        max_bytes: usize,
     ) ![]u8 {
-        const len = std.math.cast(usize, digest.size_bytes) orelse return error.FileTooBig;
         var file = try self.openBlob(io, digest);
         defer file.close(io);
+
+        const len = std.math.cast(usize, digest.size_bytes) orelse return error.FileTooBig;
+        if (len > max_bytes) return error.FileTooBig;
 
         const bytes = try allocator.alloc(u8, len);
         errdefer allocator.free(bytes);
@@ -202,8 +216,38 @@ pub const Store = struct {
     pub fn openBlob(self: Store, io: std.Io, digest: Digest) !std.Io.File {
         var path_buffer: [blob_path_len]u8 = undefined;
         const path = blobSubPath(digest, &path_buffer);
-        if (comptime builtin.os.tag == .linux) return openFileLinuxRetry(self.root, path);
-        return self.root.openFile(io, path, .{});
+        var file = (if (comptime builtin.os.tag == .linux)
+            openFileLinuxRetry(self.root, path)
+        else
+            self.root.openFile(io, path, .{ .follow_symlinks = false })) catch |err| switch (err) {
+            error.SymLinkLoop => return error.FailedPrecondition,
+            else => |e| return e,
+        };
+        errdefer file.close(io);
+
+        const stat = try file.stat(io);
+        if (stat.kind != .file) return error.FailedPrecondition;
+        if (stat.size != digest.size_bytes) return error.InvalidDigestSize;
+        return file;
+    }
+
+    fn validateExistingBlob(self: Store, io: std.Io, digest: Digest) !void {
+        var path_buffer: [blob_path_len]u8 = undefined;
+        const path = blobSubPath(digest, &path_buffer);
+        const stat = self.root.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.IsDir,
+            error.NotDir,
+            => return error.FailedPrecondition,
+            else => |e| return e,
+        };
+        if (stat.kind != .file or stat.size != digest.size_bytes) return error.FailedPrecondition;
+    }
+
+    fn requireExistingBlob(self: Store, io: std.Io, digest: Digest) !void {
+        self.validateExistingBlob(io, digest) catch |err| switch (err) {
+            error.FileNotFound => return error.FailedPrecondition,
+            else => |e| return e,
+        };
     }
 
     pub fn putFilePromoteWithStat(
@@ -214,11 +258,22 @@ pub const Store = struct {
         stat: std.Io.Dir.Stat,
     ) !Digest {
         putFileStatsAdd(&put_file_calls, 1);
+        if (stat.kind != .file) return error.FailedPrecondition;
+
         const open_start = putFileStatsNow(io);
-        var src = try src_dir.openFile(io, src_path, .{});
+        var src = try src_dir.openFile(io, src_path, .{ .follow_symlinks = false });
         addElapsedNs(&put_file_promote_open_ns, open_start, io);
         defer src.close(io);
-        return self.putOpenFilePromote(io, src_dir, src_path, &src, stat);
+
+        const opened_stat = try src.stat(io);
+        if (opened_stat.kind != .file or
+            opened_stat.inode != stat.inode or
+            opened_stat.size != stat.size)
+        {
+            return error.FailedPrecondition;
+        }
+
+        return self.putOpenFilePromote(io, src_dir, src_path, &src, opened_stat);
     }
 
     fn putOpenFilePromote(
@@ -231,20 +286,22 @@ pub const Store = struct {
     ) !Digest {
         if (comptime builtin.os.tag == .linux) {
             return self.putOpenFileByRenameLinux(io, src_dir, src_path, src, stat) catch |err| switch (err) {
-                error.CrossDevice => return self.putOpenFileCopy(io, src),
-                error.PermissionDenied, error.AccessDenied => return self.putOpenFileCopy(io, src),
+                error.CrossDevice => return self.putOpenFileCopy(io, src, stat.size),
+                error.PermissionDenied, error.AccessDenied => return self.putOpenFileCopy(io, src, stat.size),
                 else => |e| return e,
             };
         }
-        return self.putOpenFileCopy(io, src);
+        return self.putOpenFileCopy(io, src, stat.size);
     }
 
     fn putOpenFileCopy(
         self: Store,
         io: std.Io,
         src: *std.Io.File,
+        expected_size: u64,
     ) !Digest {
         putFileStatsAdd(&put_file_copy_calls, 1);
+        try validateOpenFileSize(io, src.*, expected_size);
         try seekFd(src.handle, 0);
         var writer = try BlobWriter.begin(io, self);
         defer writer.deinit(io);
@@ -254,11 +311,15 @@ pub const Store = struct {
         while (true) {
             const n = try readFd(src.handle, &buffer);
             if (n == 0) break;
+            if (@as(u64, n) > expected_size - size_bytes) return error.FailedPrecondition;
             try writer.writeAll(buffer[0..n]);
             size_bytes += n;
         }
 
+        if (size_bytes != expected_size) return error.FailedPrecondition;
+        try validateOpenFileSize(io, src.*, expected_size);
         const digest = try writer.finish(io, null);
+        if (digest.size_bytes != expected_size) return error.FailedPrecondition;
         putFileStatsAdd(&put_file_copy_bytes, size_bytes);
         return digest;
     }
@@ -277,15 +338,17 @@ pub const Store = struct {
         const original_mode = stat.permissions.toMode();
 
         const digest_start = putFileStatsNow(io);
-        const digest = try digestFile(src.*);
+        const digest = try digestFile(src.*, stat.size);
         addElapsedNs(&put_file_promote_digest_ns, digest_start, io);
         putFileStatsAdd(&put_file_promote_digest_bytes, digest.size_bytes);
+        if (digest.size_bytes != stat.size) return error.FailedPrecondition;
+        try validateOpenFileSize(io, src.*, stat.size);
 
         var final_path_buffer: [blob_path_len]u8 = undefined;
         const final_path = blobSubPath(digest, &final_path_buffer);
 
         const preexisting_start = putFileStatsNow(io);
-        if (self.root.statFile(io, final_path, .{})) |_| {
+        if (self.validateExistingBlob(io, digest)) |_| {
             addElapsedNs(&put_file_promote_preexisting_check_ns, preexisting_start, io);
             putFileStatsAdd(&put_file_promote_preexisting_hits, 1);
             putFileStatsAdd(&put_file_promote_existing, 1);
@@ -310,13 +373,18 @@ pub const Store = struct {
         };
         addElapsedNs(&put_file_promote_chmod_ns, chmod_start, io);
 
+        validateOpenFileSize(io, src.*, stat.size) catch |err| {
+            setFdMode(src.handle, original_mode) catch {};
+            return err;
+        };
         const rename_start = putFileStatsNow(io);
         src_dir.renamePreserve(src_path, self.root, final_path, io) catch |err| switch (err) {
-            error.PathAlreadyExists => {
+            error.PathAlreadyExists, error.IsDir, error.NotDir => {
                 const rename_ns = elapsedNsSince(rename_start, io);
                 putFileStatsAdd(&put_file_promote_rename_ns, rename_ns);
                 putFileStatsAdd(&put_file_promote_existing_ns, rename_ns);
                 setFdMode(src.handle, original_mode) catch {};
+                try self.requireExistingBlob(io, digest);
                 putFileStatsAdd(&put_file_promote_existing, 1);
                 return digest;
             },
@@ -516,7 +584,8 @@ pub const BlobWriter = struct {
                 self.file.close(io);
                 self.closed = true;
                 self.store.root.renamePreserve(self.tempPath(), self.store.root, final_path, io) catch |err| switch (err) {
-                    error.PathAlreadyExists => {
+                    error.PathAlreadyExists, error.IsDir, error.NotDir => {
+                        try self.store.requireExistingBlob(io, digest);
                         self.store.root.deleteFile(io, self.tempPath()) catch {};
                     },
                     else => |e| return e,
@@ -525,7 +594,7 @@ pub const BlobWriter = struct {
             .anonymous_linux => {
                 if (comptime builtin.os.tag != .linux) unreachable;
                 publishAnonymousLinux(self.file.handle, self.store.root.handle, final_path) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
+                    error.PathAlreadyExists => try self.store.requireExistingBlob(io, digest),
                     else => |e| return e,
                 };
                 self.file.close(io);
@@ -558,7 +627,7 @@ fn beginAnonymousLinux(store: Store) !?std.Io.File {
             },
             @intCast(cas_blob_mode),
         );
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
             .INTR => continue,
             .INVAL, .ISDIR, .NOENT, .OPNOTSUPP => return null,
@@ -607,7 +676,7 @@ fn linkAnonymousLinux(
 
     while (true) {
         const rc = std.os.linux.linkat(old_fd, old_path, dest_dir_fd, dest_path_z, flags);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
             .ACCES => return error.AccessDenied,
@@ -682,16 +751,23 @@ fn digestParentPath(path: []const u8) []const u8 {
     return path[0 .. path.len - (digest_hex_len + 1)];
 }
 
-fn digestFile(file: std.Io.File) !Digest {
+fn validateOpenFileSize(io: std.Io, file: std.Io.File, expected_size: u64) !void {
+    const stat = try file.stat(io);
+    if (stat.kind != .file or stat.size != expected_size) return error.FailedPrecondition;
+}
+
+fn digestFile(file: std.Io.File, expected_size: u64) !Digest {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var size_bytes: u64 = 0;
     var buffer: [copy_buffer_len]u8 = undefined;
     while (true) {
         const n = try readFd(file.handle, &buffer);
         if (n == 0) break;
+        if (@as(u64, n) > expected_size - size_bytes) return error.FailedPrecondition;
         hasher.update(buffer[0..n]);
         size_bytes += n;
     }
+    if (size_bytes != expected_size) return error.FailedPrecondition;
 
     var hash: [32]u8 = undefined;
     hasher.final(&hash);
@@ -726,7 +802,7 @@ fn setFdMode(fd: std.Io.File.Handle, mode: std.posix.mode_t) !void {
     if (comptime builtin.os.tag != .linux) unreachable;
     while (true) {
         const rc = std.os.linux.fchmod(fd, @intCast(mode));
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
             .ACCES => return error.AccessDenied,
@@ -769,10 +845,10 @@ fn openFileLinuxRetry(dir: std.Io.Dir, path: []const u8) !std.Io.File {
         const rc = std.os.linux.openat(
             dir.handle,
             &path_z,
-            .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
             0,
         );
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => return .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
             .INTR => continue,
             .STALE => {
@@ -802,7 +878,7 @@ fn sleepStaleRetry() void {
         .sec = 0,
         .nsec = stale_retry_sleep_ns,
     };
-    while (std.posix.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
+    while (std.os.linux.errno(std.os.linux.nanosleep(&request, &request)) == .INTR) {}
 }
 
 fn writeFdAll(fd: std.Io.File.Handle, bytes: []const u8) !void {
@@ -848,6 +924,10 @@ test "Digest computes stable SHA-256 and converts through REAPI" {
     var reapi_hash: [64]u8 = undefined;
     const round_trip = try Digest.fromReapi(digest.toReapi(&reapi_hash));
     try std.testing.expect(digest.eql(round_trip));
+    try std.testing.expectError(
+        error.InvalidDigestSize,
+        Digest.fromReapi(.{ .hash = digest.formatHex(&reapi_hash), .size_bytes = -1 }),
+    );
 }
 
 test "CAS subpaths use two-character digest prefix sharding" {
@@ -879,6 +959,109 @@ test "Store writes blobs once and reads them by digest" {
     try std.testing.expectEqualStrings("hello", bytes);
 }
 
+test "Store rejects existing blobs requested with forged digest sizes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    const actual = try store.putBytes(std.testing.io, "hello");
+    const forged_short: Digest = .{ .hash = actual.hash, .size_bytes = 4 };
+    const forged_long: Digest = .{ .hash = actual.hash, .size_bytes = 6 };
+    const forged_huge: Digest = .{ .hash = actual.hash, .size_bytes = std.math.maxInt(u64) };
+
+    try std.testing.expect(try store.has(std.testing.io, actual));
+    try std.testing.expect(!try store.has(std.testing.io, forged_short));
+    try std.testing.expect(!try store.has(std.testing.io, forged_long));
+    try std.testing.expect(!try store.has(std.testing.io, forged_huge));
+
+    var empty_storage: [0]u8 = .{};
+    var fixed_allocator = std.heap.FixedBufferAllocator.init(&empty_storage);
+    for ([_]Digest{ forged_short, forged_long, forged_huge }) |forged| {
+        try std.testing.expectError(
+            error.InvalidDigestSize,
+            store.readAlloc(std.testing.io, fixed_allocator.allocator(), forged),
+        );
+        try std.testing.expectError(error.InvalidDigestSize, store.openBlob(std.testing.io, forged));
+    }
+}
+
+test "Store rejects oversized blob allocations before allocating" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    const oversized: Digest = .{
+        .hash = Digest.fromBytes("oversized allocation").hash,
+        .size_bytes = max_alloc_blob_bytes + 1,
+    };
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(oversized, &path_buffer);
+    try tmp.dir.createDirPath(std.testing.io, digestParentPath(path));
+    var file = try tmp.dir.createFile(std.testing.io, path, .{});
+    defer file.close(std.testing.io);
+    try file.setLength(std.testing.io, oversized.size_bytes);
+
+    var empty_storage: [0]u8 = .{};
+    var fixed_allocator = std.heap.FixedBufferAllocator.init(&empty_storage);
+    try std.testing.expectError(
+        error.FileTooBig,
+        store.readAlloc(std.testing.io, fixed_allocator.allocator(), oversized),
+    );
+    try std.testing.expectError(
+        error.FileTooBig,
+        store.readAllocLimit(std.testing.io, fixed_allocator.allocator(), oversized, max_alloc_blob_bytes),
+    );
+    try std.testing.expect(try store.has(std.testing.io, oversized));
+}
+
+test "Store rejects nonregular objects at CAS blob paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    const digest = Digest.fromBytes("directory masquerading as a CAS blob");
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    try tmp.dir.createDirPath(std.testing.io, path);
+
+    try std.testing.expect(!try store.has(std.testing.io, digest));
+    try std.testing.expectError(error.FailedPrecondition, store.openBlob(std.testing.io, digest));
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.readAlloc(std.testing.io, std.testing.allocator, digest),
+    );
+}
+
+test "Store does not follow symlinks at CAS blob paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    const digest = Digest.fromBytes("symlink target");
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    var parent = try tmp.dir.createDirPathOpen(std.testing.io, digestParentPath(path), .{});
+    defer parent.close(std.testing.io);
+    try parent.writeFile(std.testing.io, .{
+        .sub_path = "actual",
+        .data = "symlink target",
+    });
+    try parent.symLink(std.testing.io, "actual", path[path.len - digest_hex_len ..], .{});
+
+    try std.testing.expect(!try store.has(std.testing.io, digest));
+    try std.testing.expectError(error.FailedPrecondition, store.openBlob(std.testing.io, digest));
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.readAlloc(std.testing.io, std.testing.allocator, digest),
+    );
+}
+
 test "Store writes known blobs atomically and ignores existing blob" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -890,6 +1073,31 @@ test "Store writes known blobs atomically and ignores existing blob" {
     try std.testing.expect(try store.has(std.testing.io, digest));
     try std.testing.expectError(error.InvalidDigestSize, store.putKnownBytes(std.testing.io, digest, "hell"));
     try std.testing.expectError(error.DigestMismatch, store.putKnownBytes(std.testing.io, digest, "jello"));
+}
+
+test "Store refuses to publish over a truncated existing CAS blob" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    const payload = "complete CAS contents";
+    const digest = Digest.fromBytes(payload);
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    try tmp.dir.createDirPath(std.testing.io, digestParentPath(path));
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = path,
+        .data = "bad",
+    });
+
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.putKnownBytes(std.testing.io, digest, payload),
+    );
+    try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(std.testing.io, path, .{})).size);
+    try std.testing.expect(!try store.has(std.testing.io, digest));
 }
 
 test "BlobWriter streams data into CAS" {
@@ -908,6 +1116,29 @@ test "BlobWriter streams data into CAS" {
     try std.testing.expectEqualStrings("hello", bytes);
 }
 
+test "BlobWriter refuses to publish over an existing CAS directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    const payload = "directory collision payload";
+    const digest = Digest.fromBytes(payload);
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    try tmp.dir.createDirPath(std.testing.io, path);
+
+    var writer = try store.beginBlobWriter(std.testing.io);
+    defer writer.deinit(std.testing.io);
+    try writer.writeAll(payload);
+    try std.testing.expectError(error.FailedPrecondition, writer.finish(std.testing.io, digest));
+    try std.testing.expectEqual(
+        std.Io.File.Kind.directory,
+        (try tmp.dir.statFile(std.testing.io, path, .{ .follow_symlinks = false })).kind,
+    );
+}
+
 test "Store putFile keeps the source file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -924,11 +1155,183 @@ test "Store putFile keeps the source file" {
 
     var src = try stage.openFile(std.testing.io, "out.txt", .{});
     defer src.close(std.testing.io);
-    const digest = try store.putOpenFileCopy(std.testing.io, &src);
+    const digest = try store.putOpenFileCopy(std.testing.io, &src, "copy me".len);
     try std.testing.expect(digest.eql(Digest.fromBytes("copy me")));
     try std.testing.expect(try store.has(std.testing.io, digest));
     const stat = try stage.statFile(std.testing.io, "out.txt", .{});
     try std.testing.expectEqual(@as(u64, "copy me".len), stat.size);
+}
+
+test "Store file promotion rejects growth after the file was inspected" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "original",
+    });
+    const original_stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "original but grown after inspection",
+    });
+    const grown_stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    try std.testing.expectEqual(original_stat.inode, grown_stat.inode);
+    try std.testing.expect(grown_stat.size > original_stat.size);
+
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.putFilePromoteWithStat(std.testing.io, stage, "out.txt", original_stat),
+    );
+    try std.testing.expect(!try store.has(
+        std.testing.io,
+        Digest.fromBytes("original but grown after inspection"),
+    ));
+}
+
+test "Store file copying rejects bytes beyond the expected file size" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "original but grown after inspection",
+    });
+    var src = try stage.openFile(std.testing.io, "out.txt", .{});
+    defer src.close(std.testing.io);
+
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.putOpenFileCopy(std.testing.io, &src, "original".len),
+    );
+    try seekFd(src.handle, 0);
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        digestFile(src, "original".len),
+    );
+    try std.testing.expect(!try store.has(
+        std.testing.io,
+        Digest.fromBytes("original but grown after inspection"),
+    ));
+}
+
+test "Store file promotion refuses an existing CAS symlink" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    const payload = "promoted symlink collision";
+    const digest = Digest.fromBytes(payload);
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    var blob_parent = try tmp.dir.createDirPathOpen(std.testing.io, digestParentPath(path), .{});
+    defer blob_parent.close(std.testing.io);
+    try blob_parent.writeFile(std.testing.io, .{
+        .sub_path = "actual",
+        .data = payload,
+    });
+    try blob_parent.symLink(std.testing.io, "actual", path[path.len - digest_hex_len ..], .{});
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = payload,
+    });
+    const stat = try stage.statFile(std.testing.io, "out.txt", .{});
+
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.putFilePromoteWithStat(std.testing.io, stage, "out.txt", stat),
+    );
+    try std.testing.expectEqual(
+        std.Io.File.Kind.sym_link,
+        (try tmp.dir.statFile(std.testing.io, path, .{ .follow_symlinks = false })).kind,
+    );
+    try std.testing.expectEqual(stat.inode, (try stage.statFile(std.testing.io, "out.txt", .{})).inode);
+}
+
+test "Store file promotion rejects a symlink replacing the inspected file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "external.txt",
+        .data = "external contents",
+    });
+    const external_before = try tmp.dir.statFile(std.testing.io, "external.txt", .{});
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "staged contents",
+    });
+    const original_stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    try stage.deleteFile(std.testing.io, "out.txt");
+    try stage.symLink(std.testing.io, "../external.txt", "out.txt", .{});
+
+    try std.testing.expectError(
+        error.SymLinkLoop,
+        store.putFilePromoteWithStat(std.testing.io, stage, "out.txt", original_stat),
+    );
+
+    const external_after = try tmp.dir.statFile(std.testing.io, "external.txt", .{});
+    try std.testing.expectEqual(external_before.inode, external_after.inode);
+    try std.testing.expectEqual(external_before.permissions.toMode(), external_after.permissions.toMode());
+    try std.testing.expectEqual(external_before.size, external_after.size);
+    try std.testing.expectEqual(
+        std.Io.File.Kind.sym_link,
+        (try stage.statFile(std.testing.io, "out.txt", .{ .follow_symlinks = false })).kind,
+    );
+    try std.testing.expect(!try store.has(std.testing.io, Digest.fromBytes("external contents")));
+}
+
+test "Store file promotion rejects a different file replacing the inspected file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+
+    var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
+    defer stage.close(std.testing.io);
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "original contents",
+    });
+    var original_file = try stage.openFile(std.testing.io, "out.txt", .{});
+    defer original_file.close(std.testing.io);
+    const original_stat = try original_file.stat(std.testing.io);
+    try stage.deleteFile(std.testing.io, "out.txt");
+    try stage.writeFile(std.testing.io, .{
+        .sub_path = "out.txt",
+        .data = "replacement contents",
+    });
+
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        store.putFilePromoteWithStat(std.testing.io, stage, "out.txt", original_stat),
+    );
+
+    const replacement_stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    try std.testing.expectEqual(@as(u64, "replacement contents".len), replacement_stat.size);
+    try std.testing.expect(!try store.has(std.testing.io, Digest.fromBytes("replacement contents")));
 }
 
 test "Store promotes same-filesystem files into CAS" {
@@ -946,10 +1349,8 @@ test "Store promotes same-filesystem files into CAS" {
     });
 
     const before = snapshotPutFileStats();
-    var src = try stage.openFile(std.testing.io, "out.txt", .{});
-    defer src.close(std.testing.io);
-    const stat = try src.stat(std.testing.io);
-    const digest = try store.putOpenFilePromote(std.testing.io, stage, "out.txt", &src, stat);
+    const stat = try stage.statFile(std.testing.io, "out.txt", .{});
+    const digest = try store.putFilePromoteWithStat(std.testing.io, stage, "out.txt", stat);
     const after = snapshotPutFileStats();
     try std.testing.expect(digest.eql(Digest.fromBytes("promote me")));
     try std.testing.expect(try store.has(std.testing.io, digest));

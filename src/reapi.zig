@@ -1,6 +1,13 @@
 const std = @import("std");
 const protobuf = @import("protobuf_wire.zig");
 
+const max_decoded_repeated_entries = 256 * 1024;
+
+fn reserveDecodedEntry(count: *usize) !void {
+    if (count.* >= max_decoded_repeated_entries) return error.TooManyOutputEntries;
+    count.* += 1;
+}
+
 pub const Digest = struct {
     hash: []const u8 = "",
     size_bytes: i64 = 0,
@@ -74,7 +81,17 @@ pub const Status = struct {
         var out: Status = .{};
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
-                1 => out.code = @enumFromInt(try reader.readInt32()),
+                1 => {
+                    const value = try reader.readInt32();
+                    inline for (@typeInfo(StatusCode).@"enum".fields) |field| {
+                        if (value == field.value) {
+                            out.code = @enumFromInt(value);
+                            break;
+                        }
+                    } else {
+                        return error.InvalidEnumValue;
+                    }
+                },
                 2 => out.message = try reader.readString(),
                 else => try reader.skipField(tag.wire_type),
             }
@@ -112,9 +129,57 @@ pub const Timestamp = struct {
     }
 };
 
+pub const Duration = struct {
+    seconds: i64 = 0,
+    nanos: i32 = 0,
+
+    pub fn encode(self: Duration, writer: *protobuf.Writer) !void {
+        if (self.seconds != 0) try writer.writeInt64Field(1, self.seconds);
+        if (self.nanos != 0) try writer.writeInt32Field(2, self.nanos);
+    }
+
+    pub fn encodedLen(self: Duration) usize {
+        var len: usize = 0;
+        if (self.seconds != 0) len += protobuf.int64FieldLen(1, self.seconds);
+        if (self.nanos != 0) len += protobuf.int32FieldLen(2, self.nanos);
+        return len;
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !Duration {
+        var out: Duration = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.seconds = try reader.readInt64(),
+                2 => out.nanos = try reader.readInt32(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        return out;
+    }
+
+    pub fn toNanoseconds(self: Duration) !u64 {
+        if (self.seconds < 0 or self.nanos < 0 or self.nanos >= std.time.ns_per_s) {
+            return error.InvalidActionTimeout;
+        }
+        const seconds: u64 = @intCast(self.seconds);
+        const seconds_ns = std.math.mul(u64, seconds, std.time.ns_per_s) catch {
+            return error.InvalidActionTimeout;
+        };
+        return std.math.add(u64, seconds_ns, @as(u64, @intCast(self.nanos))) catch {
+            return error.InvalidActionTimeout;
+        };
+    }
+};
+
 pub const DigestFunction = enum(u32) {
     unknown = 0,
     sha256 = 1,
+};
+
+pub const SymlinkAbsolutePathStrategy = enum(u32) {
+    unknown = 0,
+    disallowed = 1,
+    allowed = 2,
 };
 
 pub const SemVer = struct {
@@ -153,11 +218,14 @@ pub const CacheCapabilities = struct {
     digest_functions: []const DigestFunction = &.{},
     action_cache_update_capabilities: ?ActionCacheUpdateCapabilities = null,
     max_batch_total_size_bytes: i64 = 0,
+    symlink_absolute_path_strategy: SymlinkAbsolutePathStrategy = .unknown,
 
     pub fn encode(self: CacheCapabilities, writer: *protobuf.Writer) !void {
         for (self.digest_functions) |function| try writer.writeEnumField(1, function);
         if (self.action_cache_update_capabilities) |caps| try writer.writeMessageField(2, caps);
         if (self.max_batch_total_size_bytes != 0) try writer.writeInt64Field(4, self.max_batch_total_size_bytes);
+        if (self.symlink_absolute_path_strategy != .unknown)
+            try writer.writeEnumField(5, self.symlink_absolute_path_strategy);
     }
 
     pub fn encodedLen(self: CacheCapabilities) usize {
@@ -165,6 +233,8 @@ pub const CacheCapabilities = struct {
         for (self.digest_functions) |function| len += protobuf.enumFieldLen(1, function);
         if (self.action_cache_update_capabilities) |caps| len += protobuf.messageFieldLen(2, caps.encodedLen());
         if (self.max_batch_total_size_bytes != 0) len += protobuf.int64FieldLen(4, self.max_batch_total_size_bytes);
+        if (self.symlink_absolute_path_strategy != .unknown)
+            len += protobuf.enumFieldLen(5, self.symlink_absolute_path_strategy);
         return len;
     }
 };
@@ -323,21 +393,38 @@ pub const Command = struct {
         errdefer output_paths.deinit(allocator);
 
         var out: Command = .{};
+        errdefer out.deinit(allocator);
+        var decoded_entries: usize = 0;
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
-                1 => try arguments.append(allocator, try reader.readString()),
+                1 => {
+                    try reserveDecodedEntry(&decoded_entries);
+                    try arguments.append(allocator, try reader.readString());
+                },
                 2 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try environment_variables.append(allocator, try EnvironmentVariable.decode(&nested));
                 },
-                3 => try output_files.append(allocator, try reader.readString()),
-                4 => try output_directories.append(allocator, try reader.readString()),
+                3 => {
+                    try reserveDecodedEntry(&decoded_entries);
+                    try output_files.append(allocator, try reader.readString());
+                },
+                4 => {
+                    try reserveDecodedEntry(&decoded_entries);
+                    try output_directories.append(allocator, try reader.readString());
+                },
                 5 => {
                     var nested = try reader.readMessage();
-                    out.platform = try Platform.decodeOwned(allocator, &nested);
+                    const platform = try Platform.decodeOwned(allocator, &nested);
+                    if (out.platform) |*previous| previous.deinit(allocator);
+                    out.platform = platform;
                 },
                 6 => out.working_directory = try reader.readString(),
-                7 => try output_paths.append(allocator, try reader.readString()),
+                7 => {
+                    try reserveDecodedEntry(&decoded_entries);
+                    try output_paths.append(allocator, try reader.readString());
+                },
                 9 => out.output_directory_format = try reader.readEnum(OutputDirectoryFormat),
                 else => try reader.skipField(tag.wire_type),
             }
@@ -355,6 +442,7 @@ pub const Command = struct {
 pub const Action = struct {
     command_digest: ?Digest = null,
     input_root_digest: ?Digest = null,
+    timeout: ?Duration = null,
     do_not_cache: bool = false,
     platform: ?Platform = null,
 
@@ -366,6 +454,7 @@ pub const Action = struct {
     pub fn encode(self: Action, writer: *protobuf.Writer) !void {
         if (self.command_digest) |digest| try writer.writeMessageField(1, digest);
         if (self.input_root_digest) |digest| try writer.writeMessageField(2, digest);
+        if (self.timeout) |timeout| try writer.writeMessageField(6, timeout);
         if (self.do_not_cache) try writer.writeBoolField(7, true);
         if (self.platform) |platform| try writer.writeMessageField(10, platform);
     }
@@ -374,6 +463,7 @@ pub const Action = struct {
         var len: usize = 0;
         if (self.command_digest) |digest| len += protobuf.messageFieldLen(1, digest.encodedLen());
         if (self.input_root_digest) |digest| len += protobuf.messageFieldLen(2, digest.encodedLen());
+        if (self.timeout) |timeout| len += protobuf.messageFieldLen(6, timeout.encodedLen());
         if (self.do_not_cache) len += protobuf.boolFieldLen(7);
         if (self.platform) |platform| len += protobuf.messageFieldLen(10, platform.encodedLen());
         return len;
@@ -390,6 +480,10 @@ pub const Action = struct {
                 2 => {
                     var nested = try reader.readMessage();
                     out.input_root_digest = try Digest.decode(&nested);
+                },
+                6 => {
+                    var nested = try reader.readMessage();
+                    out.timeout = try Duration.decode(&nested);
                 },
                 7 => out.do_not_cache = try reader.readBool(),
                 10 => try reader.skipField(tag.wire_type),
@@ -413,10 +507,16 @@ pub const Action = struct {
                     var nested = try reader.readMessage();
                     out.input_root_digest = try Digest.decode(&nested);
                 },
+                6 => {
+                    var nested = try reader.readMessage();
+                    out.timeout = try Duration.decode(&nested);
+                },
                 7 => out.do_not_cache = try reader.readBool(),
                 10 => {
                     var nested = try reader.readMessage();
-                    out.platform = try Platform.decodeOwned(allocator, &nested);
+                    const platform = try Platform.decodeOwned(allocator, &nested);
+                    if (out.platform) |*previous| previous.deinit(allocator);
+                    out.platform = platform;
                 },
                 else => try reader.skipField(tag.wire_type),
             }
@@ -476,10 +576,12 @@ pub const Platform = struct {
     pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !Platform {
         var properties: std.ArrayListUnmanaged(Property) = .empty;
         errdefer properties.deinit(allocator);
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try properties.append(allocator, try Property.decode(&nested));
                 },
@@ -559,37 +661,96 @@ pub const DirectoryNode = struct {
     }
 };
 
+pub const SymlinkNode = struct {
+    name: []const u8 = "",
+    target: []const u8 = "",
+
+    pub fn validate(self: SymlinkNode) !void {
+        if (self.name.len == 0 or
+            self.name.len > std.os.linux.NAME_MAX or
+            std.mem.indexOfScalar(u8, self.name, '/') != null or
+            std.mem.indexOfScalar(u8, self.name, 0) != null or
+            std.mem.eql(u8, self.name, ".") or
+            std.mem.eql(u8, self.name, ".."))
+        {
+            return error.InvalidSymlinkName;
+        }
+        try validateSymlinkTarget(self.target);
+    }
+
+    pub fn encode(self: SymlinkNode, writer: *protobuf.Writer) !void {
+        try self.validate();
+        try writer.writeStringField(1, self.name);
+        try writer.writeStringField(2, self.target);
+    }
+
+    pub fn encodedLen(self: SymlinkNode) usize {
+        return protobuf.stringFieldLen(1, self.name.len) +
+            protobuf.stringFieldLen(2, self.target.len);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !SymlinkNode {
+        var out: SymlinkNode = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.name = try reader.readString(),
+                2 => out.target = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        try out.validate();
+        return out;
+    }
+};
+
+fn validateSymlinkTarget(target: []const u8) !void {
+    if (target.len == 0 or
+        target.len >= std.os.linux.PATH_MAX or
+        std.mem.indexOfScalar(u8, target, 0) != null)
+    {
+        return error.InvalidSymlinkTarget;
+    }
+}
+
 pub const Directory = struct {
     files: []const FileNode = &.{},
     directories: []const DirectoryNode = &.{},
+    symlinks: []const SymlinkNode = &.{},
 
     pub fn deinit(self: *Directory, allocator: std.mem.Allocator) void {
         allocator.free(self.files);
         allocator.free(self.directories);
+        allocator.free(self.symlinks);
         self.* = .{};
     }
 
     pub fn validateCanonical(self: Directory) !void {
-        if (self.files.len > 1) {
-            for (self.files[1..], 1..) |file, index| {
-                if (std.mem.order(u8, self.files[index - 1].name, file.name) != .lt)
-                    return error.NonCanonicalDirectory;
-            }
-        }
-        if (self.directories.len > 1) {
-            for (self.directories[1..], 1..) |directory, index| {
-                if (std.mem.order(u8, self.directories[index - 1].name, directory.name) != .lt)
-                    return error.NonCanonicalDirectory;
-            }
-        }
+        try validateSortedNames(self.files);
+        try validateSortedNames(self.directories);
+        try validateSortedNames(self.symlinks);
+        for (self.symlinks) |symlink| try symlink.validate();
 
-        var file_index: usize = 0;
-        var directory_index: usize = 0;
-        while (file_index < self.files.len and directory_index < self.directories.len) {
-            switch (std.mem.order(u8, self.files[file_index].name, self.directories[directory_index].name)) {
+        try validateDisjointNames(self.files, self.directories);
+        try validateDisjointNames(self.files, self.symlinks);
+        try validateDisjointNames(self.directories, self.symlinks);
+    }
+
+    fn validateSortedNames(nodes: anytype) !void {
+        if (nodes.len <= 1) return;
+        for (nodes[1..], 1..) |node, index| {
+            if (std.mem.order(u8, nodes[index - 1].name, node.name) != .lt)
+                return error.NonCanonicalDirectory;
+        }
+    }
+
+    fn validateDisjointNames(left: anytype, right: anytype) !void {
+        var left_index: usize = 0;
+        var right_index: usize = 0;
+        while (left_index < left.len and right_index < right.len) {
+            switch (std.mem.order(u8, left[left_index].name, right[right_index].name)) {
                 .eq => return error.NonCanonicalDirectory,
-                .lt => file_index += 1,
-                .gt => directory_index += 1,
+                .lt => left_index += 1,
+                .gt => right_index += 1,
             }
         }
     }
@@ -598,30 +759,50 @@ pub const Directory = struct {
         try self.validateCanonical();
         for (self.files) |file| try writer.writeMessageField(1, file);
         for (self.directories) |directory| try writer.writeMessageField(2, directory);
+        for (self.symlinks) |symlink| try writer.writeMessageField(3, symlink);
     }
 
     pub fn encodedLen(self: Directory) usize {
         var len: usize = 0;
         for (self.files) |file| len += protobuf.messageFieldLen(1, file.encodedLen());
         for (self.directories) |directory| len += protobuf.messageFieldLen(2, directory.encodedLen());
+        for (self.symlinks) |symlink| len += protobuf.messageFieldLen(3, symlink.encodedLen());
         return len;
     }
 
     pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !Directory {
+        var decoded_entries: usize = 0;
+        return decodeOwnedWithBudget(allocator, reader, &decoded_entries);
+    }
+
+    fn decodeOwnedWithBudget(
+        allocator: std.mem.Allocator,
+        reader: *protobuf.Reader,
+        decoded_entries: *usize,
+    ) !Directory {
         var files: std.ArrayListUnmanaged(FileNode) = .empty;
         errdefer files.deinit(allocator);
         var directories: std.ArrayListUnmanaged(DirectoryNode) = .empty;
         errdefer directories.deinit(allocator);
+        var symlinks: std.ArrayListUnmanaged(SymlinkNode) = .empty;
+        errdefer symlinks.deinit(allocator);
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => {
+                    try reserveDecodedEntry(decoded_entries);
                     var nested = try reader.readMessage();
                     try files.append(allocator, try FileNode.decode(&nested));
                 },
                 2 => {
+                    try reserveDecodedEntry(decoded_entries);
                     var nested = try reader.readMessage();
                     try directories.append(allocator, try DirectoryNode.decode(&nested));
+                },
+                3 => {
+                    try reserveDecodedEntry(decoded_entries);
+                    var nested = try reader.readMessage();
+                    try symlinks.append(allocator, try SymlinkNode.decode(&nested));
                 },
                 else => try reader.skipField(tag.wire_type),
             }
@@ -631,9 +812,12 @@ pub const Directory = struct {
         errdefer allocator.free(file_slice);
         const directory_slice = try directories.toOwnedSlice(allocator);
         errdefer allocator.free(directory_slice);
+        const symlink_slice = try symlinks.toOwnedSlice(allocator);
+        errdefer allocator.free(symlink_slice);
         const out = Directory{
             .files = file_slice,
             .directories = directory_slice,
+            .symlinks = symlink_slice,
         };
         try out.validateCanonical();
         return out;
@@ -695,6 +879,9 @@ pub const ExecuteRequest = struct {
 pub const ActionResult = struct {
     output_files: []const OutputFile = &.{},
     output_directories: []const OutputDirectory = &.{},
+    output_file_symlinks: []const OutputSymlink = &.{},
+    output_directory_symlinks: []const OutputSymlink = &.{},
+    output_symlinks: []const OutputSymlink = &.{},
     exit_code: i32 = 0,
     stdout_digest: ?Digest = null,
     stderr_digest: ?Digest = null,
@@ -703,6 +890,9 @@ pub const ActionResult = struct {
     pub fn deinit(self: *ActionResult, allocator: std.mem.Allocator) void {
         allocator.free(self.output_files);
         allocator.free(self.output_directories);
+        allocator.free(self.output_file_symlinks);
+        allocator.free(self.output_directory_symlinks);
+        allocator.free(self.output_symlinks);
         self.* = .{};
     }
 
@@ -713,6 +903,9 @@ pub const ActionResult = struct {
         if (self.stdout_digest) |digest| try writer.writeMessageField(6, digest);
         if (self.stderr_digest) |digest| try writer.writeMessageField(8, digest);
         if (self.execution_metadata) |metadata| try writer.writeMessageField(9, metadata);
+        for (self.output_file_symlinks) |symlink| try writer.writeMessageField(10, symlink);
+        for (self.output_directory_symlinks) |symlink| try writer.writeMessageField(11, symlink);
+        for (self.output_symlinks) |symlink| try writer.writeMessageField(12, symlink);
     }
 
     pub fn encodedLen(self: ActionResult) usize {
@@ -723,6 +916,9 @@ pub const ActionResult = struct {
         if (self.stdout_digest) |digest| len += protobuf.messageFieldLen(6, digest.encodedLen());
         if (self.stderr_digest) |digest| len += protobuf.messageFieldLen(8, digest.encodedLen());
         if (self.execution_metadata) |metadata| len += protobuf.messageFieldLen(9, metadata.encodedLen());
+        for (self.output_file_symlinks) |symlink| len += protobuf.messageFieldLen(10, symlink.encodedLen());
+        for (self.output_directory_symlinks) |symlink| len += protobuf.messageFieldLen(11, symlink.encodedLen());
+        for (self.output_symlinks) |symlink| len += protobuf.messageFieldLen(12, symlink.encodedLen());
         return len;
     }
 
@@ -732,6 +928,7 @@ pub const ActionResult = struct {
             switch (tag.field_number) {
                 2 => try reader.skipField(tag.wire_type),
                 3 => try reader.skipField(tag.wire_type),
+                10, 11, 12 => try reader.skipField(tag.wire_type),
                 4 => out.exit_code = try reader.readInt32(),
                 6 => {
                     var nested = try reader.readMessage();
@@ -756,15 +953,24 @@ pub const ActionResult = struct {
         errdefer output_files.deinit(allocator);
         var output_directories: std.ArrayListUnmanaged(OutputDirectory) = .empty;
         errdefer output_directories.deinit(allocator);
+        var output_file_symlinks: std.ArrayListUnmanaged(OutputSymlink) = .empty;
+        errdefer output_file_symlinks.deinit(allocator);
+        var output_directory_symlinks: std.ArrayListUnmanaged(OutputSymlink) = .empty;
+        errdefer output_directory_symlinks.deinit(allocator);
+        var output_symlinks: std.ArrayListUnmanaged(OutputSymlink) = .empty;
+        errdefer output_symlinks.deinit(allocator);
         var out: ActionResult = .{};
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 2 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try output_files.append(allocator, try OutputFile.decode(&nested));
                 },
                 3 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try output_directories.append(allocator, try OutputDirectory.decode(&nested));
                 },
@@ -781,12 +987,40 @@ pub const ActionResult = struct {
                     var nested = try reader.readMessage();
                     out.execution_metadata = try ExecutedActionMetadata.decode(&nested);
                 },
+                10 => {
+                    try reserveDecodedEntry(&decoded_entries);
+                    var nested = try reader.readMessage();
+                    try output_file_symlinks.append(allocator, try OutputSymlink.decode(&nested));
+                },
+                11 => {
+                    try reserveDecodedEntry(&decoded_entries);
+                    var nested = try reader.readMessage();
+                    try output_directory_symlinks.append(allocator, try OutputSymlink.decode(&nested));
+                },
+                12 => {
+                    try reserveDecodedEntry(&decoded_entries);
+                    var nested = try reader.readMessage();
+                    try output_symlinks.append(allocator, try OutputSymlink.decode(&nested));
+                },
                 else => try reader.skipField(tag.wire_type),
             }
         }
 
-        out.output_files = try output_files.toOwnedSlice(allocator);
-        out.output_directories = try output_directories.toOwnedSlice(allocator);
+        const output_file_slice = try output_files.toOwnedSlice(allocator);
+        errdefer allocator.free(output_file_slice);
+        const output_directory_slice = try output_directories.toOwnedSlice(allocator);
+        errdefer allocator.free(output_directory_slice);
+        const output_file_symlink_slice = try output_file_symlinks.toOwnedSlice(allocator);
+        errdefer allocator.free(output_file_symlink_slice);
+        const output_directory_symlink_slice = try output_directory_symlinks.toOwnedSlice(allocator);
+        errdefer allocator.free(output_directory_symlink_slice);
+        const output_symlink_slice = try output_symlinks.toOwnedSlice(allocator);
+
+        out.output_files = output_file_slice;
+        out.output_directories = output_directory_slice;
+        out.output_file_symlinks = output_file_symlink_slice;
+        out.output_directory_symlinks = output_directory_symlink_slice;
+        out.output_symlinks = output_symlink_slice;
         return out;
     }
 };
@@ -954,6 +1188,57 @@ pub const OutputDirectory = struct {
                 else => try reader.skipField(tag.wire_type),
             }
         }
+        return out;
+    }
+};
+
+pub const OutputSymlink = struct {
+    path: []const u8 = "",
+    target: []const u8 = "",
+
+    pub fn validate(self: OutputSymlink) !void {
+        if (self.path.len == 0 or
+            self.path.len >= std.os.linux.PATH_MAX or
+            self.path[0] == '/' or
+            std.mem.indexOfScalar(u8, self.path, 0) != null)
+        {
+            return error.InvalidOutputSymlinkPath;
+        }
+
+        var components = std.mem.splitScalar(u8, self.path, '/');
+        while (components.next()) |component| {
+            if (component.len == 0 or
+                component.len > std.os.linux.NAME_MAX or
+                std.mem.eql(u8, component, ".") or
+                std.mem.eql(u8, component, ".."))
+            {
+                return error.InvalidOutputSymlinkPath;
+            }
+        }
+        try validateSymlinkTarget(self.target);
+    }
+
+    pub fn encode(self: OutputSymlink, writer: *protobuf.Writer) !void {
+        try self.validate();
+        try writer.writeStringField(1, self.path);
+        try writer.writeStringField(2, self.target);
+    }
+
+    pub fn encodedLen(self: OutputSymlink) usize {
+        return protobuf.stringFieldLen(1, self.path.len) +
+            protobuf.stringFieldLen(2, self.target.len);
+    }
+
+    pub fn decode(reader: *protobuf.Reader) !OutputSymlink {
+        var out: OutputSymlink = .{};
+        while (try reader.next()) |tag| {
+            switch (tag.field_number) {
+                1 => out.path = try reader.readString(),
+                2 => out.target = try reader.readString(),
+                else => try reader.skipField(tag.wire_type),
+            }
+        }
+        try out.validate();
         return out;
     }
 };
@@ -1161,7 +1446,9 @@ pub const UpdateActionResultRequest = struct {
                 },
                 3 => {
                     var nested = try reader.readMessage();
-                    out.action_result = try ActionResult.decodeOwned(allocator, &nested);
+                    const result = try ActionResult.decodeOwned(allocator, &nested);
+                    if (out.action_result) |*previous| previous.deinit(allocator);
+                    out.action_result = result;
                 },
                 else => try reader.skipField(tag.wire_type),
             }
@@ -1188,11 +1475,13 @@ pub const FindMissingBlobsRequest = struct {
         var digests: std.ArrayListUnmanaged(Digest) = .empty;
         errdefer digests.deinit(allocator);
         var out: FindMissingBlobsRequest = .{};
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => out.instance_name = try reader.readString(),
                 2 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try digests.append(allocator, try Digest.decode(&nested));
                 },
@@ -1220,10 +1509,12 @@ pub const FindMissingBlobsResponse = struct {
     pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !FindMissingBlobsResponse {
         var digests: std.ArrayListUnmanaged(Digest) = .empty;
         errdefer digests.deinit(allocator);
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 2 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try digests.append(allocator, try Digest.decode(&nested));
                 },
@@ -1285,11 +1576,13 @@ pub const BatchUpdateBlobsRequest = struct {
         var requests: std.ArrayListUnmanaged(Item) = .empty;
         errdefer requests.deinit(allocator);
         var out: BatchUpdateBlobsRequest = .{};
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => out.instance_name = try reader.readString(),
                 2 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try requests.append(allocator, try Item.decode(&nested));
                 },
@@ -1345,10 +1638,12 @@ pub const BatchUpdateBlobsResponse = struct {
     pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !BatchUpdateBlobsResponse {
         var responses: std.ArrayListUnmanaged(Item) = .empty;
         errdefer responses.deinit(allocator);
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try responses.append(allocator, try Item.decode(&nested));
                 },
@@ -1378,11 +1673,13 @@ pub const BatchReadBlobsRequest = struct {
         var digests: std.ArrayListUnmanaged(Digest) = .empty;
         errdefer digests.deinit(allocator);
         var out: BatchReadBlobsRequest = .{};
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => out.instance_name = try reader.readString(),
                 2 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try digests.append(allocator, try Digest.decode(&nested));
                 },
@@ -1441,10 +1738,12 @@ pub const BatchReadBlobsResponse = struct {
     pub fn decodeOwned(allocator: std.mem.Allocator, reader: *protobuf.Reader) !BatchReadBlobsResponse {
         var responses: std.ArrayListUnmanaged(Item) = .empty;
         errdefer responses.deinit(allocator);
+        var decoded_entries: usize = 0;
 
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
                     try responses.append(allocator, try Item.decode(&nested));
                 },
@@ -1513,11 +1812,19 @@ pub const GetTreeResponse = struct {
         }
 
         var out: GetTreeResponse = .{};
+        var decoded_entries: usize = 0;
         while (try reader.next()) |tag| {
             switch (tag.field_number) {
                 1 => {
+                    try reserveDecodedEntry(&decoded_entries);
                     var nested = try reader.readMessage();
-                    try directories.append(allocator, try Directory.decodeOwned(allocator, &nested));
+                    var directory = try Directory.decodeOwnedWithBudget(
+                        allocator,
+                        &nested,
+                        &decoded_entries,
+                    );
+                    errdefer directory.deinit(allocator);
+                    try directories.append(allocator, directory);
                 },
                 2 => out.next_page_token = try reader.readString(),
                 else => try reader.skipField(tag.wire_type),
@@ -1550,6 +1857,41 @@ test "Digest encodes with REAPI field numbers" {
     var reader = protobuf.Reader.init(encoded);
     const decoded = try Digest.decode(&reader);
     try std.testing.expect(digest.eql(decoded));
+}
+
+test "CacheCapabilities advertises absolute symlink strategy with REAPI field number" {
+    const allowed: CacheCapabilities = .{
+        .symlink_absolute_path_strategy = .allowed,
+    };
+    const allowed_bytes = try encodeAlloc(std.testing.allocator, allowed);
+    defer std.testing.allocator.free(allowed_bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0x28, 0x02 }, allowed_bytes);
+    try std.testing.expectEqual(allowed.encodedLen(), allowed_bytes.len);
+
+    const disallowed: CacheCapabilities = .{
+        .symlink_absolute_path_strategy = .disallowed,
+    };
+    const disallowed_bytes = try encodeAlloc(std.testing.allocator, disallowed);
+    defer std.testing.allocator.free(disallowed_bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0x28, 0x01 }, disallowed_bytes);
+
+    const unspecified = try encodeAlloc(std.testing.allocator, CacheCapabilities{});
+    defer std.testing.allocator.free(unspecified);
+    try std.testing.expectEqual(@as(usize, 0), unspecified.len);
+}
+
+test "Status.decode rejects unrecognized attacker-controlled status codes" {
+    var positive = protobuf.Reader.init(&.{ 0x08, 0x63 });
+    try std.testing.expectError(error.InvalidEnumValue, Status.decode(&positive));
+
+    var negative = protobuf.Reader.init(&.{
+        0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+    });
+    try std.testing.expectError(error.InvalidEnumValue, Status.decode(&negative));
+
+    var known = protobuf.Reader.init(&.{ 0x08, 0x04 });
+    const status = try Status.decode(&known);
+    try std.testing.expectEqual(StatusCode.deadline_exceeded, status.code);
 }
 
 test "Command decode preserves repeated fields" {
@@ -1587,6 +1929,106 @@ test "Command decode preserves repeated fields" {
     try std.testing.expectEqual(Command.OutputDirectoryFormat.tree_and_directory, decoded.output_directory_format.?);
 }
 
+test "owned REAPI decoders bound aggregate repeated entries before allocation" {
+    const count = max_decoded_repeated_entries + 1;
+    const bytes = try std.testing.allocator.alloc(u8, count * 2);
+    defer std.testing.allocator.free(bytes);
+
+    for (0..count) |index| {
+        bytes[index * 2] = if (index % 2 == 0) 0x1a else 0x3a;
+        bytes[index * 2 + 1] = 0;
+    }
+    var command_reader = protobuf.Reader.init(bytes);
+    try std.testing.expectError(
+        error.TooManyOutputEntries,
+        Command.decodeOwned(std.testing.allocator, &command_reader),
+    );
+
+    for (0..count) |index| bytes[index * 2] = 0x0a;
+    var directory_reader = protobuf.Reader.init(bytes);
+    try std.testing.expectError(
+        error.TooManyOutputEntries,
+        Directory.decodeOwned(std.testing.allocator, &directory_reader),
+    );
+
+    var platform_reader = protobuf.Reader.init(bytes);
+    try std.testing.expectError(
+        error.TooManyOutputEntries,
+        Platform.decodeOwned(std.testing.allocator, &platform_reader),
+    );
+
+    for (0..count) |index| bytes[index * 2] = 0x12;
+    var result_reader = protobuf.Reader.init(bytes);
+    try std.testing.expectError(
+        error.TooManyOutputEntries,
+        ActionResult.decodeOwned(std.testing.allocator, &result_reader),
+    );
+
+    var request_reader = protobuf.Reader.init(bytes);
+    try std.testing.expectError(
+        error.TooManyOutputEntries,
+        FindMissingBlobsRequest.decodeOwned(std.testing.allocator, &request_reader),
+    );
+}
+
+test "owned singular REAPI messages replace previous values without leaking" {
+    const first: Platform = .{ .properties = &.{.{ .name = "first", .value = "1" }} };
+    const second: Platform = .{ .properties = &.{.{ .name = "second", .value = "2" }} };
+
+    {
+        var writer = protobuf.Writer.init(std.testing.allocator);
+        defer writer.deinit();
+        try writer.writeMessageField(5, first);
+        try writer.writeMessageField(5, second);
+
+        var reader = protobuf.Reader.init(writer.writtenBytes());
+        var command = try Command.decodeOwned(std.testing.allocator, &reader);
+        defer command.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("second", command.platform.?.properties[0].name);
+    }
+
+    {
+        var writer = protobuf.Writer.init(std.testing.allocator);
+        defer writer.deinit();
+        try writer.writeMessageField(10, first);
+        try writer.writeMessageField(10, second);
+
+        var reader = protobuf.Reader.init(writer.writtenBytes());
+        var action = try Action.decodeOwned(std.testing.allocator, &reader);
+        defer action.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("second", action.platform.?.properties[0].name);
+    }
+
+    {
+        var writer = protobuf.Writer.init(std.testing.allocator);
+        defer writer.deinit();
+        try writer.writeMessageField(3, ActionResult{
+            .output_files = &.{.{ .path = "first" }},
+        });
+        try writer.writeMessageField(3, ActionResult{
+            .output_files = &.{.{ .path = "second" }},
+        });
+
+        var reader = protobuf.Reader.init(writer.writtenBytes());
+        var request = try UpdateActionResultRequest.decodeOwned(std.testing.allocator, &reader);
+        defer request.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("second", request.action_result.?.output_files[0].path);
+    }
+}
+
+test "Command.decodeOwned releases its platform after a later decode failure" {
+    var writer = protobuf.Writer.init(std.testing.allocator);
+    defer writer.deinit();
+    try writer.writeMessageField(5, Platform{
+        .properties = &.{.{ .name = "owned", .value = "value" }},
+    });
+    try writer.writeTag(9, .varint);
+    try writer.writeVarint(99);
+
+    var reader = protobuf.Reader.init(writer.writtenBytes());
+    try std.testing.expectError(error.InvalidEnumValue, Command.decodeOwned(std.testing.allocator, &reader));
+}
+
 test "Action and ExecuteRequest round-trip borrowed views" {
     const digest: Digest = .{
         .hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1595,6 +2037,7 @@ test "Action and ExecuteRequest round-trip borrowed views" {
     const action: Action = .{
         .command_digest = digest,
         .input_root_digest = digest,
+        .timeout = .{ .seconds = 12, .nanos = 345 },
         .do_not_cache = true,
         .platform = .{
             .properties = &.{
@@ -1614,10 +2057,13 @@ test "Action and ExecuteRequest round-trip borrowed views" {
     const decoded_action = try Action.decode(&action_reader);
     try std.testing.expect(decoded_action.command_digest.?.eql(digest));
     try std.testing.expect(decoded_action.input_root_digest.?.eql(digest));
+    try std.testing.expectEqual(@as(u64, 12_000_000_345), try decoded_action.timeout.?.toNanoseconds());
     try std.testing.expect(decoded_action.do_not_cache);
     var owned_action_reader = protobuf.Reader.init(action_bytes);
     var owned_action = try Action.decodeOwned(std.testing.allocator, &owned_action_reader);
     defer owned_action.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(i64, 12), owned_action.timeout.?.seconds);
+    try std.testing.expectEqual(@as(i32, 345), owned_action.timeout.?.nanos);
     try std.testing.expectEqual(@as(usize, 1), owned_action.platform.?.properties.len);
     try std.testing.expectEqualStrings("limits.memory.bytes", owned_action.platform.?.properties[0].name);
 
@@ -1630,7 +2076,95 @@ test "Action and ExecuteRequest round-trip borrowed views" {
     try std.testing.expect(decoded_request.action_digest.?.eql(digest));
 }
 
-test "Directory decodes files and child directories" {
+test "Action timeout uses REAPI field 6 and validates representable nonnegative durations" {
+    const action: Action = .{ .timeout = .{ .seconds = 2, .nanos = 125 } };
+    const encoded = try encodeAlloc(std.testing.allocator, action);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualSlices(u8, &.{ 0x32, 0x04, 0x08, 0x02, 0x10, 0x7d }, encoded);
+    try std.testing.expectEqual(action.encodedLen(), encoded.len);
+
+    var reader = protobuf.Reader.init(encoded);
+    const decoded = try Action.decode(&reader);
+    try std.testing.expectEqual(@as(u64, 2_000_000_125), try decoded.timeout.?.toNanoseconds());
+
+    const invalid = [_]Duration{
+        .{ .seconds = -1 },
+        .{ .nanos = -1 },
+        .{ .nanos = 1_000_000_000 },
+        .{ .seconds = std.math.maxInt(i64) },
+    };
+    for (invalid) |duration| {
+        try std.testing.expectError(error.InvalidActionTimeout, duration.toNanoseconds());
+    }
+    try std.testing.expectEqual(@as(u64, 0), try (Duration{}).toNanoseconds());
+}
+
+test "SymlinkNode encodes REAPI field numbers and preserves target spelling" {
+    const symlink: SymlinkNode = .{
+        .name = "bin",
+        .target = "../tool",
+    };
+
+    const encoded = try encodeAlloc(std.testing.allocator, symlink);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x0a, 0x03, 'b', 'i', 'n',
+        0x12, 0x07, '.', '.', '/',
+        't',  'o',  'o', 'l',
+    }, encoded);
+
+    var reader = protobuf.Reader.init(encoded);
+    const decoded = try SymlinkNode.decode(&reader);
+    try std.testing.expectEqualStrings("bin", decoded.name);
+    try std.testing.expectEqualStrings("../tool", decoded.target);
+    try std.testing.expectEqual(symlink.encodedLen(), encoded.len);
+}
+
+test "SymlinkNode rejects invalid names and targets" {
+    const invalid_names = [_][]const u8{
+        "",
+        ".",
+        "..",
+        "nested/name",
+        "name\x00suffix",
+    };
+    for (invalid_names) |name| {
+        try std.testing.expectError(error.InvalidSymlinkName, encodeAlloc(
+            std.testing.allocator,
+            SymlinkNode{ .name = name, .target = "target" },
+        ));
+    }
+
+    const oversized_name = [_]u8{'a'} ** (std.os.linux.NAME_MAX + 1);
+    try std.testing.expectError(error.InvalidSymlinkName, encodeAlloc(
+        std.testing.allocator,
+        SymlinkNode{ .name = &oversized_name, .target = "target" },
+    ));
+
+    const invalid_targets = [_][]const u8{ "", "target\x00suffix" };
+    for (invalid_targets) |target| {
+        try std.testing.expectError(error.InvalidSymlinkTarget, encodeAlloc(
+            std.testing.allocator,
+            SymlinkNode{ .name = "link", .target = target },
+        ));
+    }
+
+    const oversized_target = [_]u8{'a'} ** std.os.linux.PATH_MAX;
+    try std.testing.expectError(error.InvalidSymlinkTarget, encodeAlloc(
+        std.testing.allocator,
+        SymlinkNode{ .name = "link", .target = &oversized_target },
+    ));
+
+    for ([_][]const u8{ "../target", "foo/../bar", "/absolute/target" }) |target| {
+        const encoded = try encodeAlloc(
+            std.testing.allocator,
+            SymlinkNode{ .name = "link", .target = target },
+        );
+        std.testing.allocator.free(encoded);
+    }
+}
+
+test "Directory decodes files, child directories, and symlinks" {
     const file_digest: Digest = .{
         .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         .size_bytes = 5,
@@ -1645,6 +2179,9 @@ test "Directory decodes files and child directories" {
         },
         .directories = &.{
             .{ .name = "src", .digest = child_digest },
+        },
+        .symlinks = &.{
+            .{ .name = "hello-link", .target = "../hello.txt" },
         },
     };
 
@@ -1662,15 +2199,22 @@ test "Directory decodes files and child directories" {
     try std.testing.expectEqual(@as(usize, 1), decoded.directories.len);
     try std.testing.expectEqualStrings("src", decoded.directories[0].name);
     try std.testing.expect(decoded.directories[0].digest.?.eql(child_digest));
+    try std.testing.expectEqual(@as(usize, 1), decoded.symlinks.len);
+    try std.testing.expectEqualStrings("hello-link", decoded.symlinks[0].name);
+    try std.testing.expectEqualStrings("../hello.txt", decoded.symlinks[0].target);
+    try std.testing.expectEqual(directory.encodedLen(), encoded.len);
 }
 
-test "Directory canonical order is enforced per field" {
+test "Directory canonical order includes symlinks and all name collisions" {
     const canonical: Directory = .{
         .files = &.{
             .{ .name = "b.txt" },
         },
         .directories = &.{
             .{ .name = "a" },
+        },
+        .symlinks = &.{
+            .{ .name = "c", .target = "../b.txt" },
         },
     };
     try canonical.validateCanonical();
@@ -1685,6 +2229,30 @@ test "Directory canonical order is enforced per field" {
     };
     try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, unsorted_files));
 
+    const unsorted_directories: Directory = .{
+        .directories = &.{
+            .{ .name = "b" },
+            .{ .name = "a" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, unsorted_directories));
+
+    const unsorted_symlinks: Directory = .{
+        .symlinks = &.{
+            .{ .name = "b", .target = "target" },
+            .{ .name = "a", .target = "target" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, unsorted_symlinks));
+
+    const duplicate_symlinks: Directory = .{
+        .symlinks = &.{
+            .{ .name = "same", .target = "first" },
+            .{ .name = "same", .target = "second" },
+        },
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, duplicate_symlinks));
+
     const overlapping_names: Directory = .{
         .files = &.{
             .{ .name = "same" },
@@ -1694,6 +2262,28 @@ test "Directory canonical order is enforced per field" {
         },
     };
     try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, overlapping_names));
+
+    const overlapping_file_symlink: Directory = .{
+        .files = &.{.{ .name = "same" }},
+        .symlinks = &.{.{ .name = "same", .target = "target" }},
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, overlapping_file_symlink));
+
+    const overlapping_directory_symlink: Directory = .{
+        .directories = &.{.{ .name = "same" }},
+        .symlinks = &.{.{ .name = "same", .target = "target" }},
+    };
+    try std.testing.expectError(error.NonCanonicalDirectory, encodeAlloc(std.testing.allocator, overlapping_directory_symlink));
+
+    var writer = protobuf.Writer.init(std.testing.allocator);
+    defer writer.deinit();
+    try writer.writeMessageField(3, SymlinkNode{ .name = "b", .target = "target" });
+    try writer.writeMessageField(3, SymlinkNode{ .name = "a", .target = "target" });
+    var reader = protobuf.Reader.init(writer.writtenBytes());
+    try std.testing.expectError(error.NonCanonicalDirectory, Directory.decodeOwned(
+        std.testing.allocator,
+        &reader,
+    ));
 }
 
 test "CAS batch messages decode repeated request and response fields" {
@@ -1763,7 +2353,43 @@ test "GetTreeResponse round-trips directories" {
     try std.testing.expect(decoded.directories[0].files[0].digest.?.eql(file_digest));
 }
 
-test "ActionResult round-trips exit code and stream digests" {
+test "OutputSymlink validates output paths and preserves target spelling" {
+    const symlink: OutputSymlink = .{
+        .path = "out/link",
+        .target = "../input/tool",
+    };
+    const encoded = try encodeAlloc(std.testing.allocator, symlink);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqual(@as(u8, 0x0a), encoded[0]);
+
+    var reader = protobuf.Reader.init(encoded);
+    const decoded = try OutputSymlink.decode(&reader);
+    try std.testing.expectEqualStrings("out/link", decoded.path);
+    try std.testing.expectEqualStrings("../input/tool", decoded.target);
+    try std.testing.expectEqual(symlink.encodedLen(), encoded.len);
+
+    const invalid_paths = [_][]const u8{
+        "",
+        "/absolute/link",
+        "./link",
+        "../link",
+        "out//link",
+        "out/",
+        "out/\x00link",
+    };
+    for (invalid_paths) |path| {
+        try std.testing.expectError(error.InvalidOutputSymlinkPath, encodeAlloc(
+            std.testing.allocator,
+            OutputSymlink{ .path = path, .target = "target" },
+        ));
+    }
+    try std.testing.expectError(error.InvalidSymlinkTarget, encodeAlloc(
+        std.testing.allocator,
+        OutputSymlink{ .path = "out/link", .target = "" },
+    ));
+}
+
+test "ActionResult round-trips output symlinks, exit code, and stream digests" {
     const stdout_digest: Digest = .{
         .hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         .size_bytes = 3,
@@ -1783,6 +2409,15 @@ test "ActionResult round-trips exit code and stream digests" {
                 .is_topologically_sorted = true,
                 .root_directory_digest = stdout_digest,
             },
+        },
+        .output_file_symlinks = &.{
+            .{ .path = "out/file-link", .target = "app" },
+        },
+        .output_directory_symlinks = &.{
+            .{ .path = "out/tree-link", .target = "tree" },
+        },
+        .output_symlinks = &.{
+            .{ .path = "out/general-link", .target = "../input/tool" },
         },
         .exit_code = 7,
         .stdout_digest = stdout_digest,
@@ -1815,6 +2450,15 @@ test "ActionResult round-trips exit code and stream digests" {
     try std.testing.expect(decoded.output_directories[0].tree_digest.?.eql(stderr_digest));
     try std.testing.expect(decoded.output_directories[0].is_topologically_sorted);
     try std.testing.expect(decoded.output_directories[0].root_directory_digest.?.eql(stdout_digest));
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_file_symlinks.len);
+    try std.testing.expectEqualStrings("out/file-link", decoded.output_file_symlinks[0].path);
+    try std.testing.expectEqualStrings("app", decoded.output_file_symlinks[0].target);
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_directory_symlinks.len);
+    try std.testing.expectEqualStrings("out/tree-link", decoded.output_directory_symlinks[0].path);
+    try std.testing.expectEqualStrings("tree", decoded.output_directory_symlinks[0].target);
+    try std.testing.expectEqual(@as(usize, 1), decoded.output_symlinks.len);
+    try std.testing.expectEqualStrings("out/general-link", decoded.output_symlinks[0].path);
+    try std.testing.expectEqualStrings("../input/tool", decoded.output_symlinks[0].target);
     try std.testing.expectEqual(@as(i32, 7), decoded.exit_code);
     try std.testing.expect(decoded.stdout_digest.?.eql(stdout_digest));
     try std.testing.expect(decoded.stderr_digest.?.eql(stderr_digest));

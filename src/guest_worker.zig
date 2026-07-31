@@ -22,6 +22,7 @@ pub const guest_actiondfs_stage_root_path = guest_cas_root_path ++ "/" ++ guest_
 pub fn run(io: std.Io) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
 
+    grpc_http2_server.ignoreSigpipe();
     const allocator = std.heap.smp_allocator;
     var cas_dir = try std.Io.Dir.openDirAbsolute(io, guest_cas_root_path, .{});
     defer cas_dir.close(io);

@@ -126,6 +126,25 @@ pub const Server = struct {
         request_record: []const u8,
         writer: body_sink.Writer,
     ) !void {
+        return self.handleServerStreamingResponseWithCancellation(
+            io,
+            allocator,
+            method,
+            request_record,
+            writer,
+            null,
+        );
+    }
+
+    pub fn handleServerStreamingResponseWithCancellation(
+        self: Server,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        request_record: []const u8,
+        writer: body_sink.Writer,
+        cancellation: ?*const std.atomic.Value(bool),
+    ) !void {
         if (std.mem.eql(u8, method, bytestream_read)) {
             const payload = try singlePayload(request_record);
             var reader = protobuf.Reader.init(payload);
@@ -145,6 +164,8 @@ pub const Server = struct {
             const work_root = self.work_root orelse return error.UnsupportedMethod;
             var reader = protobuf.Reader.init(payload);
             const request = try reapi.ExecuteRequest.decode(&reader);
+            var options = self.execution_options;
+            if (cancellation) |token| options.cancellation = token;
             var operation = try execution_service.execute(
                 io,
                 allocator,
@@ -152,7 +173,7 @@ pub const Server = struct {
                 self.action_cache_store,
                 work_root,
                 request,
-                self.execution_options,
+                options,
             );
             defer operation.deinit(allocator);
             const response = try encodeResponse(allocator, operation.operation);
@@ -162,7 +183,6 @@ pub const Server = struct {
 
         return error.UnsupportedMethod;
     }
-
 };
 
 fn singlePayload(record_bytes: []const u8) ![]const u8 {

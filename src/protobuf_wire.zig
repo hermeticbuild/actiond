@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const Error = error{
+    InvalidEnumValue,
     InvalidFieldNumber,
     InvalidLength,
     InvalidVarint,
@@ -8,6 +9,8 @@ pub const Error = error{
     UnexpectedEof,
     UnexpectedWireType,
 };
+
+const max_field_number: u32 = (1 << 29) - 1;
 
 pub const WireType = enum(u3) {
     varint = 0,
@@ -34,7 +37,7 @@ pub fn varintLen(value: u64) usize {
 }
 
 pub fn tagLen(field_number: u32, wire_type: WireType) usize {
-    std.debug.assert(field_number != 0);
+    std.debug.assert(field_number != 0 and field_number <= max_field_number);
     return varintLen((@as(u64, field_number) << 3) | @intFromEnum(wire_type));
 }
 
@@ -107,7 +110,7 @@ pub const Writer = struct {
     }
 
     pub fn writeTag(self: *Writer, field_number: u32, wire_type: WireType) !void {
-        if (field_number == 0) return error.InvalidFieldNumber;
+        if (field_number == 0 or field_number > max_field_number) return error.InvalidFieldNumber;
         try self.writeVarint((@as(u64, field_number) << 3) | @intFromEnum(wire_type));
     }
 
@@ -197,8 +200,9 @@ pub const Reader = struct {
         if (self.offset == self.bytes.len) return null;
 
         const key = try self.readVarint();
-        const field_number: u32 = @intCast(key >> 3);
-        if (field_number == 0) return error.InvalidFieldNumber;
+        const raw_field_number = key >> 3;
+        if (raw_field_number == 0 or raw_field_number > max_field_number) return error.InvalidFieldNumber;
+        const field_number: u32 = @intCast(raw_field_number);
 
         const raw_wire = key & 0x7;
         if (raw_wire > @intFromEnum(WireType.fixed32)) return error.UnexpectedWireType;
@@ -214,7 +218,14 @@ pub const Reader = struct {
     }
 
     pub fn readEnum(self: *Reader, comptime Enum: type) !Enum {
-        return @enumFromInt(try self.readVarint());
+        const enum_info = @typeInfo(Enum).@"enum";
+        const tag = std.math.cast(enum_info.tag_type, try self.readVarint()) orelse return error.InvalidEnumValue;
+
+        inline for (enum_info.fields) |field| {
+            if (field.value == tag) return @enumFromInt(tag);
+        }
+
+        return error.InvalidEnumValue;
     }
 
     pub fn readInt64(self: *Reader) !i64 {
@@ -256,15 +267,23 @@ pub const Reader = struct {
         var value: u64 = 0;
         var shift: u6 = 0;
 
-        while (true) : (shift += 7) {
+        for (0..10) |index| {
             if (self.offset >= self.bytes.len) return error.UnexpectedEof;
-            if (shift >= 64) return error.InvalidVarint;
 
             const byte = self.bytes[self.offset];
             self.offset += 1;
+
+            if (index == 9) {
+                if ((byte & 0xfe) != 0) return error.InvalidVarint;
+                return value | (@as(u64, byte) << shift);
+            }
+
             value |= @as(u64, byte & 0x7f) << shift;
             if ((byte & 0x80) == 0) return value;
+            shift += 7;
         }
+
+        unreachable;
     }
 
     fn skipBytes(self: *Reader, len: usize) !void {
@@ -290,6 +309,60 @@ test "varint encoding is canonical" {
 
     var reader = Reader.init(writer.writtenBytes());
     try std.testing.expectEqual(@as(u64, 300), try reader.readVarint());
+}
+
+test "protobuf field numbers are bounded" {
+    var writer = Writer.init(std.testing.allocator);
+    defer writer.deinit();
+
+    try writer.writeTag(max_field_number, .varint);
+    var valid_reader = Reader.init(writer.writtenBytes());
+    try std.testing.expectEqual(max_field_number, (try valid_reader.next()).?.field_number);
+
+    try std.testing.expectError(error.InvalidFieldNumber, writer.writeTag(0, .varint));
+    try std.testing.expectError(error.InvalidFieldNumber, writer.writeTag(max_field_number + 1, .varint));
+
+    var oversized_field_reader = Reader.init(&.{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x01 });
+    try std.testing.expectError(error.InvalidFieldNumber, oversized_field_reader.next());
+
+    var zero_field_reader = Reader.init(&.{0x00});
+    try std.testing.expectError(error.InvalidFieldNumber, zero_field_reader.next());
+}
+
+test "varint rejects continuation and integer overflow" {
+    var max_reader = Reader.init(&.{
+        0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0x01,
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), try max_reader.readVarint());
+
+    var overflow_reader = Reader.init(&.{
+        0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0x02,
+    });
+    try std.testing.expectError(error.InvalidVarint, overflow_reader.readVarint());
+
+    var continuation_reader = Reader.init(&.{
+        0x80, 0x80, 0x80, 0x80, 0x80,
+        0x80, 0x80, 0x80, 0x80, 0x80,
+    });
+    try std.testing.expectError(error.InvalidVarint, continuation_reader.readVarint());
+
+    var truncated_reader = Reader.init(&.{ 0x80, 0x80, 0x80 });
+    try std.testing.expectError(error.UnexpectedEof, truncated_reader.readVarint());
+}
+
+test "unknown enum values return an error" {
+    const TestEnum = enum(u8) {
+        zero,
+        one,
+    };
+
+    var reader = Reader.init(&.{0x02});
+    try std.testing.expectError(error.InvalidEnumValue, reader.readEnum(TestEnum));
+
+    var overflow_reader = Reader.init(&.{ 0xff, 0x01 });
+    try std.testing.expectError(error.InvalidEnumValue, overflow_reader.readEnum(TestEnum));
 }
 
 test "length-delimited skip lands on next field" {

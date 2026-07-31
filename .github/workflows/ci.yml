@@ -86,6 +86,7 @@ jobs:
           path: |
             ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.md
             ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.log
+            ${{ runner.temp }}/actiond-linux-llvm-${{ matrix.architecture }}/*.txt
 
   windows-llvm-smoke:
     name: Windows ${{ matrix.mode }} (${{ matrix.architecture }})

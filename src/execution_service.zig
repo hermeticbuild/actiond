@@ -73,6 +73,9 @@ pub fn execute(
             action_digest.size_bytes,
             @errorName(err),
         });
+        if (executionFailureStatus(err)) |status| {
+            return try completedFailedOperation(allocator, action_digest, status);
+        }
         return err;
     };
     defer outcome.deinit(allocator);
@@ -87,11 +90,54 @@ pub fn execute(
 
     var result = try action_executor.actionResultFromOutcomeOwned(allocator, outcome);
     defer result.deinit(allocator);
+    return try publishSuccessfulOperation(
+        io,
+        allocator,
+        result_store,
+        action_digest,
+        result.result,
+        do_not_cache,
+        options,
+    );
+}
+
+fn publishSuccessfulOperation(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    result_store: ?action_cache.Store,
+    action_digest: cas.Digest,
+    result: reapi.ActionResult,
+    do_not_cache: bool,
+    options: action_executor.ExecuteOptions,
+) !CompletedOperation {
     if (!do_not_cache) {
-        if (result_store) |store| try store.put(io, allocator, action_digest, result.result);
+        if (result_store) |store| {
+            if (executionCancelled(options)) {
+                return try completedFailedOperation(
+                    allocator,
+                    action_digest,
+                    executionFailureStatus(error.ExecutionCancelled).?,
+                );
+            }
+            try store.put(io, allocator, action_digest, result);
+            // ActionCache.put publishes the ActionResult and cannot be revoked.
+            return try completedOperation(allocator, action_digest, result, false);
+        }
     }
 
-    return try completedOperation(allocator, action_digest, result.result, false);
+    if (executionCancelled(options)) {
+        return try completedFailedOperation(
+            allocator,
+            action_digest,
+            executionFailureStatus(error.ExecutionCancelled).?,
+        );
+    }
+    return try completedOperation(allocator, action_digest, result, false);
+}
+
+fn executionCancelled(options: action_executor.ExecuteOptions) bool {
+    const cancellation = options.cancellation orelse return false;
+    return cancellation.load(.acquire);
 }
 
 fn truncateForLog(bytes: []const u8) []const u8 {
@@ -111,13 +157,31 @@ fn completedOperation(
     result: reapi.ActionResult,
     cached_result: bool,
 ) !CompletedOperation {
+    return completedOperationWithStatus(allocator, action_digest, result, cached_result, .{});
+}
+
+fn completedFailedOperation(
+    allocator: std.mem.Allocator,
+    action_digest: cas.Digest,
+    status: reapi.Status,
+) !CompletedOperation {
+    return completedOperationWithStatus(allocator, action_digest, null, false, status);
+}
+
+fn completedOperationWithStatus(
+    allocator: std.mem.Allocator,
+    action_digest: cas.Digest,
+    result: ?reapi.ActionResult,
+    cached_result: bool,
+    status: reapi.Status,
+) !CompletedOperation {
     const operation_name = try operationKey(allocator, "operations", action_digest);
     errdefer allocator.free(operation_name);
 
     const execute_response = reapi.ExecuteResponse{
         .result = result,
         .cached_result = cached_result,
-        .status = .{},
+        .status = status,
     };
     const packed_response = try execute_response.toAny(allocator);
     errdefer allocator.free(packed_response.value);
@@ -130,6 +194,24 @@ fn completedOperation(
         },
         .operation_name = operation_name,
         .response_value = packed_response.value,
+    };
+}
+
+fn executionFailureStatus(err: anyerror) ?reapi.Status {
+    return switch (err) {
+        error.ExecutionDeadlineExceeded => .{
+            .code = .deadline_exceeded,
+            .message = "action execution exceeded its timeout",
+        },
+        error.ExecutionCancelled => .{
+            .code = .cancelled,
+            .message = "action execution was cancelled",
+        },
+        error.SandboxSetupFailed => .{
+            .code = .internal,
+            .message = "action sandbox setup failed",
+        },
+        else => null,
     };
 }
 
@@ -203,4 +285,59 @@ test "execute returns cached completed operation without running an action" {
     const response = try reapi.ExecuteResponse.decode(&response_reader);
     try std.testing.expect(response.cached_result);
     try std.testing.expectEqual(@as(i32, 0), response.result.?.exit_code);
+}
+
+test "execution infrastructure failures become uncached completed operations" {
+    const digest = cas.Digest.fromBytes("failed action");
+    const cases = [_]struct { err: anyerror, code: reapi.StatusCode }{
+        .{ .err = error.ExecutionDeadlineExceeded, .code = .deadline_exceeded },
+        .{ .err = error.ExecutionCancelled, .code = .cancelled },
+        .{ .err = error.SandboxSetupFailed, .code = .internal },
+    };
+
+    for (cases) |case| {
+        const status = executionFailureStatus(case.err).?;
+        try std.testing.expectEqual(case.code, status.code);
+
+        var operation = try completedFailedOperation(std.testing.allocator, digest, status);
+        defer operation.deinit(std.testing.allocator);
+        try std.testing.expect(operation.operation.done);
+
+        var reader = protobuf.Reader.init(operation.operation.response.?.value);
+        const response = try reapi.ExecuteResponse.decode(&reader);
+        try std.testing.expectEqual(case.code, response.status.?.code);
+        try std.testing.expect(response.result == null);
+        try std.testing.expect(!response.cached_result);
+    }
+
+    try std.testing.expect(executionFailureStatus(error.OutOfMemory) == null);
+}
+
+test "cancelled action results are not written to the ActionCache" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = action_cache.Store.init(tmp.dir);
+    const digest = cas.Digest.fromBytes("cancelled action result");
+    var cancellation = std.atomic.Value(bool).init(true);
+    var operation = try publishSuccessfulOperation(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        digest,
+        .{ .exit_code = 0 },
+        false,
+        .{ .cancellation = &cancellation },
+    );
+    defer operation.deinit(std.testing.allocator);
+
+    var reader = protobuf.Reader.init(operation.operation.response.?.value);
+    const response = try reapi.ExecuteResponse.decode(&reader);
+    try std.testing.expectEqual(reapi.StatusCode.cancelled, response.status.?.code);
+    try std.testing.expect(response.result == null);
+    try std.testing.expect(!response.cached_result);
+    try std.testing.expectError(
+        error.FileNotFound,
+        store.get(std.testing.io, std.testing.allocator, digest),
+    );
 }

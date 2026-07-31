@@ -132,28 +132,63 @@ wait_for_port() {
 
 run_stress_workspace() {
   local -a remote_grpc_log_flags=()
+  local timeout_log="${e2e_root}/deadline-regression.log"
   if [[ -n "${ACTIOND_E2E_REMOTE_GRPC_LOG:-}" ]]; then
     remote_grpc_log_flags+=(--remote_grpc_log="${ACTIOND_E2E_REMOTE_GRPC_LOG}")
   fi
 
+  local -a remote_common_flags=(
+    --bes_backend=
+    --bes_upload_mode=nowait_for_upload_complete
+    --remote_executor="grpc://${endpoint}"
+    --remote_cache="grpc://${endpoint}"
+    --remote_default_exec_properties=libc=glibc2.35
+    --noremote_accept_cached
+    --remote_local_fallback=false
+    --remote_upload_local_results=false
+    --remote_download_outputs=toplevel
+    "${remote_grpc_log_flags[@]}"
+    --disk_cache=
+    --jobs="${ACTIOND_E2E_JOBS:-8}"
+    --spawn_strategy=remote
+    --genrule_strategy=remote
+  )
+  local -a remote_build_flags=(
+    "${remote_common_flags[@]}"
+    --remote_default_exec_properties=limits.memory.bytes=536870912
+    --remote_default_exec_properties=limits.cpu.cores=2
+    --remote_default_exec_properties=limits.pids.max=128
+  )
+
   (
     cd "${test_workspace}"
     bazel clean --expunge >/dev/null
-    bazel build "${ACTIOND_E2E_TARGET:-//:stress_all}" \
-      --bes_backend= \
-      --bes_upload_mode=nowait_for_upload_complete \
-      --remote_executor="grpc://${endpoint}" \
-      --remote_cache="grpc://${endpoint}" \
-      --remote_default_exec_properties=libc=glibc2.35 \
-      --noremote_accept_cached \
-      --remote_local_fallback=false \
-      --remote_upload_local_results=false \
-      --remote_download_outputs=toplevel \
-      "${remote_grpc_log_flags[@]}" \
-      --disk_cache= \
-      --jobs="${ACTIOND_E2E_JOBS:-8}" \
-      --spawn_strategy=remote \
-      --genrule_strategy=remote
+    bazel build "${ACTIOND_E2E_TARGET:-//:stress_all}" "${remote_build_flags[@]}"
+    bazel build //:pids_one_regression "${remote_common_flags[@]}" \
+      --remote_default_exec_properties=limits.pids.max=1
+
+    local timeout_started
+    timeout_started="$(date +%s)"
+    if bazel build //:timeout_regression "${remote_common_flags[@]}" --remote_retries=0 >"${timeout_log}" 2>&1; then
+      echo "deadline regression unexpectedly completed its detached sleeping action" >&2
+      return 1
+    fi
+    if (( "$(date +%s)" - timeout_started > 15 )); then
+      echo "deadline regression did not terminate the detached action promptly" >&2
+      return 1
+    fi
+    if ! grep -q 'ExecutionDeadlineExceeded' "${e2e_log}"; then
+      echo "deadline regression did not report ExecutionDeadlineExceeded" >&2
+      tail -100 "${timeout_log}" >&2
+      return 1
+    fi
+    if ! grep -q 'terminated action namespace init pid=' "${e2e_log}"; then
+      echo "deadline regression did not confirm terminating the detached namespace init" >&2
+      tail -100 "${timeout_log}" >&2
+      return 1
+    fi
+
+    bazel build //:timeout_recovery "${remote_build_flags[@]}"
   )
 }
 

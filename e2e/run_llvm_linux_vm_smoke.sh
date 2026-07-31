@@ -49,12 +49,28 @@ endpoint="${ACTIOND_LLVM_SMOKE_ENDPOINT:-127.0.0.1:8998}"
 vm_cpus="${ACTIOND_VM_CPUS:-$(nproc)}"
 vm_memory_mib="${ACTIOND_VM_MEMORY_MIB:-4096}"
 cas_image_size_mib="${ACTIOND_VM_CAS_IMAGE_SIZE_MIB:-8192}"
+executor_timing_logs="${ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS:-0}"
 jobs="${ACTIOND_LLVM_SMOKE_JOBS-}"
 jobs_label="${jobs:-Bazel default}"
 jobs_flags=()
 if [[ -n "${jobs}" ]]; then
   jobs_flags=(--jobs="${jobs}")
 fi
+case "${executor_timing_logs}" in
+  1|true|TRUE|yes|YES)
+    executor_timing_logs=1
+    executor_timing_build_setting=true
+    ;;
+  0|false|FALSE|no|NO)
+    executor_timing_logs=0
+    executor_timing_build_setting=false
+    ;;
+  *)
+    echo "ACTIOND_LLVM_SMOKE_EXECUTOR_TIMING_LOGS must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+server_build_flags=(--//:executor_timing_logs="${executor_timing_build_setting}")
 
 mkdir -p "${output_root}"
 output_root="$(cd "${output_root}" && pwd)"
@@ -62,8 +78,9 @@ actiond_output_base="${output_root}/actiond-bazel-output-base"
 host_output_base="${output_root}/linux-host-bazel-output-base"
 server_root="${output_root}/vm"
 server_log="${output_root}/linux-actiond.log"
+stats_path="${output_root}/actiondfs_stats.txt"
 summary_path="${output_root}/linux-llvm-smoke-timings.md"
-rm -rf "${actiond_output_base}" "${host_output_base}" "${server_root}"
+rm -rf "${actiond_output_base}" "${host_output_base}" "${server_root}" "${stats_path}"
 
 server_pid=""
 server_startup_elapsed=""
@@ -82,6 +99,10 @@ cleanup() {
   if [[ "${status}" -ne 0 && -f "${server_log}" ]]; then
     echo "----- linux-actiond log (${server_log}) -----" >&2
     tail -200 "${server_log}" >&2 || true
+  fi
+  if [[ "${status}" -ne 0 && "${executor_timing_logs}" == "1" && -s "${stats_path}" ]]; then
+    echo "----- actiondfs and gRPC stats (${stats_path}) -----" >&2
+    cat "${stats_path}" >&2 || true
   fi
 }
 
@@ -106,6 +127,25 @@ wait_for_server() {
   done
 }
 
+wait_for_actiondfs_stats() {
+  local start
+  start="$(date +%s)"
+  while true; do
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      echo "linux-actiond exited before guest stats became available" >&2
+      return 1
+    fi
+    if [[ -s "${stats_path}" ]]; then
+      return 0
+    fi
+    if (( "$(date +%s)" - start >= 120 )); then
+      echo "timed out waiting for guest actiondfs stats: ${stats_path}" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
 setup_server() {
   local build_log="${output_root}/linux-actiond-build.log"
   local cquery_log="${output_root}/linux-actiond-cquery.log"
@@ -121,7 +161,8 @@ setup_server() {
   echo "Building ${server_target}" >&2
   if ! (
     cd "${repo_root}"
-    bazel build --config=remote --remote_timeout=900 "${headers[@]}" "${server_target}"
+    bazel build --config=remote --remote_timeout=900 \
+      "${server_build_flags[@]}" "${headers[@]}" "${server_target}"
   ) >"${build_log}" 2>&1; then
     echo "linux-actiond build failed; log: ${build_log}" >&2
     tail -200 "${build_log}" >&2 || true
@@ -131,7 +172,8 @@ setup_server() {
   local server
   if ! server="$({
     cd "${repo_root}"
-    bazel cquery --config=remote --output=files --bes_backend= --noshow_progress "${headers[@]}" "${server_target}"
+    bazel cquery --config=remote --output=files --bes_backend= --noshow_progress \
+      "${server_build_flags[@]}" "${headers[@]}" "${server_target}"
   } 2>"${cquery_log}" | tail -n 1)"; then
     echo "linux-actiond cquery failed; log: ${cquery_log}" >&2
     tail -200 "${cquery_log}" >&2 || true
@@ -150,19 +192,27 @@ setup_server() {
     bazel shutdown
   ) >>"${build_log}" 2>&1
 
+  local -a server_args=(
+    --listen="${endpoint}"
+    --root="${server_root}"
+    --cas-image-size-mib="${cas_image_size_mib}"
+    --memory-mib="${vm_memory_mib}"
+    --cpus="${vm_cpus}"
+    --start-timeout-ms=180000
+  )
+  if [[ "${executor_timing_logs}" == "1" ]]; then
+    server_args+=(--actiondfs-stats-path="${stats_path}")
+  fi
+
   server_start_ns="$(date +%s%N)"
-  setsid "${server}" serve-vm \
-    --listen="${endpoint}" \
-    --root="${server_root}" \
-    --cas-image-size-mib="${cas_image_size_mib}" \
-    --memory-mib="${vm_memory_mib}" \
-    --cpus="${vm_cpus}" \
-    --start-timeout-ms=180000 \
-    >"${server_log}" 2>&1 &
+  setsid "${server}" serve-vm "${server_args[@]}" >"${server_log}" 2>&1 &
   server_pid="$!"
   wait_for_server
   server_ready_ns="$(date +%s%N)"
   server_startup_elapsed="$(awk -v start="${server_start_ns}" -v end="${server_ready_ns}" 'BEGIN { printf "%.3f", (end - start) / 1000000000 }')"
+  if [[ "${executor_timing_logs}" == "1" ]]; then
+    wait_for_actiondfs_stats
+  fi
 
   mapfile -t server_files < <(find "${server_root}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
   if [[ "${server_files[*]}" != "cas.ext4" ]]; then

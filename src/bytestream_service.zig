@@ -42,6 +42,15 @@ pub fn writeReadGrpcRecords(
     else
         @min(available, @as(usize, @intCast(request.read_limit)));
 
+    var blob_file: ?std.Io.File = null;
+    if (!resource.digest.isEmpty()) {
+        blob_file = store.openBlob(io, resource.digest) catch |err| switch (err) {
+            error.InvalidDigestSize => return error.FileNotFound,
+            else => return err,
+        };
+    }
+    defer if (blob_file) |file| file.close(io);
+
     var record: std.ArrayListUnmanaged(u8) = .empty;
     defer record.deinit(allocator);
 
@@ -50,8 +59,7 @@ pub fn writeReadGrpcRecords(
         addReadStats(0, .buffer);
         try writer.writeAll(io, allocator, record.items);
     } else {
-        var blob_file = try store.openBlob(io, resource.digest);
-        defer blob_file.close(io);
+        const file = blob_file.?;
 
         if (writer.canWriteFileWithPrefix()) {
             var remaining = limit;
@@ -65,7 +73,7 @@ pub fn writeReadGrpcRecords(
                     io,
                     allocator,
                     record.items,
-                    blob_file.handle,
+                    file.handle,
                     @intCast(file_offset),
                     chunk_len,
                 );
@@ -75,13 +83,13 @@ pub fn writeReadGrpcRecords(
             return;
         }
 
-        if (offset != 0) try seekFd(blob_file.handle, @intCast(offset));
+        if (offset != 0) try seekFd(file.handle, @intCast(offset));
         const buffer = try allocator.alloc(u8, max_read_response_data_bytes);
         defer allocator.free(buffer);
         var remaining = limit;
         while (remaining != 0) {
             const read_len = @min(remaining, buffer.len);
-            const n = try readFd(blob_file.handle, buffer[0..read_len]);
+            const n = try readFd(file.handle, buffer[0..read_len]);
             if (n == 0) return error.UnexpectedEof;
             record.clearRetainingCapacity();
             try appendReadResponseRecord(allocator, &record, buffer[0..n]);
@@ -302,8 +310,13 @@ pub const WriteGrpcStream = struct {
 
         if (request.write_offset < 0) return error.InvalidOffset;
         if (@as(u64, @intCast(request.write_offset)) != self.committed_size) return error.InvalidOffset;
+        const expected_size = self.expected_digest.?.size_bytes;
+        if (self.committed_size > expected_size) return error.InvalidDigestSize;
+        if (request.data.len > expected_size - self.committed_size) return error.InvalidDigestSize;
+        const next_size = self.committed_size + request.data.len;
+        if (request.finish_write and next_size != expected_size) return error.InvalidDigestSize;
         try self.writer.?.writeAll(request.data);
-        self.committed_size += request.data.len;
+        self.committed_size = next_size;
         if (request.finish_write) self.finished = true;
     }
 };
@@ -520,6 +533,71 @@ test "WriteGrpcStream rejects offset and digest mismatches" {
     try std.testing.expectError(error.DigestMismatch, digest_stream.finish(std.testing.io, std.testing.allocator));
 }
 
+test "WriteGrpcStream enforces the declared digest size before writing chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    const digest = cas.Digest.fromBytes("hello");
+    var hash: [64]u8 = undefined;
+    const resource_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "uploads/u/blobs/{s}/{d}",
+        .{ digest.formatHex(&hash), digest.size_bytes },
+    );
+    defer std.testing.allocator.free(resource_name);
+
+    const oversized_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .resource_name = resource_name,
+        .write_offset = 0,
+        .data = "longer than five bytes",
+    });
+    defer std.testing.allocator.free(oversized_proto);
+    const oversized_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = oversized_proto });
+    defer std.testing.allocator.free(oversized_record);
+    var oversized_stream = WriteGrpcStream.init(store);
+    defer oversized_stream.deinit(std.testing.io, std.testing.allocator);
+    try std.testing.expectError(error.InvalidDigestSize, oversized_stream.append(std.testing.io, std.testing.allocator, oversized_record));
+    try std.testing.expectEqual(@as(u64, 0), oversized_stream.committed_size);
+    try std.testing.expectEqual(@as(u64, 0), oversized_stream.writer.?.size_bytes);
+
+    const first_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .resource_name = resource_name,
+        .write_offset = 0,
+        .data = "hel",
+    });
+    defer std.testing.allocator.free(first_proto);
+    const first_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = first_proto });
+    defer std.testing.allocator.free(first_record);
+    var partial_stream = WriteGrpcStream.init(store);
+    defer partial_stream.deinit(std.testing.io, std.testing.allocator);
+    try partial_stream.append(std.testing.io, std.testing.allocator, first_record);
+
+    const overflow_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .write_offset = 3,
+        .data = "later oversized chunk",
+    });
+    defer std.testing.allocator.free(overflow_proto);
+    const overflow_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = overflow_proto });
+    defer std.testing.allocator.free(overflow_record);
+    try std.testing.expectError(error.InvalidDigestSize, partial_stream.append(std.testing.io, std.testing.allocator, overflow_record));
+    try std.testing.expectEqual(@as(u64, 3), partial_stream.committed_size);
+    try std.testing.expectEqual(@as(u64, 3), partial_stream.writer.?.size_bytes);
+
+    const incomplete_proto = try protobuf.encodeAlloc(std.testing.allocator, bytestream.WriteRequest{
+        .write_offset = 3,
+        .data = "l",
+        .finish_write = true,
+    });
+    defer std.testing.allocator.free(incomplete_proto);
+    const incomplete_record = try grpc_record.encodeAlloc(std.testing.allocator, .{ .payload = incomplete_proto });
+    defer std.testing.allocator.free(incomplete_record);
+    try std.testing.expectError(error.InvalidDigestSize, partial_stream.append(std.testing.io, std.testing.allocator, incomplete_record));
+    try std.testing.expectEqual(@as(u64, 3), partial_stream.committed_size);
+    try std.testing.expectEqual(@as(u64, 3), partial_stream.writer.?.size_bytes);
+    try std.testing.expect(!try store.has(std.testing.io, digest));
+}
+
 test "writeReadGrpcRecords returns requested byte range" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -548,6 +626,47 @@ test "writeReadGrpcRecords returns requested byte range" {
     var reader = protobuf.Reader.init(record.payload);
     const response = try bytestream.ReadResponse.decode(&reader);
     try std.testing.expectEqualStrings("cde", response.data);
+}
+
+test "writeReadGrpcRecords treats forged existing blob sizes as missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = cas.Store.init(tmp.dir);
+    const digest = try store.putBytes(std.testing.io, "abcdef");
+    var hash: [64]u8 = undefined;
+
+    for ([_]u64{ digest.size_bytes - 1, digest.size_bytes + 1 }) |forged_size| {
+        const resource_name = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "blobs/{s}/{d}",
+            .{ digest.formatHex(&hash), forged_size },
+        );
+        defer std.testing.allocator.free(resource_name);
+
+        var records: std.ArrayListUnmanaged(u8) = .empty;
+        defer records.deinit(std.testing.allocator);
+        var list_writer = body_sink.ArrayListWriter{ .out = &records };
+
+        try std.testing.expectError(error.FileNotFound, writeReadGrpcRecords(
+            std.testing.io,
+            std.testing.allocator,
+            store,
+            .{ .resource_name = resource_name },
+            list_writer.writer(),
+        ));
+        try std.testing.expectError(error.FileNotFound, writeReadGrpcRecords(
+            std.testing.io,
+            std.testing.allocator,
+            store,
+            .{
+                .resource_name = resource_name,
+                .read_offset = @intCast(forged_size),
+            },
+            list_writer.writer(),
+        ));
+        try std.testing.expectEqual(@as(usize, 0), records.items.len);
+    }
 }
 
 test "writeReadGrpcRecords chunks large blobs into multiple gRPC messages" {

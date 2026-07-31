@@ -392,7 +392,7 @@ def runner_rows(timings: list[Timing]) -> list[str]:
         "",
         "## Runner Timing",
         "",
-        "These values split the `execute` bucket. `process/io` starts after child setup signals right before `execve`; it includes the action process runtime and stdout/stderr drain.",
+        "These values split the `execute` bucket. `child setup` includes successful `execve`; `process/io` starts after close-on-exec confirmation and includes action runtime and stdout/stderr drain.",
         "",
         *markdown_table(
             ["Runner Stage", "Min", "p25", "p50", "p75", "p95", "Mean", "Max", "Share of execute"],

@@ -12,6 +12,29 @@ pub const Error = error{
 const max_stream_bytes = 16 * 1024 * 1024;
 const cgroup_period_us: u64 = 100_000;
 const child_poll_timeout_ms = 100;
+const child_exit_poll_timeout_ms = 1;
+const classic_bpf_load_absolute_word: u16 = 0x20;
+const classic_bpf_jump_equal_constant: u16 = 0x15;
+const classic_bpf_bitwise_and_constant: u16 = 0x54;
+const classic_bpf_return_constant: u16 = 0x06;
+const x86_x32_syscall_bit: u32 = 0x40000000;
+const audit_arch_aarch64: u32 = 0xc00000b7;
+const audit_arch_x86_64: u32 = 0xc000003e;
+const child_setup_frame_length = 1 + @sizeOf(u32);
+const child_setup_ready_tag: u8 = 'R';
+const child_setup_exec_failure_tag: u8 = 'X';
+
+const SeccompFilterInstruction = extern struct {
+    code: u16,
+    jump_true: u8,
+    jump_false: u8,
+    data: u32,
+};
+
+const SeccompFilterProgram = extern struct {
+    length: u16,
+    instructions: [*]const SeccompFilterInstruction,
+};
 
 inline fn runnerTimingNow(io: std.Io) std.Io.Timestamp {
     return if (comptime build_options.executor_timing_logs)
@@ -25,10 +48,15 @@ fn actionNamespaceFlags() usize {
     return linux.CLONE.NEWNS | linux.CLONE.NEWNET | linux.CLONE.NEWPID;
 }
 
+fn actionCloneFlags() u32 {
+    return @intCast(actionNamespaceFlags() | @intFromEnum(std.os.linux.SIG.CHLD));
+}
+
 pub const CgroupLimits = struct {
     memory_max_bytes: ?u64 = null,
     cpu_max_cores: ?u32 = null,
     pids_max: ?u32 = null,
+    invalid: bool = false,
 
     pub fn any(self: CgroupLimits) bool {
         return self.memory_max_bytes != null or self.cpu_max_cores != null or self.pids_max != null;
@@ -39,11 +67,25 @@ pub const CgroupLimits = struct {
         const value = platform orelse return out;
         for (value.properties) |property| {
             if (isMemoryProperty(property.name)) {
-                out.memory_max_bytes = parseByteSize(property.value) catch out.memory_max_bytes;
+                out.memory_max_bytes = parseByteSize(property.value) catch {
+                    out.invalid = true;
+                    continue;
+                };
             } else if (isCpuProperty(property.name)) {
-                out.cpu_max_cores = std.fmt.parseInt(u32, property.value, 10) catch out.cpu_max_cores;
+                const cores = std.fmt.parseInt(u32, property.value, 10) catch {
+                    out.invalid = true;
+                    continue;
+                };
+                if (cores == 0) {
+                    out.invalid = true;
+                    continue;
+                }
+                out.cpu_max_cores = cores;
             } else if (isPidsProperty(property.name)) {
-                out.pids_max = std.fmt.parseInt(u32, property.value, 10) catch out.pids_max;
+                out.pids_max = std.fmt.parseInt(u32, property.value, 10) catch {
+                    out.invalid = true;
+                    continue;
+                };
             }
         }
         return out;
@@ -56,8 +98,47 @@ pub const RunOptions = struct {
     bind_mounts: []const BindMount = &.{},
     actiondfs_mounts: []const ActiondfsMount = &.{},
     cgroup_limits: CgroupLimits = .{},
+    timeout_ns: ?u64 = null,
+    cancellation: ?*const std.atomic.Value(bool) = null,
     sandbox_uid: u32 = 65534,
     sandbox_gid: u32 = 65534,
+};
+
+const ExecutionControl = struct {
+    started: ?std.Io.Timestamp,
+    timeout_ns: ?u64,
+    cancellation: ?*const std.atomic.Value(bool),
+
+    fn init(io: std.Io, options: RunOptions) ExecutionControl {
+        return .{
+            .started = if (options.timeout_ns != null) std.Io.Clock.awake.now(io) else null,
+            .timeout_ns = options.timeout_ns,
+            .cancellation = options.cancellation,
+        };
+    }
+
+    fn check(self: ExecutionControl, io: std.Io) !void {
+        if (self.cancellation) |cancellation| {
+            if (cancellation.load(.acquire)) return error.ExecutionCancelled;
+        }
+        const timeout_ns = self.timeout_ns orelse return;
+        const elapsed_ns = self.started.?.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
+        if (elapsed_ns >= @as(i96, @intCast(timeout_ns))) return error.ExecutionDeadlineExceeded;
+    }
+
+    fn pollTimeoutMilliseconds(self: ExecutionControl, io: std.Io) !i32 {
+        try self.check(io);
+        const timeout_ns = self.timeout_ns orelse return child_poll_timeout_ms;
+        const elapsed_ns = self.started.?.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
+        const remaining_ns = @as(i96, @intCast(timeout_ns)) - elapsed_ns;
+        if (remaining_ns <= 0) return error.ExecutionDeadlineExceeded;
+        const remaining_ms = @divTrunc(remaining_ns + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        return @intCast(@min(@as(i96, child_poll_timeout_ms), remaining_ms));
+    }
+
+    fn bounded(self: ExecutionControl) bool {
+        return self.timeout_ns != null or self.cancellation != null;
+    }
 };
 
 pub const BindMount = struct {
@@ -107,6 +188,11 @@ pub const Outcome = struct {
         root_directory_digest: ?cas.Digest = null,
     };
 
+    pub const OutputSymlink = struct {
+        path: []u8,
+        target: []u8,
+    };
+
     status: Status,
     stdout: []u8,
     stderr: []u8,
@@ -114,14 +200,32 @@ pub const Outcome = struct {
     stderr_digest: ?cas.Digest = null,
     output_files: []OutputFile = &.{},
     output_directories: []OutputDirectory = &.{},
+    output_symlinks: []OutputSymlink = &.{},
+    output_file_symlinks: []OutputSymlink = &.{},
+    output_directory_symlinks: []OutputSymlink = &.{},
     execution_metadata: ?reapi.ExecutedActionMetadata = null,
     runner_timing: ?RunTiming = null,
 
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
         for (self.output_files) |output_file| allocator.free(output_file.path);
         for (self.output_directories) |output_directory| allocator.free(output_directory.path);
+        for (self.output_symlinks) |output_symlink| {
+            allocator.free(output_symlink.path);
+            allocator.free(output_symlink.target);
+        }
+        for (self.output_file_symlinks) |output_symlink| {
+            allocator.free(output_symlink.path);
+            allocator.free(output_symlink.target);
+        }
+        for (self.output_directory_symlinks) |output_symlink| {
+            allocator.free(output_symlink.path);
+            allocator.free(output_symlink.target);
+        }
         allocator.free(self.output_files);
         allocator.free(self.output_directories);
+        allocator.free(self.output_symlinks);
+        allocator.free(self.output_file_symlinks);
+        allocator.free(self.output_directory_symlinks);
         allocator.free(self.stdout);
         allocator.free(self.stderr);
         self.* = undefined;
@@ -197,43 +301,32 @@ const Cgroup = struct {
 
     fn create(io: std.Io, allocator: std.mem.Allocator, limits: CgroupLimits) !Cgroup {
         if (comptime builtin.os.tag != .linux) return .{};
+        if (limits.invalid) return error.InvalidCgroupLimit;
         if (!limits.any()) return .{};
 
-        var root = std.Io.Dir.openDirAbsolute(io, "/sys/fs/cgroup", .{}) catch return .{};
+        var root = try std.Io.Dir.openDirAbsolute(io, "/sys/fs/cgroup", .{});
         defer root.close(io);
 
-        root.createDirPath(io, "actiond") catch return .{};
-        root.writeFile(io, .{
-            .sub_path = "cgroup.subtree_control",
-            .data = "+cpu +memory +pids",
-        }) catch {};
+        try root.createDirPath(io, "actiond");
+        if (limits.memory_max_bytes != null) try enableCgroupController(io, root, "+memory");
+        if (limits.cpu_max_cores != null) try enableCgroupController(io, root, "+cpu");
+        if (limits.pids_max != null) try enableCgroupController(io, root, "+pids");
 
         const id = next_cgroup_id.fetchAdd(1, .monotonic);
         const path = try std.fmt.allocPrint(allocator, "actiond/action-{d}", .{id});
         errdefer allocator.free(path);
-        root.createDirPath(io, path) catch return .{};
+        try root.createDirPath(io, path);
+        errdefer root.deleteTree(io, path) catch {};
 
         if (limits.memory_max_bytes) |value| {
-            writeCgroupValue(io, allocator, root, path, "memory.max", "{d}", .{value}) catch {
-                root.deleteTree(io, path) catch {};
-                allocator.free(path);
-                return .{};
-            };
+            try writeCgroupValue(io, allocator, root, path, "memory.max", "{d}", .{value});
         }
         if (limits.cpu_max_cores) |value| {
             const quota = @as(u64, value) * cgroup_period_us;
-            writeCgroupValue(io, allocator, root, path, "cpu.max", "{d} {d}", .{ quota, cgroup_period_us }) catch {
-                root.deleteTree(io, path) catch {};
-                allocator.free(path);
-                return .{};
-            };
+            try writeCgroupValue(io, allocator, root, path, "cpu.max", "{d} {d}", .{ quota, cgroup_period_us });
         }
         if (limits.pids_max) |value| {
-            writeCgroupValue(io, allocator, root, path, "pids.max", "{d}", .{value}) catch {
-                root.deleteTree(io, path) catch {};
-                allocator.free(path);
-                return .{};
-            };
+            try writeCgroupValue(io, allocator, root, path, "pids.max", "{d}", .{value});
         }
 
         const procs_path = try std.fmt.allocPrintSentinel(allocator, "/sys/fs/cgroup/{s}/cgroup.procs", .{path}, 0);
@@ -272,6 +365,17 @@ const Cgroup = struct {
         self.* = .{};
     }
 };
+
+fn enableCgroupController(io: std.Io, root: std.Io.Dir, controller: []const u8) !void {
+    try root.writeFile(io, .{
+        .sub_path = "cgroup.subtree_control",
+        .data = controller,
+    });
+    try root.writeFile(io, .{
+        .sub_path = "actiond/cgroup.subtree_control",
+        .data = controller,
+    });
+}
 
 fn writeCgroupValue(
     io: std.Io,
@@ -326,11 +430,11 @@ fn prepareChrootWritableSubdirs(
 
 fn makeDirectoryWritableBySandbox(fd: std.posix.fd_t, uid: u32, gid: u32) !void {
     const linux = std.os.linux;
-    switch (std.posix.errno(linux.fchown(fd, @intCast(uid), @intCast(gid)))) {
+    switch (std.os.linux.errno(linux.fchown(fd, @intCast(uid), @intCast(gid)))) {
         .SUCCESS => {},
         else => return error.Unexpected,
     }
-    switch (std.posix.errno(linux.fchmod(fd, 0o755))) {
+    switch (std.os.linux.errno(linux.fchmod(fd, 0o755))) {
         .SUCCESS => {},
         else => return error.Unexpected,
     }
@@ -345,6 +449,8 @@ fn runCommandChroot(
 ) !Outcome {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
     const runner_start = runnerTimingNow(io);
+    const execution_control = ExecutionControl.init(io, options);
+    try execution_control.check(io);
     const chroot_dir = options.chroot_dir;
 
     var cgroup = try Cgroup.create(io, allocator, options.cgroup_limits);
@@ -394,21 +500,22 @@ fn runCommandChroot(
         envp[i] = value.ptr;
     }
 
-    const stdin_pipe = try linuxPipe();
-    errdefer closePipe(stdin_pipe);
-    const stdout_pipe = try linuxPipe();
-    errdefer closePipe(stdout_pipe);
-    const stderr_pipe = try linuxPipe();
-    errdefer closePipe(stderr_pipe);
-    const setup_pipe = try linuxPipe();
-    errdefer closePipe(setup_pipe);
+    var stdin_pipe = try OwnedPipe.init();
+    defer stdin_pipe.deinit();
+    var stdout_pipe = try OwnedPipe.init();
+    defer stdout_pipe.deinit();
+    var stderr_pipe = try OwnedPipe.init();
+    defer stderr_pipe.deinit();
+    var setup_pipe = try OwnedPipe.init();
+    defer setup_pipe.deinit();
 
+    try execution_control.check(io);
     const fork_start = runnerTimingNow(io);
     const pid = try forkAction(.{
-        .stdin_pipe = stdin_pipe,
-        .stdout_pipe = stdout_pipe,
-        .stderr_pipe = stderr_pipe,
-        .setup_pipe = setup_pipe,
+        .stdin_pipe = stdin_pipe.borrow(),
+        .stdout_pipe = stdout_pipe.borrow(),
+        .stderr_pipe = stderr_pipe.borrow(),
+        .setup_pipe = setup_pipe.borrow(),
         .chroot_dir = chroot_z,
         .cwd = cwd_z,
         .exec_candidates = exec_candidates.items,
@@ -424,22 +531,31 @@ fn runCommandChroot(
     var child_waited = false;
     errdefer if (!child_waited) terminateChild(io, allocator, pid, cgroup);
 
-    closeFd(stdin_pipe[0]);
-    closeFd(stdin_pipe[1]);
-    closeFd(stdout_pipe[1]);
-    closeFd(stderr_pipe[1]);
-    closeFd(setup_pipe[1]);
-    errdefer {
-        closeFd(stdout_pipe[0]);
-        closeFd(stderr_pipe[0]);
-        closeFd(setup_pipe[0]);
-    }
+    stdin_pipe.close(0);
+    stdin_pipe.close(1);
+    stdout_pipe.close(1);
+    stderr_pipe.close(1);
+    setup_pipe.close(1);
 
-    const setup_signaled = try readSetupSignal(setup_pipe[0]);
-    closeFd(setup_pipe[0]);
+    const setup_signaled = try readSetupSignal(
+        io,
+        setup_pipe.endpoint(0),
+        execution_control,
+    );
+    setup_pipe.close(0);
+    if (!setup_signaled) return error.SandboxSetupFailed;
     const setup_completed = runnerTimingNow(io);
 
-    const child_result = try collectChildResult(io, allocator, stdout_pipe[0], stderr_pipe[0], pid, cgroup);
+    const child_result = try collectChildResult(
+        io,
+        allocator,
+        stdout_pipe.release(0),
+        stderr_pipe.release(0),
+        pid,
+        cgroup,
+        execution_control,
+        &child_waited,
+    );
     const streams_completed = child_result.streams_completed;
     const wait_completed = child_result.wait_completed;
     child_waited = true;
@@ -493,8 +609,8 @@ const child_setup_fd: std.posix.fd_t = 3;
 
 fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     const linux = std.os.linux;
-    const rc = linux.fork();
-    switch (std.posix.errno(rc)) {
+    const rc = linux.clone2(actionCloneFlags(), 0);
+    switch (std.os.linux.errno(rc)) {
         .SUCCESS => {},
         .AGAIN, .NOMEM => return error.SystemResources,
         else => return error.Unexpected,
@@ -516,13 +632,12 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
         childDup2(action.setup_pipe[1], child_setup_fd);
         childClose(action.setup_pipe[1]);
     }
+    childSyscallName(linux.fcntl(child_setup_fd, linux.F.SETFD, linux.FD_CLOEXEC), "fcntl_setup_cloexec");
 
-    childSyscallName(linux.setpgid(0, 0), "setpgid");
-    if (action.cgroup_procs_path) |path| childWriteFile(path, "0\n");
     childSyscallName(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "prctl_no_new_privs");
     childCloseExtraFdsFrom(child_setup_fd + 1);
-    childSyscallName(linux.unshare(actionNamespaceFlags()), "unshare_namespaces");
-    childEnterPidNamespace();
+    childEnterSandboxProcess();
+    if (action.cgroup_procs_path) |path| childWriteFile(path, "0\n");
     childBringUpLoopback();
     childSyscallName(linux.mount(null, "/", null, linux.MS.PRIVATE | linux.MS.REC, 0), "mount_private");
     for (action.actiondfs_mounts) |mount| switch (mount) {
@@ -534,12 +649,14 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.mount("proc", "/proc", "proc", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, 0), "mount_proc");
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
+    childInstallSocketFilter();
+    childRestoreSigpipeDefault();
     childWriteSetupComplete();
     var exec_errno: std.posix.E = .NOENT;
     var saw_access_denied = false;
     for (action.exec_candidates) |candidate| {
         const execve_rc = linux.execve(candidate.ptr, action.argv, action.envp);
-        exec_errno = std.posix.errno(execve_rc);
+        exec_errno = std.os.linux.errno(execve_rc);
         switch (exec_errno) {
             .NOENT, .NOTDIR => continue,
             .ACCES => {
@@ -554,16 +671,17 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childWriteLiteral("actiond child setup failed: execve ");
     childWriteBytes(@tagName(exec_errno));
     childWriteLiteral("\n");
+    childWriteSetupFrame(child_setup_exec_failure_tag, @intFromEnum(exec_errno));
     linux.exit(127);
 }
 
-fn childEnterPidNamespace() void {
+fn childEnterSandboxProcess() void {
     const linux = std.os.linux;
     const rc = linux.fork();
-    switch (std.posix.errno(rc)) {
+    switch (linux.errno(rc)) {
         .SUCCESS => {},
         else => {
-            childWriteLiteral("actiond child setup failed: fork_pidns\n");
+            childWriteLiteral("actiond child setup failed: fork_sandbox\n");
             linux.exit(127);
         },
     }
@@ -571,14 +689,22 @@ fn childEnterPidNamespace() void {
     const pid: linux.pid_t = @intCast(rc);
     if (pid == 0) return;
 
+    childClose(child_setup_fd);
+    childWaitForProcess(pid);
+}
+
+fn childWaitForProcess(pid: std.os.linux.pid_t) noreturn {
+    const linux = std.os.linux;
     var raw_status: u32 = 0;
     while (true) {
-        const wait_rc = linux.waitpid(pid, &raw_status, 0);
-        switch (std.posix.errno(wait_rc)) {
-            .SUCCESS => break,
+        const wait_rc = linux.waitpid(-1, &raw_status, 0);
+        switch (std.os.linux.errno(wait_rc)) {
+            .SUCCESS => {
+                if (@as(linux.pid_t, @intCast(wait_rc)) == pid) break;
+            },
             .INTR => continue,
             else => {
-                childWriteLiteral("actiond child setup failed: waitpid_pidns\n");
+                childWriteLiteral("actiond child setup failed: waitpid_sandbox\n");
                 linux.exit(127);
             },
         }
@@ -666,7 +792,60 @@ fn childDropPrivileges(uid: u32, gid: u32) void {
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
     };
-    _ = linux.capset(&header, &data[0]);
+    childSyscallName(linux.capset(&header, &data[0]), "capset");
+}
+
+fn childInstallSocketFilter() void {
+    const linux = std.os.linux;
+    const instructions = actionSeccompFilterInstructions();
+    const program = SeccompFilterProgram{
+        .length = instructions.len,
+        .instructions = &instructions,
+    };
+    childSyscallName(linux.prctl(
+        @intFromEnum(linux.PR.SET_SECCOMP),
+        linux.SECCOMP.MODE.FILTER,
+        @intFromPtr(&program),
+        0,
+        0,
+    ), "prctl_seccomp_socket_filter");
+}
+
+fn actionAuditArchitecture() u32 {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => audit_arch_aarch64,
+        .x86_64 => audit_arch_x86_64,
+        else => @compileError("action socket filter requires an audit architecture"),
+    };
+}
+
+fn actionSeccompFilterInstructions() [23]SeccompFilterInstruction {
+    const linux = std.os.linux;
+    return .{
+        .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 4 },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 0, .jump_false = 19, .data = actionAuditArchitecture() },
+        .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 0 },
+        .{ .code = classic_bpf_bitwise_and_constant, .jump_true = 0, .jump_false = 0, .data = ~x86_x32_syscall_bit },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 6, .jump_false = 0, .data = @intFromEnum(linux.SYS.socket) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 14, .jump_false = 0, .data = @intFromEnum(linux.SYS.io_uring_setup) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 13, .jump_false = 0, .data = @intFromEnum(linux.SYS.seccomp) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 12, .jump_false = 0, .data = @intFromEnum(linux.SYS.bpf) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 4, .jump_false = 0, .data = @intFromEnum(linux.SYS.prctl) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 5, .jump_false = 0, .data = @intFromEnum(linux.SYS.setsockopt) },
+        .{ .code = classic_bpf_return_constant, .jump_true = 0, .jump_false = 0, .data = linux.SECCOMP.RET.ALLOW },
+        .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 16 },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 7, .jump_false = 9, .data = linux.AF.VSOCK },
+        .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 16 },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 5, .jump_false = 7, .data = @intCast(@intFromEnum(linux.PR.SET_SECCOMP)) },
+        .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 24 },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 0, .jump_false = 5, .data = linux.SOL.SOCKET },
+        .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 32 },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 1, .jump_false = 0, .data = linux.SO.ATTACH_FILTER },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 0, .jump_false = 2, .data = linux.SO.ATTACH_REUSEPORT_CBPF },
+        .{ .code = classic_bpf_return_constant, .jump_true = 0, .jump_false = 0, .data = @as(u32, linux.SECCOMP.RET.ERRNO) | @as(u32, @intFromEnum(std.posix.E.PERM)) },
+        .{ .code = classic_bpf_return_constant, .jump_true = 0, .jump_false = 0, .data = linux.SECCOMP.RET.KILL_PROCESS },
+        .{ .code = classic_bpf_return_constant, .jump_true = 0, .jump_false = 0, .data = linux.SECCOMP.RET.ALLOW },
+    };
 }
 
 fn childDup2(old: std.posix.fd_t, new: std.posix.fd_t) void {
@@ -674,7 +853,7 @@ fn childDup2(old: std.posix.fd_t, new: std.posix.fd_t) void {
 }
 
 fn childClose(fd: std.posix.fd_t) void {
-    while (true) switch (std.posix.errno(std.os.linux.close(fd))) {
+    while (true) switch (std.os.linux.errno(std.os.linux.close(fd))) {
         .SUCCESS => return,
         .INTR => continue,
         else => return,
@@ -682,19 +861,121 @@ fn childClose(fd: std.posix.fd_t) void {
 }
 
 fn childCloseExtraFdsFrom(first_fd: std.posix.fd_t) void {
-    const rc = std.os.linux.close_range(@intCast(first_fd), std.math.maxInt(std.posix.fd_t), .{
+    const linux = std.os.linux;
+    const rc = linux.close_range(@intCast(first_fd), std.math.maxInt(std.posix.fd_t), .{
         .UNSHARE = true,
         .CLOEXEC = false,
     });
-    switch (std.posix.errno(rc)) {
-        .SUCCESS, .NOSYS, .INVAL, .PERM => return,
-        else => return,
+    switch (linux.errno(rc)) {
+        .SUCCESS => return,
+        .NOSYS, .INVAL, .PERM => childCloseExtraFdsIndividually(first_fd),
+        else => childSyscallName(rc, "close_range"),
     }
 }
 
+fn childCloseExtraFdsIndividually(first_fd: std.posix.fd_t) void {
+    const linux = std.os.linux;
+    const directory_rc = linux.open("/proc/self/fd", .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+    }, 0);
+    childSyscallName(directory_rc, "open_proc_fd");
+    const directory_fd: std.posix.fd_t = @intCast(directory_rc);
+    defer childClose(directory_fd);
+
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const read_rc = linux.getdents64(directory_fd, &buffer, buffer.len);
+        switch (linux.errno(read_rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => childSyscallName(read_rc, "getdents_proc_fd"),
+        }
+        const bytes_read: usize = @intCast(read_rc);
+        if (bytes_read == 0) return;
+
+        var offset: usize = 0;
+        while (offset < bytes_read) {
+            const name_offset = @offsetOf(linux.dirent64, "name");
+            if (bytes_read - offset <= name_offset) childInvalidProcFdEntry();
+            const entry: *align(1) const linux.dirent64 = @ptrCast(&buffer[offset]);
+            const record_length: usize = entry.reclen;
+            if (record_length <= name_offset or record_length > bytes_read - offset)
+                childInvalidProcFdEntry();
+            const padded_name = buffer[offset + name_offset .. offset + record_length];
+            const name_length = std.mem.indexOfScalar(u8, padded_name, 0) orelse
+                childInvalidProcFdEntry();
+            const fd = (childProcFdNumber(padded_name[0..name_length]) catch
+                childInvalidProcFdEntry()) orelse {
+                offset += record_length;
+                continue;
+            };
+            offset += record_length;
+            if (fd < first_fd or fd == directory_fd) continue;
+
+            while (true) {
+                const close_rc = linux.close(fd);
+                switch (linux.errno(close_rc)) {
+                    .SUCCESS, .BADF => break,
+                    .INTR => continue,
+                    else => childSyscallName(close_rc, "close_extra_fd"),
+                }
+            }
+        }
+    }
+}
+
+fn childProcFdNumber(name: []const u8) !?std.posix.fd_t {
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return null;
+    if (name.len == 0) return error.InvalidProcFdEntry;
+    for (name) |digit| {
+        if (digit < '0' or digit > '9') return error.InvalidProcFdEntry;
+    }
+    return std.fmt.parseInt(std.posix.fd_t, name, 10) catch error.InvalidProcFdEntry;
+}
+
+fn childInvalidProcFdEntry() noreturn {
+    childWriteLiteral("actiond child setup failed: invalid_proc_fd_entry\n");
+    std.os.linux.exit(127);
+}
+
 fn childWriteSetupComplete() void {
-    _ = std.os.linux.write(child_setup_fd, "1", 1);
-    childClose(child_setup_fd);
+    childWriteSetupFrame(child_setup_ready_tag, 0);
+}
+
+fn childWriteSetupFrame(tag: u8, value: u32) void {
+    const linux = std.os.linux;
+    var frame: [child_setup_frame_length]u8 = undefined;
+    frame[0] = tag;
+    std.mem.writeInt(u32, frame[1..child_setup_frame_length], value, .little);
+
+    var offset: usize = 0;
+    while (offset < frame.len) {
+        const rc = linux.write(child_setup_fd, frame[offset..].ptr, frame.len - offset);
+        switch (linux.errno(rc)) {
+            .SUCCESS => {
+                if (rc == 0) linux.exit(127);
+                offset += rc;
+            },
+            .INTR => continue,
+            else => childSyscallName(rc, "write_setup_frame"),
+        }
+    }
+}
+
+fn childRestoreSigpipeDefault() void {
+    const action = defaultSigpipeAction();
+    childSyscallName(std.os.linux.sigaction(.PIPE, &action, null), "sigaction_sigpipe_default");
+}
+
+fn defaultSigpipeAction() std.os.linux.Sigaction {
+    return .{
+        .handler = .{ .handler = std.os.linux.SIG.DFL },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
 }
 
 fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
@@ -705,7 +986,7 @@ fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         const rc = linux.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {
                 const n: usize = @intCast(rc);
                 if (n == 0) linux.exit(127);
@@ -719,7 +1000,7 @@ fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
 }
 
 fn childSyscallName(rc: usize, comptime name: []const u8) void {
-    if (std.posix.errno(rc) == .SUCCESS) return;
+    if (std.os.linux.errno(rc) == .SUCCESS) return;
     childWriteLiteral("actiond child setup failed: " ++ name ++ "\n");
     std.os.linux.exit(127);
 }
@@ -734,20 +1015,50 @@ fn childWriteBytes(bytes: []const u8) void {
 
 fn linuxPipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
-    switch (std.posix.errno(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
+    switch (std.os.linux.errno(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true }))) {
         .SUCCESS => return fds,
         .NFILE, .MFILE => return error.SystemResources,
         else => return error.Unexpected,
     }
 }
 
-fn closePipe(pipe: [2]std.posix.fd_t) void {
-    closeFd(pipe[0]);
-    closeFd(pipe[1]);
-}
+const OwnedPipe = struct {
+    fds: [2]?std.posix.fd_t,
+
+    fn init() !OwnedPipe {
+        const fds = try linuxPipe();
+        return .{ .fds = .{ fds[0], fds[1] } };
+    }
+
+    fn borrow(self: *const OwnedPipe) [2]std.posix.fd_t {
+        return .{ self.endpoint(0), self.endpoint(1) };
+    }
+
+    fn endpoint(self: *const OwnedPipe, comptime index: usize) std.posix.fd_t {
+        return self.fds[index].?;
+    }
+
+    fn release(self: *OwnedPipe, comptime index: usize) std.posix.fd_t {
+        const fd = self.fds[index].?;
+        self.fds[index] = null;
+        return fd;
+    }
+
+    fn close(self: *OwnedPipe, comptime index: usize) void {
+        if (self.fds[index]) |fd| {
+            self.fds[index] = null;
+            closeFd(fd);
+        }
+    }
+
+    fn deinit(self: *OwnedPipe) void {
+        self.close(0);
+        self.close(1);
+    }
+};
 
 fn closeFd(fd: std.posix.fd_t) void {
-    while (true) switch (std.posix.errno(std.os.linux.close(fd))) {
+    while (true) switch (std.os.linux.errno(std.os.linux.close(fd))) {
         .SUCCESS => return,
         .INTR => continue,
         else => return,
@@ -771,9 +1082,11 @@ fn terminateActionProcesses(
     cgroup: Cgroup,
 ) void {
     const linux = std.os.linux;
+    const rc = linux.kill(pid, .KILL);
+    if (linux.errno(rc) == .SUCCESS) {
+        std.log.info("terminated action namespace init pid={d}", .{pid});
+    }
     cgroup.kill(io, allocator);
-    _ = linux.kill(-pid, .KILL);
-    _ = linux.kill(pid, .KILL);
 }
 
 const ChildResult = struct {
@@ -791,6 +1104,8 @@ fn collectChildResult(
     stderr_fd: std.posix.fd_t,
     pid: std.os.linux.pid_t,
     cgroup: Cgroup,
+    execution_control: ExecutionControl,
+    child_waited: *bool,
 ) !ChildResult {
     var stdout: std.ArrayListUnmanaged(u8) = .empty;
     errdefer stdout.deinit(allocator);
@@ -801,21 +1116,26 @@ fn collectChildResult(
         .{ .fd = stdout_fd, .events = std.os.linux.POLL.IN | std.os.linux.POLL.HUP | std.os.linux.POLL.ERR, .revents = 0 },
         .{ .fd = stderr_fd, .events = std.os.linux.POLL.IN | std.os.linux.POLL.HUP | std.os.linux.POLL.ERR, .revents = 0 },
     };
+    defer for (&poll_fds) |*poll_fd| {
+        if (poll_fd.fd >= 0) closeFd(poll_fd.fd);
+    };
     var open_count: usize = 2;
     var status: ?Status = null;
     var waited_while_streams_open = false;
 
     while (open_count != 0) {
+        try execution_control.check(io);
         if (status == null) {
             if (try waitForPidNoHang(pid)) |value| {
                 status = value;
+                child_waited.* = true;
                 waited_while_streams_open = true;
-                terminateActionProcesses(io, allocator, pid, cgroup);
+                cgroup.kill(io, allocator);
             }
         }
 
-        const rc = std.os.linux.poll(&poll_fds, poll_fds.len, child_poll_timeout_ms);
-        switch (std.posix.errno(rc)) {
+        const rc = std.os.linux.poll(&poll_fds, poll_fds.len, try execution_control.pollTimeoutMilliseconds(io));
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,
             else => return error.Unexpected,
@@ -839,34 +1159,76 @@ fn collectChildResult(
         if (status == null) {
             if (try waitForPidNoHang(pid)) |value| {
                 status = value;
+                child_waited.* = true;
                 waited_while_streams_open = true;
-                terminateActionProcesses(io, allocator, pid, cgroup);
+                cgroup.kill(io, allocator);
             }
         }
     }
 
     const streams_completed = runnerTimingNow(io);
-    const final_status = status orelse try waitForPid(pid);
+    const final_status = status orelse final_status: {
+        const value = try waitForPidControlled(io, pid, execution_control);
+        child_waited.* = true;
+        break :final_status value;
+    };
     const wait_completed = if (waited_while_streams_open)
         streams_completed
     else
         runnerTimingNow(io);
 
+    const owned_stdout = try stdout.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_stdout);
+    const owned_stderr = try stderr.toOwnedSlice(allocator);
+
     return .{
-        .stdout = try stdout.toOwnedSlice(allocator),
-        .stderr = try stderr.toOwnedSlice(allocator),
+        .stdout = owned_stdout,
+        .stderr = owned_stderr,
         .status = final_status,
         .streams_completed = streams_completed,
         .wait_completed = wait_completed,
     };
 }
 
-fn readSetupSignal(fd: std.posix.fd_t) !bool {
-    var byte: [1]u8 = undefined;
+fn readSetupSignal(
+    io: std.Io,
+    fd: std.posix.fd_t,
+    execution_control: ExecutionControl,
+) !bool {
+    var frame: [child_setup_frame_length]u8 = undefined;
+    var frame_length: usize = 0;
+    var ready_signaled = false;
+    var poll_fds = [_]std.os.linux.pollfd{
+        .{ .fd = fd, .events = std.os.linux.POLL.IN | std.os.linux.POLL.HUP | std.os.linux.POLL.ERR, .revents = 0 },
+    };
     while (true) {
-        const rc = std.os.linux.read(fd, byte[0..].ptr, byte.len);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => return rc == 1,
+        try execution_control.check(io);
+        const poll_rc = std.os.linux.poll(&poll_fds, poll_fds.len, try execution_control.pollTimeoutMilliseconds(io));
+        switch (std.os.linux.errno(poll_rc)) {
+            .SUCCESS => {
+                if (poll_rc == 0) continue;
+            },
+            .INTR => continue,
+            else => return error.Unexpected,
+        }
+        const rc = std.os.linux.read(fd, frame[frame_length..].ptr, frame.len - frame_length);
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS => {
+                if (rc == 0) return frame_length == 0 and ready_signaled;
+                frame_length += rc;
+                if (frame_length != frame.len) continue;
+                frame_length = 0;
+
+                const value = std.mem.readInt(u32, frame[1..child_setup_frame_length], .little);
+                switch (frame[0]) {
+                    child_setup_ready_tag => {
+                        if (ready_signaled or value != 0) return false;
+                        ready_signaled = true;
+                    },
+                    child_setup_exec_failure_tag => return false,
+                    else => return false,
+                }
+            },
             .INTR => continue,
             else => return error.Unexpected,
         }
@@ -880,7 +1242,7 @@ fn readPipeChunk(
 ) !bool {
     var buffer: [16 * 1024]u8 = undefined;
     const rc = std.os.linux.read(fd, buffer[0..].ptr, buffer.len);
-    switch (std.posix.errno(rc)) {
+    switch (std.os.linux.errno(rc)) {
         .SUCCESS => {
             const n: usize = @intCast(rc);
             if (n == 0) return true;
@@ -901,7 +1263,7 @@ fn waitForPid(pid: std.os.linux.pid_t) !Status {
     var raw_status: u32 = 0;
     while (true) {
         const rc = std.os.linux.waitpid(pid, &raw_status, 0);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => break,
             .INTR => continue,
             else => return error.Unexpected,
@@ -911,11 +1273,29 @@ fn waitForPid(pid: std.os.linux.pid_t) !Status {
     return statusFromRawWait(raw_status);
 }
 
+fn waitForPidControlled(io: std.Io, pid: std.os.linux.pid_t, execution_control: ExecutionControl) !Status {
+    if (!execution_control.bounded()) return waitForPid(pid);
+
+    var poll_fds = [_]std.os.linux.pollfd{
+        .{ .fd = -1, .events = 0, .revents = 0 },
+    };
+    while (true) {
+        try execution_control.check(io);
+        if (try waitForPidNoHang(pid)) |status| return status;
+        const timeout_ms = @min(try execution_control.pollTimeoutMilliseconds(io), child_exit_poll_timeout_ms);
+        const rc = std.os.linux.poll(&poll_fds, 0, timeout_ms);
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS, .INTR => {},
+            else => return error.Unexpected,
+        }
+    }
+}
+
 fn waitForPidNoHang(pid: std.os.linux.pid_t) !?Status {
     var raw_status: u32 = 0;
     while (true) {
         const rc = std.os.linux.waitpid(pid, &raw_status, std.os.linux.W.NOHANG);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return null;
                 break;
@@ -969,6 +1349,72 @@ fn commandPath(command: reapi.Command) ?[]const u8 {
     return null;
 }
 
+fn evaluateActionSeccompFilterForTest(
+    architecture: u32,
+    syscall_number: u32,
+    arguments: [6]u64,
+) !u32 {
+    const instructions = actionSeccompFilterInstructions();
+    var accumulator: u32 = 0;
+    var index: usize = 0;
+    while (index < instructions.len) {
+        const instruction = instructions[index];
+        switch (instruction.code) {
+            classic_bpf_load_absolute_word => {
+                accumulator = switch (instruction.data) {
+                    0 => syscall_number,
+                    4 => architecture,
+                    16, 24, 32, 40, 48, 56 => @truncate(arguments[(instruction.data - 16) / 8]),
+                    else => return error.InvalidSeccompFilterInstruction,
+                };
+                index += 1;
+            },
+            classic_bpf_bitwise_and_constant => {
+                accumulator &= instruction.data;
+                index += 1;
+            },
+            classic_bpf_jump_equal_constant => {
+                index += 1 + @as(usize, if (accumulator == instruction.data)
+                    instruction.jump_true
+                else
+                    instruction.jump_false);
+            },
+            classic_bpf_return_constant => return instruction.data,
+            else => return error.InvalidSeccompFilterInstruction,
+        }
+    }
+    return error.InvalidSeccompFilterJump;
+}
+
+test "Outcome owns all REAPI output symlink paths and targets" {
+    const allocator = std.testing.allocator;
+    var outcome: Outcome = .{
+        .status = .{ .exited = 0 },
+        .stdout = &.{},
+        .stderr = &.{},
+    };
+    defer outcome.deinit(allocator);
+
+    outcome.output_symlinks = try allocator.alloc(Outcome.OutputSymlink, 1);
+    outcome.output_symlinks[0] = .{ .path = &.{}, .target = &.{} };
+    outcome.output_symlinks[0].path = try allocator.dupe(u8, "out/link");
+    outcome.output_symlinks[0].target = try allocator.dupe(u8, "../target");
+
+    outcome.output_file_symlinks = try allocator.alloc(Outcome.OutputSymlink, 1);
+    outcome.output_file_symlinks[0] = .{ .path = &.{}, .target = &.{} };
+    outcome.output_file_symlinks[0].path = try allocator.dupe(u8, "out/file-link");
+    outcome.output_file_symlinks[0].target = try allocator.dupe(u8, "target-file");
+
+    outcome.output_directory_symlinks = try allocator.alloc(Outcome.OutputSymlink, 1);
+    outcome.output_directory_symlinks[0] = .{ .path = &.{}, .target = &.{} };
+    outcome.output_directory_symlinks[0].path = try allocator.dupe(u8, "out/directory-link");
+    outcome.output_directory_symlinks[0].target = try allocator.dupe(u8, "target-directory");
+
+    try std.testing.expectEqualStrings("../target", outcome.output_symlinks[0].target);
+    try std.testing.expectEqualStrings("target-file", outcome.output_file_symlinks[0].target);
+    try std.testing.expectEqualStrings("target-directory", outcome.output_directory_symlinks[0].target);
+}
+
 test "appendExecCandidates preserves explicit executable path" {
     var candidates: std.ArrayListUnmanaged([:0]u8) = .empty;
     defer {
@@ -1017,7 +1463,7 @@ test "CgroupLimits parses REAPI platform execution properties" {
     try std.testing.expectEqual(@as(u32, 64), limits.pids_max.?);
 }
 
-test "CgroupLimits ignores invalid execution property values" {
+test "CgroupLimits rejects invalid execution property values" {
     const limits = CgroupLimits.fromPlatform(.{
         .properties = &.{
             .{ .name = "memory", .value = "bad" },
@@ -1027,13 +1473,176 @@ test "CgroupLimits ignores invalid execution property values" {
     });
 
     try std.testing.expect(!limits.any());
+    try std.testing.expect(limits.invalid);
 }
 
-test "action namespace flags isolate mounts and networking" {
+test "CgroupLimits rejects zero CPU execution property" {
+    const limits = CgroupLimits.fromPlatform(.{
+        .properties = &.{.{ .name = "cpu", .value = "0" }},
+    });
+
+    try std.testing.expect(!limits.any());
+    try std.testing.expect(limits.invalid);
+}
+
+test "proc descriptor parsing includes descriptors above a lowered soft limit" {
+    try std.testing.expectEqual(@as(?std.posix.fd_t, 1048576), try childProcFdNumber("1048576"));
+    try std.testing.expectEqual(@as(?std.posix.fd_t, null), try childProcFdNumber("."));
+    try std.testing.expectEqual(@as(?std.posix.fd_t, null), try childProcFdNumber(".."));
+    try std.testing.expectError(error.InvalidProcFdEntry, childProcFdNumber("-1"));
+    try std.testing.expectError(error.InvalidProcFdEntry, childProcFdNumber("2147483648"));
+}
+
+test "setup frame stores sandbox readiness" {
+    var frame: [child_setup_frame_length]u8 = undefined;
+    frame[0] = child_setup_ready_tag;
+    std.mem.writeInt(u32, frame[1..child_setup_frame_length], 0, .little);
+
+    try std.testing.expectEqual(child_setup_ready_tag, frame[0]);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, frame[1..child_setup_frame_length], .little));
+    try std.testing.expect(child_setup_frame_length <= 4096);
+}
+
+test "setup frame distinguishes execve failure from a program exit status" {
+    var frame: [child_setup_frame_length]u8 = undefined;
+    frame[0] = child_setup_exec_failure_tag;
+    std.mem.writeInt(u32, frame[1..child_setup_frame_length], @intFromEnum(std.posix.E.NOENT), .little);
+
+    try std.testing.expectEqual(child_setup_exec_failure_tag, frame[0]);
+    try std.testing.expectEqual(
+        @as(u32, @intFromEnum(std.posix.E.NOENT)),
+        std.mem.readInt(u32, frame[1..child_setup_frame_length], .little),
+    );
+    try std.testing.expect(child_setup_exec_failure_tag != child_setup_ready_tag);
+}
+
+test "OwnedPipe disarms released and closed endpoints" {
+    var pipe = OwnedPipe{ .fds = .{ 10, 11 } };
+
+    try std.testing.expectEqual(@as(std.posix.fd_t, 10), pipe.release(0));
+    try std.testing.expectEqual(@as(?std.posix.fd_t, null), pipe.fds[0]);
+    pipe.fds[1] = null;
+    pipe.deinit();
+    try std.testing.expectEqual(@as(?std.posix.fd_t, null), pipe.fds[1]);
+}
+
+test "sandboxed actions restore the default SIGPIPE disposition" {
+    const action = defaultSigpipeAction();
+    try std.testing.expectEqual(std.os.linux.SIG.DFL, action.handler.handler);
+    try std.testing.expectEqual(@as(@TypeOf(action.flags), 0), action.flags);
+}
+
+test "sandbox seccomp rejects AF_VSOCK and io_uring_setup" {
     const linux = std.os.linux;
-    const flags = actionNamespaceFlags();
+    const denied = @as(u32, linux.SECCOMP.RET.ERRNO) | @as(u32, @intFromEnum(std.posix.E.PERM));
+
+    try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.socket),
+        .{ linux.AF.VSOCK, 0, 0, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.io_uring_setup),
+        .{ 0, 0, 0, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(@as(u32, linux.SECCOMP.RET.ALLOW), try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.socket),
+        .{ linux.AF.INET, 0, 0, 0, 0, 0 },
+    ));
+}
+
+test "sandbox seccomp rejects untrusted classic BPF JIT entry points" {
+    const linux = std.os.linux;
+    const denied = @as(u32, linux.SECCOMP.RET.ERRNO) | @as(u32, @intFromEnum(std.posix.E.PERM));
+
+    try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.seccomp),
+        .{ 0, 0, 0, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.bpf),
+        .{ 0, 0, 0, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.prctl),
+        .{ @intCast(@intFromEnum(linux.PR.SET_SECCOMP)), 0, 0, 0, 0, 0 },
+    ));
+    for ([_]u32{ linux.SO.ATTACH_FILTER, linux.SO.ATTACH_REUSEPORT_CBPF }) |option| {
+        try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
+            actionAuditArchitecture(),
+            @intFromEnum(linux.SYS.setsockopt),
+            .{ 7, linux.SOL.SOCKET, option, 0, 0, 0 },
+        ));
+    }
+}
+
+test "sandbox seccomp allows unrelated socket options and prctl operations" {
+    const linux = std.os.linux;
+    const allowed: u32 = linux.SECCOMP.RET.ALLOW;
+
+    try std.testing.expectEqual(allowed, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.prctl),
+        .{ @intCast(@intFromEnum(linux.PR.GET_SECCOMP)), 0, 0, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(allowed, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.setsockopt),
+        .{ 7, linux.SOL.SOCKET, linux.SO.REUSEADDR, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(allowed, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.setsockopt),
+        .{ 7, linux.SOL.IP, linux.SO.ATTACH_FILTER, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(allowed, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.read),
+        .{ 0, 0, 0, 0, 0, 0 },
+    ));
+}
+
+test "sandbox seccomp kills mismatched audit architectures" {
+    const linux = std.os.linux;
+
+    try std.testing.expectEqual(@as(u32, linux.SECCOMP.RET.KILL_PROCESS), try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture() ^ 1,
+        @intFromEnum(linux.SYS.read),
+        .{ 0, 0, 0, 0, 0, 0 },
+    ));
+}
+
+test "ExecutionControl rejects an expired action deadline" {
+    const execution_control = ExecutionControl.init(std.testing.io, .{
+        .chroot_dir = "/",
+        .timeout_ns = 0,
+    });
+
+    try std.testing.expectError(error.ExecutionDeadlineExceeded, execution_control.check(std.testing.io));
+}
+
+test "ExecutionControl rejects a cancelled action" {
+    var cancellation = std.atomic.Value(bool).init(true);
+    const execution_control = ExecutionControl.init(std.testing.io, .{
+        .chroot_dir = "/",
+        .cancellation = &cancellation,
+    });
+
+    try std.testing.expectError(error.ExecutionCancelled, execution_control.check(std.testing.io));
+}
+
+test "action clone flags isolate mounts, networking, and action process IDs" {
+    const linux = std.os.linux;
+    const flags = actionCloneFlags();
     try std.testing.expect((flags & linux.CLONE.NEWNS) != 0);
     try std.testing.expect((flags & linux.CLONE.NEWNET) != 0);
+    try std.testing.expect((flags & linux.CLONE.NEWPID) != 0);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(linux.SIG.CHLD)), flags & linux.CSIGNAL);
 }
 
 test "runCommandWithOptions rejects chroot execution on non-Linux hosts" {
