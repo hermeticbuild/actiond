@@ -168,7 +168,7 @@ glibc_deb_runtime(
     interpreters = ["/lib/ld-linux-aarch64.so.1"],
     libc = "glibc2.31",
     sha256s = ["4ff60d84ad78f3aa598297dc6966549fa6489f57599f197562ad91547f388da0"],
-    urls = ["https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_arm64.deb"],
+    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_arm64.deb"],
 )
 
 shell_deb_runtime(
@@ -176,7 +176,7 @@ shell_deb_runtime(
     arch = "aarch64",
     shell = "bash",
     urls = [
-        "https://ports.ubuntu.com/ubuntu-ports/pool/universe/b/bash/bash-static_5.1-6ubuntu1_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/universe/b/bash/bash-static_5.1-6ubuntu1_arm64.deb",
     ],
     sha256s = [
         "57d782072eb479272f763c60b1a92956b05ef26583f78fcd35ab6ef6efccd926",
@@ -188,7 +188,7 @@ shell_deb_runtime(
     arch = "x86_64",
     shell = "bash",
     urls = [
-        "https://archive.ubuntu.com/ubuntu/pool/universe/b/bash/bash-static_5.1-6ubuntu1_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/universe/b/bash/bash-static_5.1-6ubuntu1_amd64.deb",
     ],
     sha256s = [
         "bacca4af0f72b83ebb9563b3adc28ceaf6ae019977900b999fcdbc240dca890a",
@@ -201,7 +201,7 @@ glibc_deb_runtime(
     interpreters = ["/lib64/ld-linux-x86-64.so.2"],
     libc = "glibc2.31",
     sha256s = ["1b2281aac4935dfea1f89dfc19e445fdbb45303202af60679ccb8bf035f081a0"],
-    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_amd64.deb"],
+    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_amd64.deb"],
 )
 
 glibc_deb_runtime(
@@ -210,7 +210,7 @@ glibc_deb_runtime(
     interpreters = ["/lib/ld-linux-aarch64.so.1"],
     libc = "glibc2.35",
     sha256s = ["39268442551926cf1234a382cd0b2748d9e1db709cac1747d07bbff4b0d76a35"],
-    urls = ["https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb"],
+    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb"],
 )
 
 glibc_deb_runtime(
@@ -219,7 +219,7 @@ glibc_deb_runtime(
     interpreters = ["/lib64/ld-linux-x86-64.so.2"],
     libc = "glibc2.35",
     sha256s = ["48f29742cb2096895e932c6708dfebb498e1e96f5cb09955edae42beb6f01dfa"],
-    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_amd64.deb"],
+    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_amd64.deb"],
 )
 
 glibc_deb_runtime(
@@ -228,7 +228,7 @@ glibc_deb_runtime(
     interpreters = ["/lib/ld-linux-aarch64.so.1"],
     libc = "glibc2.39",
     sha256s = ["7d25b6ffc4df6deefd1a48efff5792d6a6bd89ac064a2a8b88e796d3d533e095"],
-    urls = ["https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb"],
+    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb"],
 )
 
 glibc_deb_runtime(
@@ -237,5 +237,5 @@ glibc_deb_runtime(
     interpreters = ["/lib64/ld-linux-x86-64.so.2"],
     libc = "glibc2.39",
     sha256s = ["955644e8bc2930a9bf8eea5e4c2237c8a118c1e2ac2845b993b6f7f35eefd293"],
-    urls = ["https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_amd64.deb"],
+    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_amd64.deb"],
 )
