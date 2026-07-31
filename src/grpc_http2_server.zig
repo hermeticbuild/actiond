@@ -44,6 +44,7 @@ pub const Dispatcher = struct {
     handle_unary: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
     handle_server_streaming_response: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8, body_sink.Writer) anyerror!void,
     start_client_streaming: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8) anyerror!ClientStream,
+    handle_cancellable_server_streaming_response: ?*const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, []const u8, body_sink.Writer, ?*const std.atomic.Value(bool)) anyerror!void = null,
 
     pub fn fromReapiServer(server: *reapi_dispatch.Server) Dispatcher {
         return .{
@@ -51,6 +52,7 @@ pub const Dispatcher = struct {
             .handle_unary = reapiUnary,
             .handle_server_streaming_response = reapiServerStreamingResponse,
             .start_client_streaming = reapiStartClientStreaming,
+            .handle_cancellable_server_streaming_response = reapiCancellableServerStreamingResponse,
         };
     }
 
@@ -73,6 +75,21 @@ pub const Dispatcher = struct {
         writer: body_sink.Writer,
     ) !void {
         return self.handle_server_streaming_response(self.ctx, io, allocator, method, body, writer);
+    }
+
+    pub fn handleCancellableServerStreamingResponse(
+        self: Dispatcher,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+        cancellation: ?*const std.atomic.Value(bool),
+    ) !void {
+        if (self.handle_cancellable_server_streaming_response) |handler| {
+            return handler(self.ctx, io, allocator, method, body, writer, cancellation);
+        }
+        return self.handleServerStreamingResponse(io, allocator, method, body, writer);
     }
 
     pub fn startClientStreaming(
@@ -105,6 +122,26 @@ pub const Dispatcher = struct {
     ) !void {
         const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
         return server.*.handleServerStreamingResponse(io, allocator, method, body, writer);
+    }
+
+    fn reapiCancellableServerStreamingResponse(
+        ctx: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        method: []const u8,
+        body: []const u8,
+        writer: body_sink.Writer,
+        cancellation: ?*const std.atomic.Value(bool),
+    ) !void {
+        const server: *reapi_dispatch.Server = @ptrCast(@alignCast(ctx));
+        return server.*.handleServerStreamingResponseWithCancellation(
+            io,
+            allocator,
+            method,
+            body,
+            writer,
+            cancellation,
+        );
     }
 
     fn reapiStartClientStreaming(
@@ -176,6 +213,9 @@ pub const Error = error{
 
 pub const max_frame_payload_len = 16 * 1024 * 1024;
 const default_max_concurrent_streams = 128;
+const max_request_header_bytes = 64 * 1024;
+const max_request_body_bytes = 128 * 1024 * 1024;
+const max_connection_request_bytes = 128 * 1024 * 1024;
 const inbound_initial_window_size = 1024 * 1024 * 1024;
 const inbound_window_update_batch_size = 1024 * 1024;
 const grpc_response_headers = [_]http2_hpack.HeaderView{
@@ -293,16 +333,59 @@ const IncomingFrame = struct {
     payload: []u8,
 };
 
+const RequestBudget = struct {
+    used: std.atomic.Value(usize) = .init(0),
+
+    fn reserve(self: *RequestBudget, len: usize) !void {
+        if (len > max_connection_request_bytes) return error.RequestBodyTooLarge;
+        while (true) {
+            const current = self.used.load(.monotonic);
+            if (current > max_connection_request_bytes - len) return error.RequestBodyTooLarge;
+            if (self.used.cmpxchgWeak(current, current + len, .monotonic, .monotonic) == null) return;
+        }
+    }
+
+    fn release(self: *RequestBudget, len: usize) void {
+        _ = self.used.fetchSub(len, .monotonic);
+    }
+};
+
 const StreamState = struct {
     id: u31,
+    request_budget: *RequestBudget,
+    buffered_bytes: usize = 0,
     method: ?[]u8 = null,
     header_block: std.ArrayListUnmanaged(u8) = .empty,
     body: std.ArrayListUnmanaged(u8) = .empty,
     client_stream: ?ClientStream = null,
     inbound_window_update_pending: usize = 0,
 
-    fn init(id: u31) StreamState {
-        return .{ .id = id };
+    fn init(id: u31, request_budget: *RequestBudget) StreamState {
+        return .{ .id = id, .request_budget = request_budget };
+    }
+
+    fn appendHeaderBlock(self: *StreamState, allocator: std.mem.Allocator, bytes: []const u8) !void {
+        if (bytes.len > max_request_header_bytes or
+            self.header_block.items.len > max_request_header_bytes - bytes.len)
+        {
+            return error.RequestHeadersTooLarge;
+        }
+        try self.request_budget.reserve(bytes.len);
+        errdefer self.request_budget.release(bytes.len);
+        try self.header_block.appendSlice(allocator, bytes);
+        self.buffered_bytes += bytes.len;
+    }
+
+    fn appendBody(self: *StreamState, allocator: std.mem.Allocator, bytes: []const u8) !void {
+        if (bytes.len > max_request_body_bytes or
+            self.body.items.len > max_request_body_bytes - bytes.len)
+        {
+            return error.RequestBodyTooLarge;
+        }
+        try self.request_budget.reserve(bytes.len);
+        errdefer self.request_budget.release(bytes.len);
+        try self.body.appendSlice(allocator, bytes);
+        self.buffered_bytes += bytes.len;
     }
 
     fn deinit(self: *StreamState, io: std.Io, allocator: std.mem.Allocator) void {
@@ -310,9 +393,72 @@ const StreamState = struct {
         if (self.method) |method| allocator.free(method);
         self.header_block.deinit(allocator);
         self.body.deinit(allocator);
+        self.request_budget.release(self.buffered_bytes);
         self.* = undefined;
     }
 };
+
+test "HTTP/2 request state bounds headers and connection-wide buffered bodies" {
+    const headers = try std.testing.allocator.alloc(u8, max_request_header_bytes + 1);
+    defer std.testing.allocator.free(headers);
+    @memset(headers, 'a');
+
+    {
+        var request_budget = RequestBudget{};
+        var state = StreamState.init(1, &request_budget);
+        defer state.deinit(std.testing.io, std.testing.allocator);
+        try std.testing.expectError(
+            error.RequestHeadersTooLarge,
+            state.appendHeaderBlock(std.testing.allocator, headers),
+        );
+        try state.appendHeaderBlock(std.testing.allocator, headers[0 .. max_request_header_bytes / 2]);
+        try state.appendHeaderBlock(std.testing.allocator, headers[0 .. max_request_header_bytes / 2]);
+        try std.testing.expectError(
+            error.RequestHeadersTooLarge,
+            state.appendHeaderBlock(std.testing.allocator, headers[0..1]),
+        );
+    }
+
+    {
+        var request_budget = RequestBudget{};
+        try request_budget.reserve(max_connection_request_bytes);
+        defer request_budget.release(max_connection_request_bytes);
+
+        var state = StreamState.init(1, &request_budget);
+        defer state.deinit(std.testing.io, std.testing.allocator);
+        try std.testing.expectError(
+            error.RequestBodyTooLarge,
+            state.appendBody(std.testing.allocator, "x"),
+        );
+    }
+}
+
+test "HTTP/2 refuses more unfinished streams than advertised" {
+    var request_budget = RequestBudget{};
+    var streams: std.ArrayListUnmanaged(StreamState) = .empty;
+    defer {
+        for (streams.items) |*state| state.deinit(std.testing.io, std.testing.allocator);
+        streams.deinit(std.testing.allocator);
+    }
+
+    for (0..default_max_concurrent_streams) |index| {
+        _ = try getOrCreateStream(
+            std.testing.allocator,
+            &streams,
+            @intCast(index + 1),
+            &request_budget,
+        );
+    }
+    try std.testing.expectError(
+        error.TooManyConcurrentStreams,
+        getOrCreateStream(
+            std.testing.allocator,
+            &streams,
+            default_max_concurrent_streams + 1,
+            &request_budget,
+        ),
+    );
+}
 
 const SharedHttp2Writer = struct {
     mutex: std.Io.Mutex = .init,
@@ -330,6 +476,10 @@ const SharedHttp2Writer = struct {
 
     fn unregisterStream(self: *SharedHttp2Writer, stream_id: u31) void {
         self.flow.unregisterStream(stream_id);
+    }
+
+    fn shutdownStreams(self: *SharedHttp2Writer) void {
+        self.flow.shutdown();
     }
 
     fn applyPeerSettings(self: *SharedHttp2Writer, payload: []const u8) !void {
@@ -592,6 +742,7 @@ const FlowControl = struct {
     initial_stream_window: i64 = http2_frame.default_initial_window_size,
     max_frame_size: usize = http2_frame.default_max_frame_size,
     streams: std.ArrayListUnmanaged(Stream) = .empty,
+    closed: bool = false,
 
     fn deinit(self: *FlowControl, allocator: std.mem.Allocator) void {
         self.lock_state.lock();
@@ -603,6 +754,7 @@ const FlowControl = struct {
         self.lock_state.lock();
         defer self.lock_state.unlock();
 
+        if (self.closed) return error.StreamClosed;
         if (self.findStreamIndexLocked(stream_id) != null) return;
         try self.streams.append(allocator, .{
             .id = stream_id,
@@ -617,6 +769,12 @@ const FlowControl = struct {
         if (self.findStreamIndexLocked(stream_id)) |index| {
             _ = self.streams.orderedRemove(index);
         }
+    }
+
+    fn shutdown(self: *FlowControl) void {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+        self.closed = true;
     }
 
     fn applySettings(self: *FlowControl, payload: []const u8) !void {
@@ -674,6 +832,10 @@ const FlowControl = struct {
                     self.lock_state.unlock();
                     return @intCast(chunk_len_i64);
                 }
+                if (self.closed) {
+                    self.lock_state.unlock();
+                    return error.StreamClosed;
+                }
                 self.lock_state.unlock();
                 try sleepMilliseconds(io, 1);
                 continue;
@@ -708,6 +870,17 @@ const FlowControl = struct {
     }
 };
 
+test "FlowControl shutdown releases response writers blocked on zero credit" {
+    var flow = FlowControl{};
+    defer flow.deinit(std.testing.allocator);
+    try flow.registerStream(std.testing.allocator, 1);
+    flow.connection_window = 0;
+    flow.shutdown();
+
+    try std.testing.expectError(error.StreamClosed, flow.reserveData(std.testing.io, 1, 1));
+    try std.testing.expectError(error.StreamClosed, flow.registerStream(std.testing.allocator, 3));
+}
+
 const SpinLock = struct {
     locked: std.atomic.Value(bool) = .init(false),
 
@@ -723,22 +896,83 @@ const SpinLock = struct {
 };
 
 const ResponseTracker = struct {
-    active: std.atomic.Value(u32) = .init(0),
+    const ActiveResponse = struct {
+        stream_id: u31,
+        cancellation: std.atomic.Value(bool) = .init(false),
+        next: ?*ActiveResponse = null,
+    };
 
-    fn begin(self: *ResponseTracker, io: std.Io) !void {
+    active: std.atomic.Value(u32) = .init(0),
+    lock: SpinLock = .{},
+    first: ?*ActiveResponse = null,
+
+    fn begin(
+        self: *ResponseTracker,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+    ) !*ActiveResponse {
+        _ = io;
         while (true) {
             const current = self.active.load(.monotonic);
             if (current >= default_max_concurrent_streams) {
                 addStat(&grpc_response_concurrency_waits, 1);
-                try sleepMilliseconds(io, 1);
-                continue;
+                return error.TooManyConcurrentStreams;
             }
-            if (self.active.cmpxchgWeak(current, current + 1, .monotonic, .monotonic) == null) return;
+            if (self.active.cmpxchgWeak(current, current + 1, .monotonic, .monotonic) == null) break;
+        }
+
+        errdefer _ = self.active.fetchSub(1, .monotonic);
+        const response = try allocator.create(ActiveResponse);
+        response.* = .{ .stream_id = stream_id };
+
+        self.lock.lock();
+        defer self.lock.unlock();
+        response.next = self.first;
+        self.first = response;
+        return response;
+    }
+
+    fn finish(self: *ResponseTracker, allocator: std.mem.Allocator, response: *ActiveResponse) void {
+        self.lock.lock();
+        var previous: ?*ActiveResponse = null;
+        var current = self.first;
+        while (current) |entry| {
+            if (entry == response) {
+                if (previous) |parent| {
+                    parent.next = entry.next;
+                } else {
+                    self.first = entry.next;
+                }
+                break;
+            }
+            previous = entry;
+            current = entry.next;
+        }
+        self.lock.unlock();
+        allocator.destroy(response);
+        _ = self.active.fetchSub(1, .monotonic);
+    }
+
+    fn cancel(self: *ResponseTracker, stream_id: u31) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        var current = self.first;
+        while (current) |entry| : (current = entry.next) {
+            if (entry.stream_id == stream_id) {
+                entry.cancellation.store(true, .release);
+                return;
+            }
         }
     }
 
-    fn finish(self: *ResponseTracker) void {
-        _ = self.active.fetchSub(1, .monotonic);
+    fn cancelAll(self: *ResponseTracker) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        var current = self.first;
+        while (current) |entry| : (current = entry.next) {
+            entry.cancellation.store(true, .release);
+        }
     }
 
     fn wait(self: *ResponseTracker, io: std.Io) !void {
@@ -747,6 +981,38 @@ const ResponseTracker = struct {
         }
     }
 };
+
+test "ResponseTracker cancels only the requested HTTP/2 stream" {
+    var tracker = ResponseTracker{};
+    const first = try tracker.begin(std.testing.io, std.testing.allocator, 1);
+    defer tracker.finish(std.testing.allocator, first);
+    const second = try tracker.begin(std.testing.io, std.testing.allocator, 3);
+    defer tracker.finish(std.testing.allocator, second);
+
+    tracker.cancel(1);
+    try std.testing.expect(first.cancellation.load(.acquire));
+    try std.testing.expect(!second.cancellation.load(.acquire));
+
+    tracker.cancelAll();
+    try std.testing.expect(second.cancellation.load(.acquire));
+}
+
+test "ResponseTracker refuses saturated HTTP/2 streams without blocking the frame reader" {
+    var tracker = ResponseTracker{};
+    var responses: [default_max_concurrent_streams]*ResponseTracker.ActiveResponse = undefined;
+    var started: usize = 0;
+    defer for (responses[0..started]) |response| tracker.finish(std.testing.allocator, response);
+
+    for (&responses, 0..) |*response, index| {
+        response.* = try tracker.begin(std.testing.io, std.testing.allocator, @intCast(index + 1));
+        started += 1;
+    }
+    try std.testing.expectError(
+        error.TooManyConcurrentStreams,
+        tracker.begin(std.testing.io, std.testing.allocator, default_max_concurrent_streams + 1),
+    );
+    try std.testing.expectEqual(@as(u32, default_max_concurrent_streams), tracker.active.load(.monotonic));
+}
 
 pub fn serve(
     io: std.Io,
@@ -903,7 +1169,11 @@ fn handleConnectionStreamsTracked(
     defer shared_writer.deinit(allocator);
     var responses = ResponseTracker{};
     var response_tasks: std.Io.Group = .init;
-    defer response_tasks.cancel(io);
+    defer {
+        responses.cancelAll();
+        shared_writer.shutdownStreams();
+        response_tasks.cancel(io);
+    }
 
     try shared_writer.sendServerSettings(io);
 
@@ -912,6 +1182,7 @@ fn handleConnectionStreamsTracked(
     var frame_payload: std.ArrayListUnmanaged(u8) = .empty;
     defer frame_payload.deinit(allocator);
 
+    var request_budget = RequestBudget{};
     var streams: std.ArrayListUnmanaged(StreamState) = .empty;
     defer {
         for (streams.items) |*stream| stream.deinit(io, allocator);
@@ -945,10 +1216,15 @@ fn handleConnectionStreamsTracked(
                 shared_writer.applyWindowUpdate(incoming.header.stream_id, increment);
             },
             .headers => {
+                const state = try getOrCreateStream(
+                    allocator,
+                    &streams,
+                    incoming.header.stream_id,
+                    &request_budget,
+                );
                 try shared_writer.registerStream(allocator, incoming.header.stream_id);
-                const state = try getOrCreateStream(allocator, &streams, incoming.header.stream_id);
                 const fragment = try headersFragment(incoming.header.flags, incoming.payload);
-                try state.header_block.appendSlice(allocator, fragment);
+                try state.appendHeaderBlock(allocator, fragment);
 
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_headers)) {
                     try finishHeaders(allocator, &hpack_decoder, state);
@@ -963,23 +1239,33 @@ fn handleConnectionStreamsTracked(
             },
             .continuation => {
                 if (continuation_stream != incoming.header.stream_id) return error.UnexpectedContinuation;
+                const state = try getOrCreateStream(
+                    allocator,
+                    &streams,
+                    incoming.header.stream_id,
+                    &request_budget,
+                );
                 try shared_writer.registerStream(allocator, incoming.header.stream_id);
-                const state = try getOrCreateStream(allocator, &streams, incoming.header.stream_id);
-                try state.header_block.appendSlice(allocator, incoming.payload);
+                try state.appendHeaderBlock(allocator, incoming.payload);
                 if (http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_headers)) {
                     try finishHeaders(allocator, &hpack_decoder, state);
                     continuation_stream = null;
                 }
             },
             .data => {
+                const state = try getOrCreateStream(
+                    allocator,
+                    &streams,
+                    incoming.header.stream_id,
+                    &request_budget,
+                );
                 try shared_writer.registerStream(allocator, incoming.header.stream_id);
-                const state = try getOrCreateStream(allocator, &streams, incoming.header.stream_id);
                 const data = try dataPayload(incoming.header.flags, incoming.payload);
                 if (isClientStreaming(state)) {
                     try ensureClientStream(io, allocator, dispatcher, state);
                     try state.client_stream.?.append(io, allocator, data);
                 } else {
-                    try state.body.appendSlice(allocator, data);
+                    try state.appendBody(allocator, data);
                 }
                 const end_stream = http2_frame.hasFlag(incoming.header.flags, http2_frame.flag_end_stream);
                 try shared_writer.sendWindowUpdates(io, state, data.len, end_stream);
@@ -988,6 +1274,7 @@ fn handleConnectionStreamsTracked(
                 }
             },
             .rst_stream => {
+                responses.cancel(incoming.header.stream_id);
                 shared_writer.unregisterStream(incoming.header.stream_id);
                 removeStream(io, allocator, &streams, incoming.header.stream_id);
             },
@@ -995,6 +1282,8 @@ fn handleConnectionStreamsTracked(
             .priority, .push_promise => {},
         }
     }
+    responses.cancelAll();
+    shared_writer.shutdownStreams();
     try response_tasks.await(io);
     try responses.wait(io);
 }
@@ -1107,11 +1396,13 @@ fn getOrCreateStream(
     allocator: std.mem.Allocator,
     streams: *std.ArrayListUnmanaged(StreamState),
     id: u31,
+    request_budget: *RequestBudget,
 ) !*StreamState {
     for (streams.items) |*stream| {
         if (stream.id == id) return stream;
     }
-    try streams.append(allocator, StreamState.init(id));
+    if (streams.items.len >= default_max_concurrent_streams) return error.TooManyConcurrentStreams;
+    try streams.append(allocator, StreamState.init(id, request_budget));
     return &streams.items[streams.items.len - 1];
 }
 
@@ -1150,8 +1441,16 @@ fn respondAndRemove(
         errdefer owned_state.deinit(io, allocator);
         errdefer writer.unregisterStream(id);
 
-        try responses.begin(io);
-        errdefer responses.finish();
+        const active_response = responses.begin(io, allocator, id) catch |err| switch (err) {
+            error.TooManyConcurrentStreams => {
+                try writer.sendGrpcError(io, id, "8", "TooManyConcurrentStreams");
+                writer.unregisterStream(id);
+                owned_state.deinit(io, allocator);
+                return;
+            },
+            else => return err,
+        };
+        errdefer responses.finish(allocator, active_response);
 
         const task = ResponseTask{
             .io = io,
@@ -1159,6 +1458,7 @@ fn respondAndRemove(
             .dispatcher = dispatcher,
             .writer = writer,
             .responses = responses,
+            .active_response = active_response,
             .state = owned_state,
         };
 
@@ -1174,6 +1474,7 @@ const ResponseTask = struct {
     dispatcher: Dispatcher,
     writer: *SharedHttp2Writer,
     responses: *ResponseTracker,
+    active_response: *ResponseTracker.ActiveResponse,
     state: StreamState,
 
     fn run(task: ResponseTask) void {
@@ -1181,12 +1482,19 @@ const ResponseTask = struct {
         const io = self.io;
         const allocator = self.allocator;
         const responses = self.responses;
-        defer responses.finish();
+        defer responses.finish(allocator, self.active_response);
         defer self.state.deinit(io, allocator);
         defer self.writer.unregisterStream(self.state.id);
         defer addStat(&grpc_response_tasks_completed, 1);
 
-        respondStream(io, allocator, self.dispatcher, self.writer, &self.state) catch |err| {
+        respondStream(
+            io,
+            allocator,
+            self.dispatcher,
+            self.writer,
+            &self.state,
+            &self.active_response.cancellation,
+        ) catch |err| {
             addStat(&grpc_response_tasks_failed, 1);
             std.log.err("gRPC stream {d} response failed: {s}", .{ self.state.id, @errorName(err) });
         };
@@ -1199,16 +1507,17 @@ fn respondStream(
     dispatcher: Dispatcher,
     writer: *SharedHttp2Writer,
     state: *StreamState,
+    cancellation: ?*const std.atomic.Value(bool),
 ) !void {
     const method = state.method orelse return writer.sendGrpcError(io, state.id, "13", "MissingPathHeader");
     const kind = methodKind(method) orelse return writer.sendGrpcError(io, state.id, "12", "UnsupportedMethod");
     if (kind == .server_streaming) {
-        return respondServerStreaming(io, allocator, dispatcher, writer, state, method);
+        return respondServerStreaming(io, allocator, dispatcher, writer, state, method, cancellation);
     }
 
     const response_body = dispatchGrpc(io, allocator, dispatcher, state, method) catch |err| {
         const status = grpcStatusForError(err);
-        if (!std.mem.eql(u8, status, "5")) std.log.err("gRPC {s} failed: {s}", .{ method, @errorName(err) });
+        if (shouldLogGrpcError(err, status)) std.log.err("gRPC {s} failed: {s}", .{ method, @errorName(err) });
         return writer.sendGrpcError(io, state.id, status, @errorName(err));
     };
     defer allocator.free(response_body);
@@ -1260,6 +1569,7 @@ fn respondServerStreaming(
     writer: *SharedHttp2Writer,
     state: *StreamState,
     method: []const u8,
+    cancellation: ?*const std.atomic.Value(bool),
 ) !void {
     try writer.sendGrpcResponseHeaders(io, state.id);
 
@@ -1267,15 +1577,16 @@ fn respondServerStreaming(
         .writer = writer,
         .stream_id = state.id,
     };
-    dispatcher.handleServerStreamingResponse(
+    dispatcher.handleCancellableServerStreamingResponse(
         io,
         allocator,
         method,
         state.body.items,
         body_writer.bodyWriter(),
+        cancellation,
     ) catch |err| {
         const status = grpcStatusForError(err);
-        if (!std.mem.eql(u8, status, "5")) std.log.err("gRPC {s} failed: {s}", .{ method, @errorName(err) });
+        if (shouldLogGrpcError(err, status)) std.log.err("gRPC {s} failed: {s}", .{ method, @errorName(err) });
         try writer.sendHeaders(io, state.id, true, &.{
             .{ .name = "grpc-status", .value = status },
             .{ .name = "grpc-message", .value = @errorName(err) },
@@ -1286,6 +1597,14 @@ fn respondServerStreaming(
     try writer.sendGrpcSuccessTrailers(io, state.id);
 }
 
+fn shouldLogGrpcError(err: anyerror, status: []const u8) bool {
+    if (std.mem.eql(u8, status, "5")) return false;
+    return switch (err) {
+        error.ExecutionCancelled, error.ExecutionDeadlineExceeded => false,
+        else => true,
+    };
+}
+
 fn grpcStatusForError(err: anyerror) []const u8 {
     return switch (err) {
         error.EmptyExecPath,
@@ -1293,8 +1612,11 @@ fn grpcStatusForError(err: anyerror) []const u8 {
         error.InvalidDigestHash,
         error.InvalidDigestSize,
         error.InvalidDirectoryEntryName,
+        error.InvalidCgroupLimit,
+        error.InvalidEnumValue,
         error.InvalidFieldNumber,
         error.InvalidLength,
+        error.InvalidActionTimeout,
         error.InvalidOutputSymlinkPath,
         error.InvalidSymlinkName,
         error.InvalidSymlinkTarget,
@@ -1305,7 +1627,22 @@ fn grpcStatusForError(err: anyerror) []const u8 {
         error.OutputParentConflictsWithInputSymlink,
         error.UnexpectedWireType,
         => "3",
+        error.ExecutionCancelled => "1",
+        error.ExecutionDeadlineExceeded => "4",
         error.FileNotFound => "5",
+        error.ActionResultTooLarge,
+        error.FileTooBig,
+        error.OutputAggregateTooLarge,
+        error.OutputDirectoryTooLarge,
+        error.OutputMetadataTooLarge,
+        error.OutputPathTooLong,
+        error.OutputTreeTooDeep,
+        error.OutputTreeTooLarge,
+        error.RequestBodyTooLarge,
+        error.RequestHeadersTooLarge,
+        error.TooManyConcurrentStreams,
+        error.TooManyOutputEntries,
+        => "8",
         error.FailedPrecondition => "9",
         error.UnsupportedMethod => "12",
         else => "13",
@@ -1319,8 +1656,11 @@ test "gRPC status maps invalid REAPI symlinks, directories, and execution paths"
         error.InvalidDigestHash,
         error.InvalidDigestSize,
         error.InvalidDirectoryEntryName,
+        error.InvalidCgroupLimit,
+        error.InvalidEnumValue,
         error.InvalidFieldNumber,
         error.InvalidLength,
+        error.InvalidActionTimeout,
         error.InvalidOutputSymlinkPath,
         error.InvalidSymlinkName,
         error.InvalidSymlinkTarget,
@@ -1337,17 +1677,46 @@ test "gRPC status maps invalid REAPI symlinks, directories, and execution paths"
 }
 
 test "gRPC status maps failed preconditions and preserves existing error mappings" {
+    try std.testing.expectEqualStrings("1", grpcStatusForError(error.ExecutionCancelled));
+    try std.testing.expectEqualStrings("4", grpcStatusForError(error.ExecutionDeadlineExceeded));
     try std.testing.expectEqualStrings("9", grpcStatusForError(error.FailedPrecondition));
     try std.testing.expectEqualStrings("5", grpcStatusForError(error.FileNotFound));
     try std.testing.expectEqualStrings("12", grpcStatusForError(error.UnsupportedMethod));
     try std.testing.expectEqualStrings("13", grpcStatusForError(error.OutOfMemory));
 }
 
+test "gRPC cancellation and deadline completion do not log server failures" {
+    try std.testing.expect(!shouldLogGrpcError(error.ExecutionCancelled, "1"));
+    try std.testing.expect(!shouldLogGrpcError(error.ExecutionDeadlineExceeded, "4"));
+    try std.testing.expect(!shouldLogGrpcError(error.FileNotFound, "5"));
+    try std.testing.expect(shouldLogGrpcError(error.OutOfMemory, "13"));
+}
+
+test "gRPC status maps bounded action outputs to RESOURCE_EXHAUSTED" {
+    const exhausted = [_]anyerror{
+        error.ActionResultTooLarge,
+        error.FileTooBig,
+        error.OutputAggregateTooLarge,
+        error.OutputDirectoryTooLarge,
+        error.OutputMetadataTooLarge,
+        error.OutputPathTooLong,
+        error.OutputTreeTooDeep,
+        error.OutputTreeTooLarge,
+        error.RequestBodyTooLarge,
+        error.RequestHeadersTooLarge,
+        error.TooManyConcurrentStreams,
+        error.TooManyOutputEntries,
+    };
+    for (exhausted) |err| {
+        try std.testing.expectEqualStrings("8", grpcStatusForError(err));
+    }
+}
+
 fn sleepMilliseconds(io: std.Io, milliseconds: u32) !void {
     try io.sleep(.fromMilliseconds(milliseconds), .awake);
 }
 
-fn ignoreSigpipe() void {
+pub fn ignoreSigpipe() void {
     if (comptime std.posix.Sigaction == void) return;
 
     const act: std.posix.Sigaction = .{
@@ -1779,6 +2148,106 @@ test "HTTP/2 connection responds to completed streams concurrently" {
     }
     try std.testing.expect(saw_first);
     try std.testing.expect(saw_second);
+}
+
+test "HTTP/2 RST_STREAM cancels an active server-streaming request" {
+    const Probe = struct {
+        saw_cancellation: std.atomic.Value(bool) = .init(false),
+
+        fn dispatcher(self: *@This()) Dispatcher {
+            return .{
+                .ctx = self,
+                .handle_unary = unary,
+                .handle_server_streaming_response = serverStreamingResponse,
+                .start_client_streaming = startClientStreaming,
+                .handle_cancellable_server_streaming_response = cancellableServerStreamingResponse,
+            };
+        }
+
+        fn unary(
+            _: *anyopaque,
+            _: std.Io,
+            _: std.mem.Allocator,
+            _: []const u8,
+            _: []const u8,
+        ) ![]u8 {
+            return error.UnsupportedMethod;
+        }
+
+        fn serverStreamingResponse(
+            _: *anyopaque,
+            _: std.Io,
+            _: std.mem.Allocator,
+            _: []const u8,
+            _: []const u8,
+            _: body_sink.Writer,
+        ) !void {
+            return error.MissingCancellationToken;
+        }
+
+        fn cancellableServerStreamingResponse(
+            ctx: *anyopaque,
+            io: std.Io,
+            _: std.mem.Allocator,
+            _: []const u8,
+            _: []const u8,
+            _: body_sink.Writer,
+            cancellation: ?*const std.atomic.Value(bool),
+        ) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const token = cancellation orelse return error.MissingCancellationToken;
+            var attempts: usize = 0;
+            while (!token.load(.acquire)) : (attempts += 1) {
+                if (attempts >= 1_000) return error.CancellationNotObserved;
+                try io.sleep(.fromMilliseconds(1), .awake);
+            }
+            self.saw_cancellation.store(true, .release);
+            return error.ExecutionCancelled;
+        }
+
+        fn startClientStreaming(
+            _: *anyopaque,
+            _: std.Io,
+            _: std.mem.Allocator,
+            _: []const u8,
+        ) !ClientStream {
+            return error.UnsupportedMethod;
+        }
+    };
+
+    var input: std.ArrayListUnmanaged(u8) = .empty;
+    defer input.deinit(std.testing.allocator);
+    try input.appendSlice(std.testing.allocator, http2_frame.client_connection_preface);
+    try appendFrame(std.testing.allocator, &input, .{
+        .length = 0,
+        .type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+
+    const request = try encodeGrpcRequest(std.testing.allocator, reapi.ExecuteRequest{});
+    defer std.testing.allocator.free(request);
+    try appendGrpcRequestFrames(std.testing.allocator, &input, 1, reapi_dispatch.execution_execute, request);
+    const cancel_payload = [_]u8{ 0, 0, 0, 8 };
+    try appendFrame(std.testing.allocator, &input, .{
+        .length = cancel_payload.len,
+        .type = .rst_stream,
+        .flags = 0,
+        .stream_id = 1,
+    }, &cancel_payload);
+
+    var probe = Probe{};
+    var reader = std.Io.Reader.fixed(input.items);
+    var output: std.Io.Writer.Allocating = .init(std.heap.smp_allocator);
+    defer output.deinit();
+    try handleConnectionStreams(
+        std.testing.io,
+        std.heap.smp_allocator,
+        probe.dispatcher(),
+        &reader,
+        &output.writer,
+    );
+    try std.testing.expect(probe.saw_cancellation.load(.acquire));
 }
 
 test "HTTP/2 client streaming dispatches DATA frames without buffered handler" {
