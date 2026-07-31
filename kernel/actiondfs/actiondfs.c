@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * actiondfs - read-only action input manifest filesystem for actiond.
+ * actiondfs - action input and staged output filesystem for actiond.
  *
  * Mount data:
  *   root=<input-root-directory-digest-hash>,root_size=<bytes>,cas=/cas/blobs/sha256[,stage=/stage]
@@ -69,7 +69,6 @@ struct actiondfs_cached_child {
 	char *name;
 	size_t name_len;
 	char *link_target;
-	size_t link_target_len;
 	umode_t mode;
 	u64 size;
 	char hash[65];
@@ -99,7 +98,6 @@ struct actiondfs_blob_path_cache_entry {
 	char hash[65];
 	struct dentry *cas_root;
 	struct dentry *dentry;
-	atomic_t hits;
 };
 
 struct actiondfs_cached_lookup {
@@ -170,9 +168,6 @@ enum actiondfs_stat {
 	ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS,
 	ACTIONDFS_STAT_BLOB_OPEN_BACKING_PATH_NS,
 	ACTIONDFS_STAT_BLOB_OPEN_BACKING_FILE_NS,
-	ACTIONDFS_STAT_BLOB_OPEN_REAL_TOTAL_NS,
-	ACTIONDFS_STAT_BLOB_OPEN_REAL_PATH_NS,
-	ACTIONDFS_STAT_BLOB_OPEN_REAL_FILE_NS,
 	ACTIONDFS_STAT_BLOB_PATH_CACHE_HITS,
 	ACTIONDFS_STAT_BLOB_PATH_CACHE_MISSES,
 	ACTIONDFS_STAT_BLOB_PATH_CACHE_INSERTS,
@@ -279,9 +274,6 @@ static const char * const actiondfs_stat_names[ACTIONDFS_STAT_COUNT] = {
 	[ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS] = "blob_open_backing_total_ns",
 	[ACTIONDFS_STAT_BLOB_OPEN_BACKING_PATH_NS] = "blob_open_backing_path_ns",
 	[ACTIONDFS_STAT_BLOB_OPEN_BACKING_FILE_NS] = "blob_open_backing_file_ns",
-	[ACTIONDFS_STAT_BLOB_OPEN_REAL_TOTAL_NS] = "blob_open_real_total_ns",
-	[ACTIONDFS_STAT_BLOB_OPEN_REAL_PATH_NS] = "blob_open_real_path_ns",
-	[ACTIONDFS_STAT_BLOB_OPEN_REAL_FILE_NS] = "blob_open_real_file_ns",
 	[ACTIONDFS_STAT_BLOB_PATH_CACHE_HITS] = "blob_path_cache_hits",
 	[ACTIONDFS_STAT_BLOB_PATH_CACHE_MISSES] = "blob_path_cache_misses",
 	[ACTIONDFS_STAT_BLOB_PATH_CACHE_INSERTS] = "blob_path_cache_inserts",
@@ -493,10 +485,7 @@ static u64 actiondfs_input_child_ino(struct actiondfs_node *parent,
 	 * allocated staged/root inode range, and never emit zero.  Directory
 	 * iteration clients are allowed to ignore zero-inode dirents.
 	 */
-	hash |= (1ULL << 63);
-	if (!hash)
-		hash = (1ULL << 63);
-	return hash;
+	return hash | (1ULL << 63);
 }
 
 static struct actiondfs_node *
@@ -1139,7 +1128,6 @@ static int actiondfs_append_cached_symlink_child(struct actiondfs_cached_dir *pa
 		parent->symlink_count--;
 		return -ENOMEM;
 	}
-	child->link_target_len = target_len;
 	return 0;
 }
 
@@ -2234,12 +2222,6 @@ static unsigned long actiondfs_digest_cache_key(const char *hash)
 	return key;
 }
 
-static void actiondfs_note_blob_path_cache_hit(
-	struct actiondfs_blob_path_cache_entry *entry)
-{
-	atomic_add_unless(&entry->hits, 1, INT_MAX);
-}
-
 static struct actiondfs_blob_path_cache_entry *
 actiondfs_find_blob_path_cache_locked(struct actiondfs_sb_info *sbi,
 				      const char *hash)
@@ -2275,7 +2257,6 @@ static void actiondfs_get_blob_path_cache_entry_locked(
 	struct actiondfs_blob_path_cache_entry *entry,
 	struct path *out)
 {
-	actiondfs_note_blob_path_cache_hit(entry);
 	list_move_tail(&entry->list, &actiondfs_blob_path_cache_list);
 	out->mnt = sbi->cas_path.mnt;
 	out->dentry = entry->dentry;
@@ -2317,7 +2298,6 @@ static int actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 
 	memcpy(entry->hash, hash, 64);
 	entry->hash[64] = '\0';
-	atomic_set(&entry->hits, 0);
 	entry->cas_root = dget(sbi->cas_path.dentry);
 	entry->dentry = dget(path->dentry);
 	INIT_LIST_HEAD(&entry->list);
@@ -2359,7 +2339,6 @@ static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 	rcu_read_lock();
 	entry = actiondfs_find_blob_path_cache_rcu(sbi, hash);
 	if (entry) {
-		actiondfs_note_blob_path_cache_hit(entry);
 		out->mnt = sbi->cas_path.mnt;
 		out->dentry = entry->dentry;
 		path_get(out);
