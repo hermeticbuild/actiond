@@ -2692,13 +2692,20 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	if (new_node && new_node->origin != ACTIONDFS_NODE_STAGED)
 		return -EROFS;
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_CALLS);
-	err = actiondfs_stage_node_path(sbi, old_parent, &old_parent_path);
-	if (err)
+	if (!sbi->stage_path.dentry) {
+		err = -EROFS;
 		goto out_done;
+	}
+	old_parent_path.mnt = sbi->stage_path.mnt;
+	old_parent_path.dentry = READ_ONCE(old_parent->stage_dentry);
+	if (!old_parent_path.dentry) {
+		err = -ENOENT;
+		goto out_done;
+	}
 	err = actiondfs_ensure_stage_parent_path(sbi, new_parent,
 						 &new_parent_path);
 	if (err)
-		goto out_put_old_path;
+		goto out_done;
 	if (old_parent_path.mnt != new_parent_path.mnt) {
 		err = -EXDEV;
 		goto out_put_new_path;
@@ -2778,8 +2785,6 @@ out_drop_write:
 	mnt_drop_write(old_parent_path.mnt);
 out_put_new_path:
 	path_put(&new_parent_path);
-out_put_old_path:
-	path_put(&old_parent_path);
 out_done:
 	if (err)
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_FAILURES);
