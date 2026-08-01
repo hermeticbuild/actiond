@@ -2712,13 +2712,15 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		err = PTR_ERR(trap);
 		goto out_drop_write;
 	}
-	real_old = lookup_one(&nop_mnt_idmap, &old_name, old_parent_path.dentry);
+	real_old = lookup_one(mnt_idmap(old_parent_path.mnt), &old_name,
+			      old_parent_path.dentry);
 	if (IS_ERR(real_old)) {
 		err = PTR_ERR(real_old);
 		real_old = NULL;
 		goto out_unlock;
 	}
-	real_new = lookup_one(&nop_mnt_idmap, &new_name, new_parent_path.dentry);
+	real_new = lookup_one(mnt_idmap(new_parent_path.mnt), &new_name,
+			      new_parent_path.dentry);
 	if (IS_ERR(real_new)) {
 		err = PTR_ERR(real_new);
 		real_new = NULL;
