@@ -61,7 +61,6 @@
 #define ACTIONDFS_BLOB_PATH_CACHE_MAX 16384
 #define ACTIONDFS_PROC_STATS "actiondfs_stats"
 #define ACTIONDFS_HASH_HEX_LEN 64
-#define ACTIONDFS_SHARDED_HASH_PATH_LEN (2 + 1 + ACTIONDFS_HASH_HEX_LEN)
 #define ACTIONDFS_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 #define ACTIONDFS_UNKNOWN_SIZE (~(u64)0)
 
@@ -988,15 +987,6 @@ static int actiondfs_valid_hash(const char *hash, size_t len)
 static bool actiondfs_is_empty_sha256(const char *hash)
 {
 	return !memcmp(hash, ACTIONDFS_EMPTY_SHA256, ACTIONDFS_HASH_HEX_LEN);
-}
-
-static void actiondfs_sharded_hash_path(const char *hash,
-					char out[ACTIONDFS_SHARDED_HASH_PATH_LEN + 1])
-{
-	memcpy(out, hash, 2);
-	out[2] = '/';
-	memcpy(out + 3, hash, ACTIONDFS_HASH_HEX_LEN);
-	out[ACTIONDFS_SHARDED_HASH_PATH_LEN] = '\0';
 }
 
 static bool actiondfs_retry_stale(int err, unsigned int *attempts)
@@ -1983,9 +1973,6 @@ static struct dentry *actiondfs_get_cached_blob_dentry(
 {
 	struct actiondfs_blob_path_cache_entry *entry;
 	struct dentry *dentry;
-	char path[ACTIONDFS_SHARDED_HASH_PATH_LEN + 1];
-	struct path real_path;
-	int err;
 
 	rcu_read_lock();
 	entry = actiondfs_find_blob_path_cache(sbi, hash);
@@ -1998,16 +1985,12 @@ static struct dentry *actiondfs_get_cached_blob_dentry(
 	rcu_read_unlock();
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_MISSES);
-	actiondfs_sharded_hash_path(hash, path);
-	err = vfs_path_lookup(sbi->cas_path.dentry, sbi->cas_path.mnt,
-			      path, LOOKUP_FOLLOW | LOOKUP_NO_SYMLINKS |
-				    LOOKUP_NO_XDEV, &real_path);
-	if (err)
-		return ERR_PTR(err);
+	dentry = actiondfs_lookup_cas_blob(sbi, hash);
+	if (IS_ERR(dentry))
+		return dentry;
 
-	actiondfs_insert_blob_path_cache(sbi, hash, real_path.dentry);
-	mntput(real_path.mnt);
-	return real_path.dentry;
+	actiondfs_insert_blob_path_cache(sbi, hash, dentry);
+	return dentry;
 }
 
 static void actiondfs_drop_cached_blob_path(struct actiondfs_sb_info *sbi,
