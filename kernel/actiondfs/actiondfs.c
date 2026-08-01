@@ -920,6 +920,8 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	u32 capacity;
 	int err;
 
+	if (target && (!size || size >= PATH_MAX || memchr(target, '\0', size)))
+		return -EINVAL;
 	err = actiondfs_valid_component(name, name_len);
 	if (err)
 		return err;
@@ -959,22 +961,6 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	memcpy(child->hash, hash, ACTIONDFS_HASH_HEX_LEN);
 	children->count++;
 	return 0;
-}
-
-static int actiondfs_append_cached_symlink_child(struct actiondfs_cached_dir *parent,
-						 const char *name,
-						 size_t name_len,
-						 const char *target,
-						 size_t target_len)
-{
-	if (!target_len || target_len >= PATH_MAX ||
-	    memchr(target, '\0', target_len))
-		return -EINVAL;
-
-	return actiondfs_append_cached_child(&parent->symlinks,
-					     name, name_len, S_IFLNK | 0777,
-					     target_len, ACTIONDFS_EMPTY_SHA256,
-					     target);
 }
 
 static int actiondfs_valid_hash(const char *hash, size_t len)
@@ -1781,9 +1767,10 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 	if (err)
 		return err;
 	if (S_ISLNK(mode))
-		return actiondfs_append_cached_symlink_child(
-			parent, child.name, child.name_len, child.symlink.target,
-			child.symlink.target_len);
+		return actiondfs_append_cached_child(
+			&parent->symlinks, child.name, child.name_len,
+			S_IFLNK | 0777, child.symlink.target_len,
+			ACTIONDFS_EMPTY_SHA256, child.symlink.target);
 
 	if (S_ISREG(mode)) {
 		children = &parent->files;
