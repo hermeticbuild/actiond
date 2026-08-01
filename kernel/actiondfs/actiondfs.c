@@ -2300,10 +2300,10 @@ static void actiondfs_insert_staged_inode(struct inode *inode,
 	node->ino = real_inode->i_ino & ~(1ULL << 63);
 	node->mode = (node->mode & S_IFMT) |
 		     (real_inode->i_mode & permission_mask);
+	node->stage_dentry = dget(real_dentry);
 	inode->i_ino = node->ino;
 	inode->i_mode = node->mode;
 	insert_inode_hash(inode);
-	actiondfs_set_stage_dentry(node, real_dentry);
 }
 
 static int actiondfs_read_stage_symlink(struct dentry *dentry, char **target,
