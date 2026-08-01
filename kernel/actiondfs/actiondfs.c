@@ -2287,7 +2287,8 @@ out:
 
 static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 						   struct dentry *dentry,
-						   struct actiondfs_node *parent)
+						   struct actiondfs_node *parent,
+						   struct dentry *stage_dentry)
 {
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
 	struct actiondfs_cached_child *input_child = NULL;
@@ -2303,11 +2304,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	int err;
 
 	parent_path.mnt = sbi->stage_path.mnt;
-	parent_path.dentry = READ_ONCE(parent->stage_dentry);
-	if (!parent_path.dentry) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE);
-		return NULL;
-	}
+	parent_path.dentry = stage_dentry;
 	err = actiondfs_stage_lookup_child(&parent_path, dentry->d_name.name,
 					   dentry->d_name.len, &real_dentry);
 	if (err) {
@@ -2407,6 +2404,7 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 {
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
 	struct actiondfs_node *parent = dir->i_private;
+	struct dentry *stage_dentry;
 	struct inode *inode = NULL;
 	int err;
 
@@ -2418,12 +2416,14 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 		return ERR_PTR(err);
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUPS);
-	if (sbi->stage_path.dentry) {
+	stage_dentry = READ_ONCE(parent->stage_dentry);
+	if (stage_dentry) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUPS);
-		if (READ_ONCE(parent->stage_dentry))
-			inode = actiondfs_lookup_staged_inode(dir, dentry, parent);
-		else
-			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_UNSTAGED_PARENT);
+		inode = actiondfs_lookup_staged_inode(dir, dentry, parent,
+						     stage_dentry);
+	} else if (sbi->stage_path.dentry) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUPS);
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_UNSTAGED_PARENT);
 	}
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
