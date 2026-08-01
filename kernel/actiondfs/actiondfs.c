@@ -2210,12 +2210,15 @@ static void actiondfs_init_inode(struct inode *inode,
 	} else if (S_ISDIR(node->mode)) {
 		inode->i_op = &actiondfs_dir_iops;
 		inode->i_fop = &actiondfs_dir_fops;
+		inode->i_opflags |= IOP_LOOKUP;
 		set_nlink(inode, 2);
 	} else {
 		inode->i_op = &actiondfs_file_iops;
 		inode->i_fop = &actiondfs_file_fops;
+		inode->i_opflags |= IOP_NOFOLLOW;
 		i_size_write(inode, node->size);
 	}
+	inode->i_opflags |= IOP_FASTPERM;
 }
 
 static struct inode *actiondfs_iget(struct super_block *sb,
