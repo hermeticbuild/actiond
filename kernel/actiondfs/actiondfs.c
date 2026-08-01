@@ -829,13 +829,10 @@ static void actiondfs_free_cached_children(
 
 static void actiondfs_free_cached_dir(struct actiondfs_cached_dir *dir)
 {
-	if (!dir)
-		return;
 	actiondfs_free_cached_children(&dir->files);
 	actiondfs_free_cached_children(&dir->dirs);
 	actiondfs_free_cached_children(&dir->symlinks);
-	if (dir->cas_root)
-		dput(dir->cas_root);
+	dput(dir->cas_root);
 	kfree(dir);
 }
 
@@ -2081,7 +2078,8 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 		goto out_buffer;
 
 	*out = entry;
-	entry = NULL;
+	kvfree(buffer);
+	return 0;
 
 out_buffer:
 	kvfree(buffer);
