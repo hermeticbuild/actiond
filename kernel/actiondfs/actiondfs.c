@@ -2255,11 +2255,10 @@ static void actiondfs_insert_staged_inode(struct inode *inode,
 {
 	struct actiondfs_node *node = inode->i_private;
 	struct inode *real_inode = d_inode(real_dentry);
-	umode_t permission_mask = S_ISDIR(node->mode) ? S_IALLUGO : 0777;
 
 	node->ino = real_inode->i_ino & ~(1ULL << 63);
 	node->mode = (node->mode & S_IFMT) |
-		     (real_inode->i_mode & permission_mask);
+		     (real_inode->i_mode & S_IALLUGO);
 	node->stage_dentry = dget(real_dentry);
 	inode->i_ino = node->ino;
 	inode->i_mode = node->mode;
@@ -2341,7 +2340,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 				goto out_error;
 		}
 	} else if (S_ISREG(mode)) {
-		mode = S_IFREG | (mode & 0777);
+		mode = S_IFREG | (mode & S_IALLUGO);
 		size = i_size_read(real_inode);
 	} else if (S_ISLNK(mode)) {
 		err = actiondfs_read_stage_symlink(real_dentry, &link_target,
