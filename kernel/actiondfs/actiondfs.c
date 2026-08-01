@@ -1082,7 +1082,7 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		real_inode = d_inode(real_path.dentry);
 		real_size = real_inode ? i_size_read(real_inode) : -1;
 		if (!real_inode || !S_ISREG(real_inode->i_mode) ||
-		    real_size < 0 || (u64)real_size != expected_size) {
+		    (u64)real_size != expected_size) {
 			dput(real_path.dentry);
 			file = ERR_PTR(-EIO);
 			break;
