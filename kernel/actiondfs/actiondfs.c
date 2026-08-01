@@ -1210,7 +1210,6 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	unsigned int stale_attempts = 0;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
-		.accessed = file_accessed,
 	};
 
 	if (!requested)
@@ -1418,7 +1417,6 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 	unsigned int stale_attempts = 0;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
-		.accessed = file_accessed,
 	};
 
 	if (node->origin == ACTIONDFS_NODE_STAGED) {
@@ -1498,7 +1496,6 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 	int err;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
-		.accessed = file_accessed,
 	};
 
 	if (node->origin == ACTIONDFS_NODE_STAGED) {
