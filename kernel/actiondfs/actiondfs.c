@@ -936,9 +936,14 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	}
 
 	if (children->count == children->capacity) {
+		size_t bytes;
+
 		if (children->capacity > U32_MAX / 2)
 			return -EOVERFLOW;
 		capacity = children->capacity ? children->capacity * 2 : 4;
+		bytes = kmalloc_size_roundup(array_size(capacity,
+						      sizeof(*entries)));
+		capacity = min_t(size_t, bytes / sizeof(*entries), U32_MAX);
 		entries = krealloc_array(children->entries, capacity,
 					 sizeof(*entries), GFP_KERNEL);
 		if (!entries)
