@@ -757,14 +757,14 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 	if (!node)
 		return ERR_PTR(-ENOMEM);
 
-	if (!S_ISLNK(record->mode))
-		mutex_init(&node->load_lock);
 	node->parent = parent;
 	node->input_child = record;
 	node->ino = actiondfs_input_child_ino(parent, record);
 	node->size = record->size;
 	if (S_ISLNK(record->mode))
 		node->link_target = record->name + record->name_len + 1;
+	else
+		mutex_init(&node->load_lock);
 	return node;
 }
 
