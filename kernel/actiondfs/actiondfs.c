@@ -2311,10 +2311,10 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
 		return ERR_PTR(err);
 	}
-	if (!d_inode(real_dentry))
+	real_inode = d_inode(real_dentry);
+	if (!real_inode)
 		goto out_negative;
 
-	real_inode = d_inode(real_dentry);
 	mode = real_inode->i_mode;
 	if (S_ISDIR(mode)) {
 		mode = S_IFDIR | (mode & S_IALLUGO);
