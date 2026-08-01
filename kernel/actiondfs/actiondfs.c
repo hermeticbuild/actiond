@@ -521,7 +521,8 @@ static int actiondfs_stage_lookup_child(struct path *parent_path,
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CHILD_LOOKUPS);
 	inode_lock_nested(parent_inode, I_MUTEX_PARENT);
-	dentry = lookup_one(&nop_mnt_idmap, &qname, parent_path->dentry);
+	dentry = lookup_one(mnt_idmap(parent_path->mnt), &qname,
+			    parent_path->dentry);
 	if (IS_ERR(dentry)) {
 		inode_unlock(parent_inode);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_ERRORS);
