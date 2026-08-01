@@ -1314,8 +1314,10 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	total_start = actiondfs_stat_time_start();
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_WRITE_CALLS);
 	file = iocb->ki_filp->private_data;
+	inode_lock(inode);
 	nwritten = backing_file_write_iter(file, from, iocb,
 					   iocb->ki_flags, &ctx);
+	inode_unlock(inode);
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
 				   total_start);
 	return nwritten;
