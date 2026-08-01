@@ -986,15 +986,17 @@ static int actiondfs_append_cached_symlink_child(struct actiondfs_cached_dir *pa
 					     target);
 }
 
-static int actiondfs_valid_hash(const char *hash)
+static int actiondfs_valid_hash(const char *hash, size_t len)
 {
 	size_t i;
 
+	if (len != ACTIONDFS_HASH_HEX_LEN)
+		return -EINVAL;
 	for (i = 0; i < ACTIONDFS_HASH_HEX_LEN; i++) {
 		if (hex_to_bin(hash[i]) < 0)
 			return -EINVAL;
 	}
-	return hash[ACTIONDFS_HASH_HEX_LEN] ? -EINVAL : 0;
+	return 0;
 }
 
 static bool actiondfs_is_empty_sha256(const char *hash)
@@ -1647,7 +1649,7 @@ static int actiondfs_pb_skip(const u8 *data, size_t len, size_t *pos, u64 wire)
 }
 
 struct actiondfs_reapi_digest {
-	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
+	const char *hash;
 	u64 size;
 };
 
@@ -1670,7 +1672,7 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 	size_t pos = 0;
 	int err;
 
-	digest->hash[0] = '\0';
+	digest->hash = NULL;
 	digest->size = 0;
 	while (pos < len) {
 		const u8 *field;
@@ -1689,12 +1691,10 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 			err = actiondfs_pb_read_len(data, len, &pos, &field, &field_len);
 			if (err)
 				return err;
-			if (field_len != ACTIONDFS_HASH_HEX_LEN)
-				return -EINVAL;
-			actiondfs_copy_hash(digest->hash, field);
-			err = actiondfs_valid_hash(digest->hash);
+			err = actiondfs_valid_hash((const char *)field, field_len);
 			if (err)
 				return err;
+			digest->hash = (const char *)field;
 			break;
 		case 2:
 			if ((key & 7) != 0)
@@ -1713,7 +1713,7 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 		}
 	}
 
-	return digest->hash[0] ? 0 : -EINVAL;
+	return digest->hash ? 0 : -EINVAL;
 }
 
 static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
@@ -1780,7 +1780,7 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 		return -EINVAL;
 	if (S_ISLNK(mode))
 		return out->symlink.target ? 0 : -EINVAL;
-	return out->digest.hash[0] ? 0 : -EINVAL;
+	return out->digest.hash ? 0 : -EINVAL;
 }
 
 static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *parent,
@@ -2236,7 +2236,7 @@ static int actiondfs_parse_options(struct actiondfs_mount_options *opts,
 
 	if (!opts->cas_root || !opts->root_hash)
 		return -EINVAL;
-	if (actiondfs_valid_hash(opts->root_hash))
+	if (actiondfs_valid_hash(opts->root_hash, strlen(opts->root_hash)))
 		return -EINVAL;
 	if (opts->root_size != ACTIONDFS_UNKNOWN_SIZE &&
 	    opts->root_size > ACTIONDFS_MAX_DIRECTORY_PROTO_SIZE)
