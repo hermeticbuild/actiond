@@ -1041,13 +1041,8 @@ static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 					   current_cred());
 			path_put(&real_path);
 		}
-		if (!IS_ERR(file)) {
-			if (!S_ISREG(file_inode(file)->i_mode)) {
-				fput(file);
-				return ERR_PTR(-EIO);
-			}
+		if (!IS_ERR(file))
 			return file;
-		}
 
 		err = PTR_ERR(file);
 		if (!actiondfs_retry_counted_stale(
