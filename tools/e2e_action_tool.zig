@@ -877,8 +877,91 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
                 .SUCCESS => return filesystemFailure("unprivileged staged fchown unexpectedly succeeded"),
                 else => return filesystemFailure("unprivileged staged fchown returned an unexpected errno"),
             }
+
+            {
+                var privileged = try dir.createFile(io, "privileged-create.txt", .{
+                    .read = true,
+                    .permissions = std.Io.File.Permissions.fromMode(0o6744),
+                });
+                defer privileged.close(io);
+                try requireFilesystem(
+                    ((try privileged.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                    "staged create did not preserve setuid/setgid permissions",
+                );
+            }
+            try dir.deleteFile(io, "privileged-create.txt");
+
+            switch (std.os.linux.errno(linux.fchmod(file.handle, 0o6755))) {
+                .SUCCESS => {},
+                else => return filesystemFailure("staged setuid/setgid chmod failed"),
+            }
+            try requireFilesystem(
+                ((try file.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                "staged chmod did not expose setuid/setgid permissions",
+            );
+            try file.setLength(io, payload.len);
+            try requireFilesystem(
+                ((try file.stat(io)).permissions.toMode() & 0o6000) == 0,
+                "staged truncate did not clear setuid/setgid permissions",
+            );
+            try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o640));
+
+            {
+                var destination = try dir.createFile(io, "privileged-copy.txt", .{ .read = true });
+                defer destination.close(io);
+                switch (std.os.linux.errno(linux.fchmod(destination.handle, 0o6755))) {
+                    .SUCCESS => {},
+                    else => return filesystemFailure("staged copy destination setuid/setgid chmod failed"),
+                }
+                try requireFilesystem(
+                    ((try destination.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                    "staged copy destination did not expose setuid/setgid permissions",
+                );
+
+                var source_offset: i64 = 0;
+                var destination_offset: i64 = 0;
+                const copied = linux.copy_file_range(
+                    file.handle,
+                    &source_offset,
+                    destination.handle,
+                    &destination_offset,
+                    1,
+                    0,
+                );
+                switch (linux.errno(copied)) {
+                    .SUCCESS => {},
+                    else => return filesystemFailure("staged copy_file_range failed"),
+                }
+                try requireFilesystem(copied == 1, "staged copy_file_range copied an unexpected byte count");
+                try requireFilesystem(
+                    ((try destination.stat(io)).permissions.toMode() & 0o6000) == 0,
+                    "staged copy_file_range did not clear setuid/setgid permissions",
+                );
+            }
+            try dir.deleteFile(io, "privileged-copy.txt");
         }
     }
+
+    {
+        var populated = try dir.createFile(io, "truncate-open.txt", .{ .read = true });
+        try populated.writeStreamingAll(io, "nonempty staged file");
+        populated.close(io);
+
+        var truncated = try dir.createFile(io, "truncate-open.txt", .{
+            .read = true,
+            .truncate = true,
+        });
+        defer truncated.close(io);
+        try requireFilesystem(
+            (try truncated.stat(io)).size == 0,
+            "staged O_TRUNC open did not clear the open file size",
+        );
+        try requireFilesystem(
+            (try dir.statFile(io, "truncate-open.txt", .{})).size == 0,
+            "staged O_TRUNC open did not clear the directory entry size",
+        );
+    }
+    try dir.deleteFile(io, "truncate-open.txt");
 
     var second = try dir.openFile(io, "payload.txt", .{ .mode = .read_write });
     defer second.close(io);
