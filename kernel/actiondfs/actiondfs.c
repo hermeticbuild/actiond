@@ -441,18 +441,17 @@ static struct actiondfs_node *actiondfs_alloc_node(umode_t mode)
 }
 
 static u64 actiondfs_input_child_ino(struct actiondfs_node *parent,
-				     const char *name, size_t name_len,
-				     bool is_dir)
+				     const struct actiondfs_cached_child *child)
 {
 	u64 hash = 1469598103934665603ULL;
 	size_t i;
 
 	hash ^= parent->ino;
 	hash *= 1099511628211ULL;
-	hash ^= is_dir ? 'd' : 'f';
+	hash ^= S_ISDIR(child->mode) ? 'd' : 'f';
 	hash *= 1099511628211ULL;
-	for (i = 0; i < name_len; i++) {
-		hash ^= (u8)name[i];
+	for (i = 0; i < child->name_len; i++) {
+		hash ^= (u8)child->name[i];
 		hash *= 1099511628211ULL;
 	}
 
@@ -762,9 +761,7 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 
 	node->parent = parent;
 	node->input_child = record;
-	node->ino = actiondfs_input_child_ino(parent, record->name,
-					     record->name_len,
-					     S_ISDIR(record->mode));
+	node->ino = actiondfs_input_child_ino(parent, record);
 	node->size = record->size;
 	if (S_ISLNK(record->mode))
 		node->link_target = record->name + record->name_len + 1;
@@ -3203,10 +3200,7 @@ static bool actiondfs_emit_cached_children(
 		struct actiondfs_cached_child *child = &children->entries[index];
 
 		if (!dir_emit(ctx, child->name, child->name_len,
-			      actiondfs_input_child_ino(dir, child->name,
-						       child->name_len,
-						       d_type == DT_DIR),
-			      d_type))
+			      actiondfs_input_child_ino(dir, child), d_type))
 			return false;
 		actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
 		ctx->pos = *base + index + 1;
