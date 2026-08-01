@@ -2326,7 +2326,8 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 {
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
 	struct actiondfs_cached_child *input_child = NULL;
-	struct path parent_path;
+	struct qstr name = QSTR_LEN(dentry->d_name.name,
+				    dentry->d_name.len);
 	struct dentry *real_dentry;
 	struct inode *real_inode;
 	struct inode *inode = NULL;
@@ -2336,17 +2337,20 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	u64 size = 0;
 	int err;
 
-	parent_path.mnt = sbi->stage_path.mnt;
-	parent_path.dentry = stage_dentry;
-	err = actiondfs_stage_lookup_child(&parent_path, dentry->d_name.name,
-					   dentry->d_name.len, &real_dentry);
-	if (err) {
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CHILD_LOOKUPS);
+	real_dentry = lookup_one_unlocked(mnt_idmap(sbi->stage_path.mnt),
+					 &name, stage_dentry);
+	if (IS_ERR(real_dentry)) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_ERRORS);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
-		return ERR_PTR(err);
+		return ERR_CAST(real_dentry);
 	}
 	real_inode = d_inode(real_dentry);
-	if (!real_inode)
+	if (!real_inode) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_NEGATIVE);
 		goto out_negative;
+	}
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CHILD_LOOKUP_HITS);
 
 	mode = real_inode->i_mode;
 	if (S_ISDIR(mode)) {
@@ -2405,21 +2409,21 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_HITS);
 
-out_unlock:
-	actiondfs_stage_unlock_child(&parent_path, real_dentry);
+out_put_dentry:
+	dput(real_dentry);
 	if (inode && !IS_ERR(inode) && input_child)
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES);
 	return inode;
 
 out_negative:
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE);
-	goto out_unlock;
+	goto out_put_dentry;
 
 out_error:
 	kfree(link_target);
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
 	inode = ERR_PTR(err);
-	goto out_unlock;
+	goto out_put_dentry;
 }
 
 static struct dentry *actiondfs_lookup(struct inode *dir,
