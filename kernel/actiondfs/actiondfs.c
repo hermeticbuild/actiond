@@ -3395,7 +3395,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 				&sbi->stage_path);
 		if (err)
 			goto fail;
-		actiondfs_set_stage_dentry(root, sbi->stage_path.dentry);
+		root->stage_dentry = dget(sbi->stage_path.dentry);
 	} else {
 		sb->s_flags |= SB_RDONLY;
 	}
