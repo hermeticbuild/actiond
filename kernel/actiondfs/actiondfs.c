@@ -419,10 +419,8 @@ static void actiondfs_copy_stage_owner(struct inode *inode,
 	struct mnt_idmap *idmap =
 		mnt_idmap(actiondfs_sbi(inode->i_sb)->stage_path.mnt);
 
-	spin_lock(&inode->i_lock);
 	inode->i_uid = vfsuid_into_kuid(i_uid_into_vfsuid(idmap, real_inode));
 	inode->i_gid = vfsgid_into_kgid(i_gid_into_vfsgid(idmap, real_inode));
-	spin_unlock(&inode->i_lock);
 }
 
 static void actiondfs_free_node(struct actiondfs_node *node)
@@ -2446,7 +2444,9 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 	if (inode->i_private != node) {
 		node = inode->i_private;
+		spin_lock(&inode->i_lock);
 		actiondfs_copy_stage_owner(inode, real_inode);
+		spin_unlock(&inode->i_lock);
 		actiondfs_set_stage_dentry(node, real_dentry);
 	}
 	if (S_ISDIR(mode)) {
