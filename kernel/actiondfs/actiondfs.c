@@ -401,8 +401,6 @@ static const struct inode_operations actiondfs_file_iops;
 static const struct inode_operations actiondfs_symlink_iops;
 static const struct file_operations actiondfs_dir_fops;
 static const struct file_operations actiondfs_file_fops;
-static size_t actiondfs_readdir_start_index(loff_t ctx_pos, loff_t base,
-					    size_t count);
 static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 					  const char *hash,
 					  struct path *out);
@@ -3087,14 +3085,6 @@ static void actiondfs_reset_stage_file(struct actiondfs_dir_file *dir_file)
 	dir_file->stage_eof = false;
 }
 
-static void actiondfs_free_dir_file(struct actiondfs_dir_file *dir_file)
-{
-	if (!dir_file)
-		return;
-	actiondfs_reset_stage_file(dir_file);
-	kfree(dir_file);
-}
-
 static int actiondfs_open_stage_file(struct inode *inode,
 				    struct actiondfs_node *dir,
 				    struct actiondfs_dir_file *dir_file)
@@ -3196,7 +3186,10 @@ static int actiondfs_dir_open(struct inode *inode, struct file *file)
 
 static int actiondfs_dir_release(struct inode *inode, struct file *file)
 {
-	actiondfs_free_dir_file(file->private_data);
+	struct actiondfs_dir_file *dir_file = file->private_data;
+
+	actiondfs_reset_stage_file(dir_file);
+	kfree(dir_file);
 	file->private_data = NULL;
 	return 0;
 }
@@ -3206,8 +3199,15 @@ static bool actiondfs_emit_cached_children(
 	struct actiondfs_cached_children *children,
 	loff_t *base, unsigned int d_type)
 {
-	size_t index = actiondfs_readdir_start_index(ctx->pos, *base,
-						     children->count);
+	size_t index = 0;
+
+	if (ctx->pos > *base) {
+		index = min_t(u64, (u64)(ctx->pos - *base), children->count);
+		if (index)
+			actiondfs_stat_add(
+				ACTIONDFS_STAT_READDIR_SKIPPED_ENTRIES_AVOIDED,
+				(u64)index);
+	}
 
 	for (; index < children->count; index++) {
 		struct actiondfs_cached_child *child = &children->entries[index];
@@ -3260,26 +3260,6 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	}
 
 	return actiondfs_emit_stage_entries(inode, dir, dir_file, ctx, base);
-}
-
-static size_t actiondfs_readdir_start_index(loff_t ctx_pos, loff_t base,
-					    size_t count)
-{
-	loff_t delta;
-	size_t start;
-
-	if (ctx_pos <= base)
-		return 0;
-	delta = ctx_pos - base;
-	if (delta >= (loff_t)count)
-		start = count;
-	else
-		start = (size_t)delta;
-
-	if (start)
-		actiondfs_stat_add(ACTIONDFS_STAT_READDIR_SKIPPED_ENTRIES_AVOIDED,
-				   (u64)start);
-	return start;
 }
 
 static int actiondfs_dir_getattr(struct mnt_idmap *idmap,
