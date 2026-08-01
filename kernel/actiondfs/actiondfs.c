@@ -1547,6 +1547,19 @@ static int actiondfs_pb_read_varint(const u8 *data, size_t len,
 	return -EINVAL;
 }
 
+static int actiondfs_pb_read_key(const u8 *data, size_t len,
+				 size_t *pos, u64 *key)
+{
+	int err;
+
+	err = actiondfs_pb_read_varint(data, len, pos, key);
+	if (err)
+		return err;
+	if (!(*key >> 3) || (*key >> 3) > 0x1fffffff || (*key & 7) > 5)
+		return -EINVAL;
+	return 0;
+}
+
 static int actiondfs_pb_read_len(const u8 *data, size_t len, size_t *pos,
 				 const u8 **field, size_t *field_len)
 {
@@ -1621,7 +1634,7 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 		size_t field_len;
 		u64 key;
 
-		err = actiondfs_pb_read_varint(data, len, &pos, &key);
+		err = actiondfs_pb_read_key(data, len, &pos, &key);
 		if (err)
 			return err;
 
@@ -1670,7 +1683,7 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 		u64 key;
 		u64 value;
 
-		err = actiondfs_pb_read_varint(data, len, &pos, &key);
+		err = actiondfs_pb_read_key(data, len, &pos, &key);
 		if (err)
 			return err;
 
@@ -2004,7 +2017,7 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 		size_t field_len;
 		u64 key;
 
-		err = actiondfs_pb_read_varint(buffer, len, &pos, &key);
+		err = actiondfs_pb_read_key(buffer, len, &pos, &key);
 		if (err)
 			goto out_buffer;
 
