@@ -435,7 +435,6 @@ static struct actiondfs_node *actiondfs_alloc_node(umode_t mode)
 		return NULL;
 
 	node->mode = mode;
-	mutex_init(&node->load_lock);
 	return node;
 }
 
@@ -758,6 +757,8 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 	if (!node)
 		return ERR_PTR(-ENOMEM);
 
+	if (!S_ISLNK(record->mode))
+		mutex_init(&node->load_lock);
 	node->parent = parent;
 	node->input_child = record;
 	node->ino = actiondfs_input_child_ino(parent, record);
@@ -3376,6 +3377,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		err = -ENOMEM;
 		goto fail;
 	}
+	mutex_init(&root->load_lock);
 	root->ino = 1;
 
 	err = actiondfs_parse_options(&opts, fc->fs_private);
