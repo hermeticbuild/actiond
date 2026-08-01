@@ -857,7 +857,6 @@ static void actiondfs_destroy_dir_cache(void)
 static void actiondfs_free_blob_path_cache_entry(struct actiondfs_blob_path_cache_entry *entry)
 {
 	dput(entry->dentry);
-	dput(entry->cas_root);
 	kfree(entry);
 }
 
@@ -1952,7 +1951,7 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 	}
 
 	entry->hash = hash;
-	entry->cas_root = dget(sbi->cas_path.dentry);
+	entry->cas_root = sbi->cas_path.dentry;
 	entry->dentry = dget(path->dentry);
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
