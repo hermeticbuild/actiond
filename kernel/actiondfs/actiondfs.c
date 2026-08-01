@@ -1593,17 +1593,14 @@ static int actiondfs_pb_skip(const u8 *data, size_t len, size_t *pos, u64 wire)
 	case 0:
 		return actiondfs_pb_read_varint(data, len, pos, &value);
 	case 1:
-		if (len - *pos < 8)
+	case 5:
+		field_len = wire == 1 ? 8 : 4;
+		if (len - *pos < field_len)
 			return -EINVAL;
-		*pos += 8;
+		*pos += field_len;
 		return 0;
 	case 2:
 		return actiondfs_pb_read_len(data, len, pos, &field, &field_len);
-	case 5:
-		if (len - *pos < 4)
-			return -EINVAL;
-		*pos += 4;
-		return 0;
 	default:
 		return -EINVAL;
 	}

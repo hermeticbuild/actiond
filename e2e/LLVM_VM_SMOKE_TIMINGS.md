@@ -27,22 +27,22 @@ subset of the VM `llvm-tblgen` graph.
 
 ## Latest Checked-In Result
 
-- Generated: `2026-08-01 11:00:07 EDT`
+- Generated: `2026-08-01 15:44:38 EDT`
 - Command: `ACTIOND_BAZEL_BUILD_FLAGS="--jobs=32 --distdir=/private/tmp/actiond-audit-distdir --override_repository=llvm++osx+macos_sdk=/private/tmp/actiond-audit-macos-sdk" ACTIOND_LLVM_SMOKE_MAC_HOST=0 e2e/run_llvm_vm_smoke.sh`
-- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.Y0BFMG`
+- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.yu77B2`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
 - VM warmup target: `//e2e:llvm_exec_warmup`
 - Target and VM host platform: `@llvm//platforms:linux_arm64_musl`
 - Build mode: `-c opt --strip=always --stripopt=--strip-all`
-- VM warmup: `83.160s`; `2207 processes: 190 internal, 2017 remote`
-- Measured VM build: `88.494s`; `2310 processes: 4 action cache hit, 204 internal, 2106 remote`
+- VM warmup: `82.129s`; `2207 processes: 190 internal, 2017 remote`
+- Measured VM build: `92.336s`; `2310 processes: 4 action cache hit, 204 internal, 2106 remote`
 - Measured executions and timing records: `2106`
 - Mac-host baseline: not run (`ACTIOND_LLVM_SMOKE_MAC_HOST=0`)
 
 The previous checked-in run used the same jobs=8 and completed the warmup in
-`71.325s` and measured build in `74.995s`. The current measured build is 18.0%
-slower with the same 2,106 actions, while its warmup is 16.6% slower with the
-same 2,017 actions. A repeat with the current code completed the warmup in
+`83.160s` and measured build in `88.494s`. The current measured build is 4.3%
+slower with the same 2,106 actions, while its warmup is 1.2% faster with the
+same 2,017 actions. A repeat with the previous code completed the warmup in
 `63.992s` and the measured build in `86.002s`. Intermediate runs on the same
 machine completed the warmup/measured builds in `96.032s`/`104.393s` and
 `94.614s`/`180.238s`. The large changes between identical action sets coincide
@@ -62,30 +62,31 @@ Counters include both warmup and measured builds.
 | Counter                              | Prior       | Current     |
 | ------------------------------------ | ----------: | ----------: |
 | actiondfs mounts                     |       4,122 |       4,122 |
-| root directory parses                |       1,406 |       1,405 |
-| cached directory hits                |     163,007 |     163,011 |
-| cached directory misses              |       6,610 |       6,606 |
-| directory blob reads                 |       6,609 |       6,605 |
-| staged ensure-directory calls        |      15,994 |      15,996 |
+| root directory parses                |       1,405 |       1,405 |
+| cached directory hits                |     163,011 |     162,998 |
+| cached directory misses              |       6,606 |       6,619 |
+| directory blob reads                 |       6,605 |       6,618 |
+| staged ensure-directory calls        |      15,996 |      15,996 |
 | staged ensure-directory components   |          16 |          16 |
 | staged ensure-directory existing     |           0 |           0 |
 | staged ensure-directory created      |          16 |          16 |
-| staged parent dentry hits            |      15,978 |      15,980 |
-| blob-path cache hits                 |     460,691 |     460,692 |
-| blob-path cache misses               |       6,884 |       6,883 |
+| staged parent dentry hits            |      15,980 |      15,980 |
+| blob-path cache hits                 |     460,692 |     460,692 |
+| blob-path cache misses               |       6,883 |       6,883 |
 | blob-path cache evictions            |           0 |           0 |
-| blob-path cache insertion races      |           1 |           0 |
-| staged backing open attempts         |      15,824 |      15,825 |
-| staged backing open lookup           | 0.632 ms    | 0.705 ms    |
+| blob-path cache insertion races      |           0 |           0 |
+| staged backing open attempts         |      15,825 |      15,825 |
+| staged backing open lookup           | 0.705 ms    | 0.297 ms    |
 | staged `copy_file_range` successes   |       3,828 |       3,828 |
 | staged `copy_file_range` fallbacks   |           0 |           0 |
 
 The workload retained the same 2,017 warmup actions and 2,106 measured actions.
-All 163,011 cached-directory hits used RCU instead of the global directory-cache
+All 162,998 cached-directory hits used RCU instead of the global directory-cache
 mutex, and all 18,382 staged input-directory merges searched only cached input
 directories. Root inode ownership reduced each of the 4,122 superblock
 allocations from 128 bytes to 96 bytes, and unhashed root inodes avoided global
-inode-hash insertion on each mount. Root-directory parsing, staged
+inode-hash insertion on each mount. CAS blob lookups and staged parent lookups
+borrowed existing mount or path references. Root-directory parsing, staged
 parent-directory reuse, and blob-path cache behavior remain close to the previous
 checked-in result.
 
@@ -95,10 +96,10 @@ All timing values are milliseconds.
 
 | Stage                 |   Min |    p25 |    p50 |     p75 |      p95 |    Mean |       Max |
 | --------------------- | ----: | -----: | -----: | ------: | -------: | ------: | --------: |
-| total                 | 6.403 | 24.241 | 32.814 |  79.441 | 1602.384 | 284.294 |  9398.972 |
-| input fetch/setup     | 0.410 |  0.579 |  0.654 |   1.028 |    2.046 |   1.128 |    63.747 |
-| execute               | 5.848 | 22.545 | 30.981 |  76.428 | 1599.830 | 281.827 |  9394.800 |
-| output upload/collect | 0.018 |  0.132 |  0.254 |   1.341 |    5.131 |   1.334 |    99.709 |
+| total                 | 7.303 | 22.280 | 31.502 |  72.387 | 1654.434 | 304.721 |  9170.784 |
+| input fetch/setup     | 0.405 |  0.586 |  0.642 |   0.996 |    1.994 |   1.034 |    60.478 |
+| execute               | 5.979 | 20.755 | 29.458 |  71.567 | 1651.500 | 302.320 |  9161.111 |
+| output upload/collect | 0.022 |  0.138 |  0.262 |   1.601 |    5.233 |   1.367 |   157.599 |
 
 ## Runner Timing
 
@@ -108,12 +109,12 @@ and lazy actiondfs input reads. All timing values are milliseconds.
 
 | Runner Stage   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |       Max |
 | -------------- | ----: | -----: | -----: | -----: | -------: | ------: | --------: |
-| parent prepare | 0.058 |  0.099 |  0.126 |  0.189 |    0.362 |   0.210 |    13.622 |
-| fork           | 0.465 |  0.711 |  0.817 |  1.962 |    7.877 |   2.598 |   104.185 |
-| child setup    | 0.005 |  2.828 |  4.616 |  7.882 |   24.387 |   7.945 |   120.755 |
-| process/io     | 1.593 | 15.476 | 22.015 | 54.143 | 1593.757 | 270.322 |  9391.259 |
-| wait           | 0.000 |  0.000 |  0.000 |  0.000 |    4.385 |   0.575 |    58.915 |
-| stdio digest   | 0.000 |  0.001 |  0.001 |  0.001 |    0.001 |   0.001 |     0.959 |
+| parent prepare | 0.049 |  0.100 |  0.124 |  0.154 |    0.395 |   0.193 |    12.384 |
+| fork           | 0.252 |  0.505 |  0.576 |  1.042 |    5.887 |   1.766 |   201.901 |
+| child setup    | 0.004 |  1.761 |  3.161 |  6.020 |   21.088 |   6.044 |   107.745 |
+| process/io     | 0.588 | 15.747 | 22.252 | 52.498 | 1646.214 | 293.593 |  9134.104 |
+| wait           | 0.000 |  0.000 |  0.000 |  0.000 |    4.334 |   0.575 |    14.531 |
+| stdio digest   | 0.000 |  0.001 |  0.001 |  0.001 |    0.001 |   0.001 |     0.142 |
 
 ## actiondfs Counters
 
@@ -124,12 +125,12 @@ These `/proc/actiondfs_stats` counters cover the VM lifetime.
 | mounts                        |           4,122 |
 | root directory parses         |           1,405 |
 | cached directory requests     |         169,617 |
-| cached directory hits         |         163,011 |
-| cached directory misses       |           6,606 |
+| cached directory hits         |         162,998 |
+| cached directory misses       |           6,619 |
 | lookups                       |       1,406,668 |
 | lookup hits                   |         841,778 |
 | lookup negative               |         564,890 |
-| blob open attempts            |         474,180 |
+| blob open attempts            |         474,193 |
 | blob-path cache hits          |         460,692 |
 | blob-path cache misses        |           6,883 |
 | blob-path cache evictions     |               0 |
@@ -141,8 +142,8 @@ These `/proc/actiondfs_stats` counters cover the VM lifetime.
 | mmap calls                    |          53,030 |
 | mmap bytes                    | 1,900,832,624,640 |
 | mmap failures                 |               0 |
-| directory blob reads          |           6,605 |
-| directory blob bytes          |       2,720,060 |
+| directory blob reads          |           6,618 |
+| directory blob bytes          |       2,732,839 |
 
 ## Staged Filesystem Counters
 
@@ -160,15 +161,15 @@ These `/proc/actiondfs_stats` counters cover the VM lifetime.
 | staged inode input-directory merges  |      18,382 |
 | staged backing open attempts         |      15,825 |
 | staged backing open failures         |           0 |
-| staged backing open total            |   12.397 ms |
-| staged backing open lookup           |    0.705 ms |
-| staged backing open file             |    8.407 ms |
+| staged backing open total            |   12.784 ms |
+| staged backing open lookup           |    0.297 ms |
+| staged backing open file             |   10.582 ms |
 | staged create calls/successes        |      11,981 |
 | staged mkdir calls/successes         |         198 |
 | staged rename calls/successes        |       3,817 |
 | staged size updates/successes        |       3,874 |
-| staged write calls                   |      37,149 |
-| staged write bytes                   | 106,183,143 |
+| staged write calls                   |      37,140 |
+| staged write bytes                   | 106,132,435 |
 | staged `copy_file_range` successes   |       3,828 |
 | staged `copy_file_range` bytes       |  31,630,764 |
 | staged `copy_file_range` fallbacks   |           0 |
@@ -185,10 +186,10 @@ fallback.
 | CAS promotion attempts               |      7,947 |
 | CAS promotion success                |      2,087 |
 | CAS existing-blob hits               |      5,860 |
-| CAS promoted bytes                   | 32,132,663 |
-| CAS digest bytes                     | 84,466,615 |
-| CAS promotion digest                 | 712.061 ms |
-| CAS promotion rename                 | 103.887 ms |
+| CAS promoted bytes                   | 32,082,447 |
+| CAS digest bytes                     | 84,416,399 |
+| CAS promotion digest                 | 642.254 ms |
+| CAS promotion rename                 | 127.801 ms |
 | CAS cross-device fallbacks           |          0 |
 | CAS permission fallbacks             |          0 |
 | CAS put-file copy calls              |          0 |
@@ -198,7 +199,7 @@ fallback.
 | Counter                              |      Value |
 | ------------------------------------ | ---------: |
 | ByteStream file reads                |      4,038 |
-| ByteStream file bytes                | 57,617,030 |
+| ByteStream file bytes                | 57,616,538 |
 | ByteStream buffered reads            |          0 |
 | gRPC response tasks started          |     36,229 |
 | gRPC response tasks failed           |          0 |
@@ -206,10 +207,10 @@ fallback.
 | gRPC data frames                     |     37,011 |
 | gRPC file payload frames             |      6,902 |
 | gRPC `sendfile` attempts/successes   |      6,902 |
-| gRPC `sendfile` bytes                | 57,617,030 |
+| gRPC `sendfile` bytes                | 57,616,538 |
 | gRPC `sendfile` fallbacks            |          0 |
 
-The measured TCP-to-vsock bridge logged two connections, 28.09 MiB from client
-to guest, 37.37 MiB from guest to client, and zero read/write pump errors.
+The measured TCP-to-vsock bridge logged two connections, 28.25 MiB from client
+to guest, 37.36 MiB from guest to client, and zero read/write pump errors.
 ByteStream reads remained file-backed and all 6,902 gRPC `sendfile` attempts
 succeeded.

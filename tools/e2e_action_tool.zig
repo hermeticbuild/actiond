@@ -881,7 +881,7 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
             {
                 var privileged = try dir.createFile(io, "privileged-create.txt", .{
                     .read = true,
-                    .permissions = std.Io.File.Permissions.fromMode(0o6755),
+                    .permissions = std.Io.File.Permissions.fromMode(0o6744),
                 });
                 defer privileged.close(io);
                 try requireFilesystem(
