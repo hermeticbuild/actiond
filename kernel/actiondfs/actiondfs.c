@@ -1645,7 +1645,6 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 		const u8 *field;
 		size_t field_len;
 		u64 key;
-		u64 value;
 
 		err = actiondfs_pb_read_varint(data, len, &pos, &key);
 		if (err)
@@ -1666,12 +1665,11 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 		case 2:
 			if ((key & 7) != 0)
 				return -EINVAL;
-			err = actiondfs_pb_read_varint(data, len, &pos, &value);
+			err = actiondfs_pb_read_varint(data, len, &pos, &digest->size);
 			if (err)
 				return err;
-			if (value > (u64)MAX_LFS_FILESIZE)
+			if (digest->size > (u64)MAX_LFS_FILESIZE)
 				return -EINVAL;
-			digest->size = value;
 			break;
 		default:
 			err = actiondfs_pb_skip(data, len, &pos, key & 7);
