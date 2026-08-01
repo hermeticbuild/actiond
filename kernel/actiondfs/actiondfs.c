@@ -3400,11 +3400,12 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	memcpy(sbi->root_hash, opts.root_hash, ACTIONDFS_HASH_HEX_LEN);
 	root->size = opts.root_size;
 
-	root_inode = actiondfs_iget(sb, root);
-	if (IS_ERR(root_inode)) {
-		err = PTR_ERR(root_inode);
+	root_inode = new_inode(sb);
+	if (!root_inode) {
+		err = -ENOMEM;
 		goto fail;
 	}
+	actiondfs_init_inode(root_inode, root);
 	root = NULL;
 
 	sb->s_root = d_make_root(root_inode);
