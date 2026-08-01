@@ -892,6 +892,40 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
                 "staged truncate did not clear setuid/setgid permissions",
             );
             try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o640));
+
+            {
+                var destination = try dir.createFile(io, "privileged-copy.txt", .{ .read = true });
+                defer destination.close(io);
+                switch (std.os.linux.errno(linux.fchmod(destination.handle, 0o6755))) {
+                    .SUCCESS => {},
+                    else => return filesystemFailure("staged copy destination setuid/setgid chmod failed"),
+                }
+                try requireFilesystem(
+                    ((try destination.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                    "staged copy destination did not expose setuid/setgid permissions",
+                );
+
+                var source_offset: i64 = 0;
+                var destination_offset: i64 = 0;
+                const copied = linux.copy_file_range(
+                    file.handle,
+                    &source_offset,
+                    destination.handle,
+                    &destination_offset,
+                    1,
+                    0,
+                );
+                switch (linux.errno(copied)) {
+                    .SUCCESS => {},
+                    else => return filesystemFailure("staged copy_file_range failed"),
+                }
+                try requireFilesystem(copied == 1, "staged copy_file_range copied an unexpected byte count");
+                try requireFilesystem(
+                    ((try destination.stat(io)).permissions.toMode() & 0o6000) == 0,
+                    "staged copy_file_range did not clear setuid/setgid permissions",
+                );
+            }
+            try dir.deleteFile(io, "privileged-copy.txt");
         }
     }
 

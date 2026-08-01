@@ -1368,9 +1368,16 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	}
 
 	real_out = file_out->private_data;
+	inode_lock(inode_out);
+	copied = file_remove_privs(file_out);
+	if (copied)
+		goto out_unlock;
 	copied = vfs_copy_file_range(real_in, pos_in, real_out, pos_out, len, 0);
 	if (copied > 0)
 		actiondfs_sync_staged_inode(inode_out, file_inode(real_out));
+
+out_unlock:
+	inode_unlock(inode_out);
 	if (node_in->origin == ACTIONDFS_NODE_INPUT)
 		fput(real_in);
 
