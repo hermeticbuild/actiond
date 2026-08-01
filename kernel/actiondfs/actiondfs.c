@@ -3141,7 +3141,8 @@ static int actiondfs_dir_release(struct inode *inode, struct file *file)
 {
 	struct actiondfs_dir_file *dir_file = file->private_data;
 
-	actiondfs_reset_stage_file(dir_file);
+	if (dir_file->stage_file)
+		fput(dir_file->stage_file);
 	kfree(dir_file);
 	return 0;
 }
