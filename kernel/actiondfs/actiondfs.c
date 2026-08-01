@@ -1897,30 +1897,17 @@ static unsigned long actiondfs_digest_cache_key(const char *hash)
 }
 
 static struct actiondfs_blob_path_cache_entry *
-actiondfs_find_blob_path_cache_locked(struct actiondfs_sb_info *sbi,
-				      const char *hash)
+actiondfs_find_blob_path_cache(struct actiondfs_sb_info *sbi,
+			       const char *hash)
 {
 	struct actiondfs_blob_path_cache_entry *entry;
 	unsigned long key = actiondfs_digest_cache_key(hash);
 
-	hash_for_each_possible(actiondfs_blob_path_cache, entry, hnode, key) {
+	hash_for_each_possible_rcu(actiondfs_blob_path_cache, entry, hnode, key,
+				   lockdep_is_held(&actiondfs_blob_path_cache_lock)) {
 		if (entry->cas_root == sbi->cas_path.dentry &&
-		    !memcmp(entry->hash, hash, ACTIONDFS_HASH_HEX_LEN))
-			return entry;
-	}
-	return NULL;
-}
-
-static struct actiondfs_blob_path_cache_entry *
-actiondfs_find_blob_path_cache_rcu(struct actiondfs_sb_info *sbi,
-				   const char *hash)
-{
-	struct actiondfs_blob_path_cache_entry *entry;
-	unsigned long key = actiondfs_digest_cache_key(hash);
-
-	hash_for_each_possible_rcu(actiondfs_blob_path_cache, entry, hnode, key) {
-		if (entry->cas_root == sbi->cas_path.dentry &&
-		    !memcmp(entry->hash, hash, ACTIONDFS_HASH_HEX_LEN))
+		    (entry->hash == hash ||
+		     !memcmp(entry->hash, hash, ACTIONDFS_HASH_HEX_LEN)))
 			return entry;
 	}
 	return NULL;
@@ -1973,7 +1960,7 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 	entry->dentry = dget(path->dentry);
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
-	existing = actiondfs_find_blob_path_cache_locked(sbi, hash);
+	existing = actiondfs_find_blob_path_cache(sbi, hash);
 	if (existing) {
 		actiondfs_get_blob_path_cache_entry_locked(sbi, existing, out);
 		mutex_unlock(&actiondfs_blob_path_cache_lock);
@@ -2004,7 +1991,7 @@ static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 	int err;
 
 	rcu_read_lock();
-	entry = actiondfs_find_blob_path_cache_rcu(sbi, hash);
+	entry = actiondfs_find_blob_path_cache(sbi, hash);
 	if (entry) {
 		out->mnt = sbi->cas_path.mnt;
 		out->dentry = entry->dentry;
@@ -2034,7 +2021,7 @@ static void actiondfs_drop_cached_blob_path(struct actiondfs_sb_info *sbi,
 	struct actiondfs_blob_path_cache_entry *entry;
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
-	entry = actiondfs_find_blob_path_cache_locked(sbi, hash);
+	entry = actiondfs_find_blob_path_cache(sbi, hash);
 	if (entry)
 		actiondfs_unlink_blob_path_cache_entry_locked(entry);
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
