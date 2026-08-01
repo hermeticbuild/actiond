@@ -2307,19 +2307,15 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	u64 size = 0;
 	int err;
 
-	err = actiondfs_stage_node_path(sbi, parent, &parent_path);
-	if (err) {
-		if (err == -ENOENT) {
-			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE);
-			return NULL;
-		}
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
-		return ERR_PTR(err);
+	parent_path.mnt = sbi->stage_path.mnt;
+	parent_path.dentry = READ_ONCE(parent->stage_dentry);
+	if (!parent_path.dentry) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE);
+		return NULL;
 	}
 	err = actiondfs_stage_lookup_child(&parent_path, dentry->d_name.name,
 					   dentry->d_name.len, &real_dentry);
 	if (err) {
-		path_put(&parent_path);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
 		return ERR_PTR(err);
 	}
@@ -2395,7 +2391,6 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 
 out_unlock:
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
-	path_put(&parent_path);
 	if (inode && !IS_ERR(inode) && input_cached) {
 		smp_store_release(&node->cached_dir, input_cached);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES);
