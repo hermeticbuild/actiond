@@ -1158,7 +1158,6 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	struct file *file;
 	u64 total_start = actiondfs_stat_time_start();
 	u64 phase_start;
-	int err;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_ATTEMPTS);
 	if (!sbi->stage_path.dentry) {
@@ -1167,11 +1166,12 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	}
 
 	phase_start = actiondfs_stat_time_start();
-	err = actiondfs_stage_node_path(sbi, node, &real_path);
+	real_path.mnt = sbi->stage_path.mnt;
+	real_path.dentry = READ_ONCE(node->stage_dentry);
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_LOOKUP_NS,
 				   phase_start);
-	if (err) {
-		file = ERR_PTR(err);
+	if (!real_path.dentry) {
+		file = ERR_PTR(-ENOENT);
 		goto out;
 	}
 
@@ -1180,7 +1180,6 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 				 &real_path, current_cred());
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
 				   phase_start);
-	path_put(&real_path);
 out:
 	if (IS_ERR(file))
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FAILURES);
