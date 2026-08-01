@@ -74,15 +74,15 @@ struct actiondfs_cached_child {
 
 struct actiondfs_cached_children {
 	struct actiondfs_cached_child *entries;
-	size_t count;
-	size_t capacity;
+	u32 count;
+	u32 capacity;
 };
 
 struct actiondfs_cached_dir {
 	struct hlist_node hnode;
 	struct dentry *cas_root;
 	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
-	u64 size;
+	u32 size;
 	struct actiondfs_cached_children files;
 	struct actiondfs_cached_children dirs;
 	struct actiondfs_cached_children symlinks;
@@ -926,7 +926,7 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 {
 	struct actiondfs_cached_child *entries;
 	struct actiondfs_cached_child *child;
-	size_t capacity;
+	u32 capacity;
 	int err;
 
 	err = actiondfs_valid_component(name, name_len);
@@ -940,7 +940,7 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	}
 
 	if (children->count == children->capacity) {
-		if (children->capacity > SIZE_MAX / 2)
+		if (children->capacity > U32_MAX / 2)
 			return -EOVERFLOW;
 		capacity = children->capacity ? children->capacity * 2 : 8;
 		entries = krealloc_array(children->entries, capacity,
