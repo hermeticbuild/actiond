@@ -1848,17 +1848,6 @@ actiondfs_find_blob_path_cache(struct actiondfs_sb_info *sbi,
 	return NULL;
 }
 
-static void actiondfs_get_blob_path_cache_entry_locked(
-	struct actiondfs_sb_info *sbi,
-	struct actiondfs_blob_path_cache_entry *entry,
-	struct path *out)
-{
-	list_move_tail(&entry->list, &actiondfs_blob_path_cache_list);
-	out->mnt = sbi->cas_path.mnt;
-	out->dentry = entry->dentry;
-	path_get(out);
-}
-
 static void actiondfs_evict_blob_path_cache_one_locked(void)
 {
 	struct actiondfs_blob_path_cache_entry *victim;
@@ -1889,21 +1878,19 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 		return;
 	}
 
-	entry->hash = hash;
-	entry->cas_root = sbi->cas_path.dentry;
-	entry->dentry = dget(path->dentry);
-
 	mutex_lock(&actiondfs_blob_path_cache_lock);
 	existing = actiondfs_find_blob_path_cache(sbi, hash);
 	if (existing) {
-		actiondfs_get_blob_path_cache_entry_locked(sbi, existing, out);
 		mutex_unlock(&actiondfs_blob_path_cache_lock);
 		actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_RACES);
-		actiondfs_free_blob_path_cache_entry(entry);
-		path_put(path);
+		kfree(entry);
+		*out = *path;
 		return;
 	}
 
+	entry->hash = hash;
+	entry->cas_root = sbi->cas_path.dentry;
+	entry->dentry = dget(path->dentry);
 	if (actiondfs_blob_path_cache_count >= ACTIONDFS_BLOB_PATH_CACHE_MAX)
 		actiondfs_evict_blob_path_cache_one_locked();
 
