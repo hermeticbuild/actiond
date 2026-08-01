@@ -1900,11 +1900,9 @@ static int actiondfs_read_cas_blob(struct actiondfs_sb_info *sbi,
 
 static unsigned long actiondfs_digest_cache_key(const char *hash)
 {
-	unsigned long key = 0;
-	size_t i;
+	unsigned long key;
 
-	for (i = 0; i < 2 * sizeof(key); i++)
-		key = (key << 4) | hex_to_bin(hash[i]);
+	memcpy(&key, hash, sizeof(key));
 	return key;
 }
 
