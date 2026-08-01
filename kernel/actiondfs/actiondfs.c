@@ -2849,12 +2849,11 @@ static int actiondfs_open(struct inode *inode, struct file *file)
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 	struct file *backing_file;
 
-	if (node->origin != ACTIONDFS_NODE_STAGED &&
-	    (file->f_mode & FMODE_WRITE))
-		return -EROFS;
 	if (node->origin == ACTIONDFS_NODE_INPUT) {
 		const char *hash = node->input_child->hash;
 
+		if (file->f_mode & FMODE_WRITE)
+			return -EROFS;
 		if (!node->size && actiondfs_is_empty_sha256(hash))
 			return 0;
 		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_MISSES);
