@@ -1720,6 +1720,7 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 {
 	struct actiondfs_parsed_child child;
 	struct actiondfs_cached_children *children;
+	bool regular;
 	int err;
 
 	err = actiondfs_parse_reapi_child_fields(data, len, &child, mode);
@@ -1731,7 +1732,8 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 			S_IFLNK | 0777, child.symlink.target_len,
 			NULL, child.symlink.target);
 
-	if (S_ISREG(mode)) {
+	regular = S_ISREG(mode);
+	if (regular) {
 		children = &parent->files;
 		mode |= child.executable ? 0555 : 0444;
 	} else {
@@ -1742,7 +1744,7 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 					    mode, child.digest.size,
 					    child.digest.hash, NULL);
 	if (!err)
-		actiondfs_stat_inc(S_ISREG(mode) ?
+		actiondfs_stat_inc(regular ?
 				  ACTIONDFS_STAT_CACHED_FILE_RECORDS :
 				  ACTIONDFS_STAT_CACHED_DIR_RECORDS);
 	return err;
