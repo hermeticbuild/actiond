@@ -2877,7 +2877,6 @@ static int actiondfs_release(struct inode *inode, struct file *file)
 	if (!backing_file)
 		return 0;
 	fput(backing_file);
-	file->private_data = NULL;
 	return 0;
 }
 
@@ -3145,7 +3144,6 @@ static int actiondfs_dir_release(struct inode *inode, struct file *file)
 
 	actiondfs_reset_stage_file(dir_file);
 	kfree(dir_file);
-	file->private_data = NULL;
 	return 0;
 }
 
