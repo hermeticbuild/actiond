@@ -878,6 +878,19 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
                 else => return filesystemFailure("unprivileged staged fchown returned an unexpected errno"),
             }
 
+            {
+                var privileged = try dir.createFile(io, "privileged-create.txt", .{
+                    .read = true,
+                    .permissions = std.Io.File.Permissions.fromMode(0o6755),
+                });
+                defer privileged.close(io);
+                try requireFilesystem(
+                    ((try privileged.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                    "staged create did not preserve setuid/setgid permissions",
+                );
+            }
+            try dir.deleteFile(io, "privileged-create.txt");
+
             switch (std.os.linux.errno(linux.fchmod(file.handle, 0o6755))) {
                 .SUCCESS => {},
                 else => return filesystemFailure("staged setuid/setgid chmod failed"),

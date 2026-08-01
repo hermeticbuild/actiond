@@ -2531,7 +2531,7 @@ static int actiondfs_create_staged_child(struct inode *dir,
 	} else {
 		err = vfs_create(mnt_idmap(parent_path.mnt),
 				 d_inode(parent_path.dentry), real_dentry,
-				 mode & 0777, excl);
+				 mode & S_IALLUGO, excl);
 		inode_unlock(d_inode(parent_path.dentry));
 	}
 	if (err) {
@@ -2564,7 +2564,7 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 		return -EROFS;
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_CREATE_CALLS);
 	err = actiondfs_create_staged_child(dir, dentry,
-					   S_IFREG | (mode & 0777), NULL, excl);
+					   S_IFREG | (mode & S_IALLUGO), NULL, excl);
 	actiondfs_stat_inc(err ? ACTIONDFS_STAT_STAGE_CREATE_FAILURES :
 			  ACTIONDFS_STAT_STAGE_CREATE_SUCCESS);
 	return err;
