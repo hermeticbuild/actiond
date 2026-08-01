@@ -620,8 +620,7 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 			goto out_error;
 		}
 		name_len = child->name_len;
-		if (!name_len || name_len > NAME_MAX ||
-		    name_len + 1 > PATH_MAX - path_len) {
+		if (name_len + 1 > PATH_MAX - path_len) {
 			err = -ENAMETOOLONG;
 			goto out_error;
 		}
@@ -1385,11 +1384,6 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 
 	node_out = inode_out->i_private;
 	if (node_out->origin != ACTIONDFS_NODE_STAGED || node_in == node_out) {
-		copied = -EOPNOTSUPP;
-		goto out;
-	}
-	if (node_in->origin != ACTIONDFS_NODE_INPUT &&
-	    node_in->origin != ACTIONDFS_NODE_STAGED) {
 		copied = -EOPNOTSUPP;
 		goto out;
 	}
@@ -2197,8 +2191,6 @@ static int actiondfs_ensure_loaded(struct super_block *sb,
 	struct actiondfs_cached_dir *cached;
 	int err = 0;
 
-	if (!S_ISDIR(dir->mode))
-		return -ENOTDIR;
 	if (dir->origin == ACTIONDFS_NODE_STAGED ||
 	    smp_load_acquire(&dir->cached_dir))
 		return 0;
@@ -2770,9 +2762,6 @@ static int actiondfs_rmdir(struct inode *dir, struct dentry *dentry)
 		return -EROFS;
 	if (!S_ISDIR(node->mode))
 		return -ENOTDIR;
-	if (node->cached_dir)
-		return -EROFS;
-
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RMDIR_CALLS);
 	err = actiondfs_remove_staged_child(dir, dentry, true);
 	actiondfs_stat_inc(err ? ACTIONDFS_STAT_STAGE_RMDIR_FAILURES :
@@ -2808,10 +2797,6 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		return -EROFS;
 	if (new_node && new_node->origin != ACTIONDFS_NODE_STAGED)
 		return -EROFS;
-	if ((S_ISDIR(old_node->mode) && old_node->cached_dir) ||
-	    (new_node && S_ISDIR(new_node->mode) && new_node->cached_dir))
-		return -EROFS;
-
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_CALLS);
 	err = actiondfs_stage_node_path(sbi, old_parent, &old_parent_path);
 	if (err)
@@ -3334,10 +3319,6 @@ static int actiondfs_dir_getattr(struct mnt_idmap *idmap,
 		return 0;
 	}
 
-	if (cached->dirs.count > UINT_MAX - 2) {
-		stat->nlink = 1;
-		return 0;
-	}
 	input_dir_count = cached->dirs.count;
 	if (!stage_dentry || backing_nlink == 2)
 		stat->nlink = 2 + input_dir_count;
