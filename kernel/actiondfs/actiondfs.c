@@ -438,10 +438,8 @@ static struct actiondfs_node *actiondfs_alloc_node(umode_t mode)
 	if (!node)
 		return NULL;
 
-	node->origin = ACTIONDFS_NODE_INPUT;
 	node->mode = mode;
 	mutex_init(&node->load_lock);
-	atomic64_set(&node->stage_generation, 0);
 	return node;
 }
 
@@ -952,7 +950,6 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	}
 
 	child = &children->entries[children->count];
-	memset(child, 0, sizeof(*child));
 	child->name = kmalloc(name_len + 1 + (target ? size + 1 : 0),
 			      GFP_KERNEL);
 	if (!child->name)
@@ -1677,7 +1674,8 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 	size_t pos = 0;
 	int err;
 
-	memset(digest, 0, sizeof(*digest));
+	digest->hash[0] = '\0';
+	digest->size = 0;
 	while (pos < len) {
 		const u8 *field;
 		size_t field_len;
@@ -1974,7 +1972,7 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 	struct actiondfs_blob_path_cache_entry *existing;
 	unsigned long key;
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry) {
 		path_get(path);
 		*out = *path;
