@@ -2939,7 +2939,6 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		setattr_copy(idmap, inode, attr);
 		if (attr->ia_valid & ATTR_MODE)
 			node->mode = inode->i_mode;
-		mark_inode_dirty(inode);
 	}
 
 out_drop_write:
