@@ -2227,9 +2227,7 @@ static int actiondfs_test_input_inode(struct inode *inode, void *data)
 	struct actiondfs_node *candidate = data;
 	struct actiondfs_node *existing = inode->i_private;
 
-	return existing && existing->origin == ACTIONDFS_NODE_INPUT &&
-	       existing->ino == candidate->ino &&
-	       existing->parent == candidate->parent &&
+	return existing && existing->parent == candidate->parent &&
 	       existing->input_child == candidate->input_child;
 }
 
@@ -2271,7 +2269,7 @@ static struct inode *actiondfs_iget(struct super_block *sb,
 				    struct actiondfs_node *node)
 {
 	struct inode *inode;
-	bool input_child = node->origin == ACTIONDFS_NODE_INPUT && node->parent;
+	bool input_child = node->input_child != NULL;
 
 	if (input_child)
 		inode = iget5_locked(sb, node->ino, actiondfs_test_input_inode,
