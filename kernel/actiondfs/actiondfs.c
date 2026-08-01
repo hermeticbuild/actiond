@@ -2388,13 +2388,6 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	bool merged_input = false;
 	int err;
 
-	if (!sbi->stage_path.dentry)
-		return NULL;
-	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUPS);
-	if (!READ_ONCE(parent->stage_dentry)) {
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_UNSTAGED_PARENT);
-		return NULL;
-	}
 	err = actiondfs_stage_node_path(sbi, parent, &parent_path);
 	if (err) {
 		if (err == -ENOENT) {
@@ -2504,6 +2497,7 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 				       struct dentry *dentry,
 				       unsigned int flags)
 {
+	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
 	struct actiondfs_node *parent = dir->i_private;
 	struct inode *inode = NULL;
 	int err;
@@ -2516,7 +2510,13 @@ static struct dentry *actiondfs_lookup(struct inode *dir,
 		return ERR_PTR(err);
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_LOOKUPS);
-	inode = actiondfs_lookup_staged_inode(dir, dentry, parent);
+	if (sbi->stage_path.dentry) {
+		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUPS);
+		if (READ_ONCE(parent->stage_dentry))
+			inode = actiondfs_lookup_staged_inode(dir, dentry, parent);
+		else
+			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_UNSTAGED_PARENT);
+	}
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 	if (inode) {
