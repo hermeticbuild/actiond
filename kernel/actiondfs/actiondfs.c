@@ -113,7 +113,7 @@ struct actiondfs_node {
 	umode_t mode;
 	union {
 		char *link_target;
-		atomic64_t stage_generation;
+		u64 stage_generation;
 	};
 	const struct actiondfs_cached_child *input_child;
 	struct mutex load_lock;
@@ -490,7 +490,7 @@ static void actiondfs_set_stage_dentry(struct actiondfs_node *node,
 
 static void actiondfs_note_stage_change(struct actiondfs_node *node)
 {
-	atomic64_inc(&node->stage_generation);
+	node->stage_generation++;
 }
 
 static int actiondfs_stage_node_path(struct actiondfs_sb_info *sbi,
@@ -2998,7 +2998,7 @@ static int actiondfs_open_stage_file(struct inode *inode,
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 	struct path real_path;
 	struct file *file;
-	u64 generation = atomic64_read(&dir->stage_generation);
+	u64 generation = dir->stage_generation;
 	int err;
 
 	if ((dir_file->stage_file || dir_file->stage_eof) &&
