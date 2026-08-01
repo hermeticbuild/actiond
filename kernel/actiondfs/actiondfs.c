@@ -1950,7 +1950,6 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 
 	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry) {
-		path_get(path);
 		*out = *path;
 		return;
 	}
@@ -1966,6 +1965,7 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 		mutex_unlock(&actiondfs_blob_path_cache_lock);
 		actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_RACES);
 		actiondfs_free_blob_path_cache_entry(entry);
+		path_put(path);
 		return;
 	}
 
@@ -1977,7 +1977,7 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 	list_add_tail(&entry->list, &actiondfs_blob_path_cache_list);
 	actiondfs_blob_path_cache_count++;
 	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_PATH_CACHE_INSERTS);
-	actiondfs_get_blob_path_cache_entry_locked(sbi, entry, out);
+	*out = *path;
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
 }
 
@@ -2011,7 +2011,6 @@ static int actiondfs_get_cached_blob_path(struct actiondfs_sb_info *sbi,
 		return err;
 
 	actiondfs_insert_blob_path_cache(sbi, hash, &real_path, out);
-	path_put(&real_path);
 	return 0;
 }
 
