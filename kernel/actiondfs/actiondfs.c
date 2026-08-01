@@ -957,7 +957,8 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	child->name_len = name_len;
 	child->mode = mode;
 	child->size = size;
-	memcpy(child->hash, hash, ACTIONDFS_HASH_HEX_LEN);
+	if (!target)
+		memcpy(child->hash, hash, ACTIONDFS_HASH_HEX_LEN);
 	children->count++;
 	return 0;
 }
@@ -1769,7 +1770,7 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 		return actiondfs_append_cached_child(
 			&parent->symlinks, child.name, child.name_len,
 			S_IFLNK | 0777, child.symlink.target_len,
-			ACTIONDFS_EMPTY_SHA256, child.symlink.target);
+			NULL, child.symlink.target);
 
 	if (S_ISREG(mode)) {
 		children = &parent->files;
