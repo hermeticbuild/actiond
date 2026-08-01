@@ -108,7 +108,7 @@ struct actiondfs_node {
 	u64 size;
 	enum actiondfs_node_origin origin;
 	umode_t mode;
-	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
+	const char *hash;
 	char *link_target;
 	const struct actiondfs_cached_child *input_child;
 	struct mutex load_lock;
@@ -122,6 +122,7 @@ struct actiondfs_sb_info {
 	struct path cas_path;
 	struct path stage_path;
 	struct actiondfs_node *root;
+	char root_hash[ACTIONDFS_HASH_HEX_LEN + 1];
 };
 
 struct actiondfs_mount_options {
@@ -770,9 +771,9 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 					     record->name_len,
 					     S_ISDIR(record->mode));
 	node->size = record->size;
+	node->hash = record->hash;
 	if (S_ISLNK(record->mode))
 		node->link_target = record->name + record->name_len + 1;
-	actiondfs_copy_hash(node->hash, record->hash);
 	return node;
 }
 
@@ -3492,7 +3493,8 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	} else {
 		sb->s_flags |= SB_RDONLY;
 	}
-	actiondfs_copy_hash(sbi->root->hash, opts.root_hash);
+	actiondfs_copy_hash(sbi->root_hash, opts.root_hash);
+	sbi->root->hash = sbi->root_hash;
 	sbi->root->size = opts.root_size;
 
 	root_inode = actiondfs_iget(sb, sbi->root);
