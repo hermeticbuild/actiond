@@ -586,6 +586,7 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 {
 	struct actiondfs_node **ancestors;
 	struct actiondfs_node *ancestor_node;
+	struct dentry *stage_dentry;
 	struct path current_path;
 	size_t depth = 0;
 	size_t path_len = 0;
@@ -597,9 +598,12 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_ENSURE_DIR_ERRORS);
 		return -EROFS;
 	}
-	if (smp_load_acquire(&node->stage_dentry)) {
+	stage_dentry = smp_load_acquire(&node->stage_dentry);
+	if (stage_dentry) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_PARENT_DENTRY_HITS);
-		return actiondfs_stage_node_path(sbi, node, path);
+		path->mnt = sbi->stage_path.mnt;
+		path->dentry = stage_dentry;
+		return 0;
 	}
 
 	ancestor_node = node;
@@ -681,7 +685,9 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		current_path = next_path;
 	}
 
-	*path = current_path;
+	path->mnt = sbi->stage_path.mnt;
+	path->dentry = smp_load_acquire(&node->stage_dentry);
+	path_put(&current_path);
 	kfree(ancestors);
 	return 0;
 
@@ -2513,7 +2519,7 @@ static int actiondfs_create_staged_child(struct inode *dir,
 		goto out_put_inode;
 	err = mnt_want_write(parent_path.mnt);
 	if (err)
-		goto out_put_path;
+		goto out_put_inode;
 	err = actiondfs_stage_lookup_child(&parent_path, dentry->d_name.name,
 					   dentry->d_name.len, &real_dentry);
 	if (err)
@@ -2561,8 +2567,6 @@ static int actiondfs_create_staged_child(struct inode *dir,
 
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
-out_put_path:
-	path_put(&parent_path);
 out_put_inode:
 	iput(inode);
 	return err;
@@ -2731,7 +2735,7 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		goto out_done;
 	err = mnt_want_write(old_parent_path.mnt);
 	if (err)
-		goto out_put_new_path;
+		goto out_done;
 
 	trap = lock_rename(new_parent_path.dentry, old_parent_path.dentry);
 	if (IS_ERR(trap)) {
@@ -2802,8 +2806,6 @@ out_unlock:
 	unlock_rename(new_parent_path.dentry, old_parent_path.dentry);
 out_drop_write:
 	mnt_drop_write(old_parent_path.mnt);
-out_put_new_path:
-	path_put(&new_parent_path);
 out_done:
 	if (err)
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_RENAME_FAILURES);
