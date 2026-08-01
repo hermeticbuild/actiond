@@ -105,12 +105,12 @@ enum actiondfs_node_origin {
 };
 
 struct actiondfs_node {
-	enum actiondfs_node_origin origin;
 	u64 ino;
-	umode_t mode;
 	u64 size;
-	char *link_target;
+	enum actiondfs_node_origin origin;
+	umode_t mode;
 	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
+	char *link_target;
 	const struct actiondfs_cached_child *input_child;
 	struct mutex load_lock;
 	struct actiondfs_node *parent;
