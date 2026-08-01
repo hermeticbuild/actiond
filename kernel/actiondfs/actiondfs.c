@@ -2020,13 +2020,14 @@ static void actiondfs_drop_cached_blob_path(struct actiondfs_sb_info *sbi,
 }
 
 static struct actiondfs_cached_dir *
-actiondfs_find_cached_dir_locked(struct actiondfs_sb_info *sbi,
-				 const char *hash)
+actiondfs_find_cached_dir(struct actiondfs_sb_info *sbi,
+			  const char *hash)
 {
 	struct actiondfs_cached_dir *entry;
 	unsigned long key = actiondfs_digest_cache_key(hash);
 
-	hash_for_each_possible(actiondfs_dir_cache, entry, hnode, key) {
+	hash_for_each_possible_rcu(actiondfs_dir_cache, entry, hnode, key,
+				   lockdep_is_held(&actiondfs_dir_cache_lock)) {
 		if (entry->cas_root == sbi->cas_path.dentry &&
 		    !memcmp(entry->hash, hash, ACTIONDFS_HASH_HEX_LEN))
 			return entry;
@@ -2120,9 +2121,9 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 	int err;
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_CACHED_DIR_REQUESTS);
-	mutex_lock(&actiondfs_dir_cache_lock);
-	entry = actiondfs_find_cached_dir_locked(sbi, hash);
-	mutex_unlock(&actiondfs_dir_cache_lock);
+	rcu_read_lock();
+	entry = actiondfs_find_cached_dir(sbi, hash);
+	rcu_read_unlock();
 	if (entry) {
 		if (expected_size != ACTIONDFS_UNKNOWN_SIZE &&
 		    entry->size != expected_size)
@@ -2139,7 +2140,7 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 
 	key = actiondfs_digest_cache_key(hash);
 	mutex_lock(&actiondfs_dir_cache_lock);
-	existing = actiondfs_find_cached_dir_locked(sbi, hash);
+	existing = actiondfs_find_cached_dir(sbi, hash);
 	if (existing) {
 		mutex_unlock(&actiondfs_dir_cache_lock);
 		actiondfs_free_cached_dir(entry);
@@ -2150,7 +2151,7 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 		*out = existing;
 		return 0;
 	}
-	hash_add(actiondfs_dir_cache, &entry->hnode, key);
+	hash_add_rcu(actiondfs_dir_cache, &entry->hnode, key);
 	mutex_unlock(&actiondfs_dir_cache_lock);
 
 	*out = entry;
