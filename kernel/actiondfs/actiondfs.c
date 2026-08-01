@@ -125,7 +125,6 @@ struct actiondfs_node {
 struct actiondfs_sb_info {
 	struct path cas_path;
 	struct path stage_path;
-	struct actiondfs_node *root;
 	char root_hash[ACTIONDFS_HASH_HEX_LEN];
 };
 
@@ -3317,16 +3316,11 @@ static const struct file_operations actiondfs_dir_fops = {
 static void actiondfs_evict_inode(struct inode *inode)
 {
 	struct actiondfs_node *node = inode->i_private;
-	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 
 	truncate_inode_pages_final(&inode->i_data);
 	clear_inode(inode);
 	if (!node)
 		return;
-	if (sbi && node == sbi->root) {
-		inode->i_private = NULL;
-		return;
-	}
 	if (node->stage_dentry) {
 		dput(node->stage_dentry);
 		node->stage_dentry = NULL;
@@ -3350,7 +3344,6 @@ static void actiondfs_put_super(struct super_block *sb)
 
 	if (!sbi)
 		return;
-	actiondfs_free_node(sbi->root);
 	if (sbi->cas_path.dentry)
 		path_put(&sbi->cas_path);
 	if (sbi->stage_path.dentry)
@@ -3372,6 +3365,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		.root_size = ACTIONDFS_UNKNOWN_SIZE,
 	};
 	struct actiondfs_sb_info *sbi;
+	struct actiondfs_node *root = NULL;
 	struct inode *root_inode;
 	int err;
 
@@ -3388,12 +3382,12 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_op = &actiondfs_super_ops;
 	sb->s_time_gran = 1;
 
-	sbi->root = actiondfs_alloc_node(S_IFDIR | ACTIONDFS_DIR_MODE);
-	if (!sbi->root) {
+	root = actiondfs_alloc_node(S_IFDIR | ACTIONDFS_DIR_MODE);
+	if (!root) {
 		err = -ENOMEM;
 		goto fail;
 	}
-	sbi->root->ino = 1;
+	root->ino = 1;
 
 	err = actiondfs_parse_options(&opts, fc->fs_private);
 	if (err)
@@ -3407,18 +3401,19 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 				&sbi->stage_path);
 		if (err)
 			goto fail;
-		actiondfs_set_stage_dentry(sbi->root, sbi->stage_path.dentry);
+		actiondfs_set_stage_dentry(root, sbi->stage_path.dentry);
 	} else {
 		sb->s_flags |= SB_RDONLY;
 	}
 	memcpy(sbi->root_hash, opts.root_hash, ACTIONDFS_HASH_HEX_LEN);
-	sbi->root->size = opts.root_size;
+	root->size = opts.root_size;
 
-	root_inode = actiondfs_iget(sb, sbi->root);
+	root_inode = actiondfs_iget(sb, root);
 	if (IS_ERR(root_inode)) {
 		err = PTR_ERR(root_inode);
 		goto fail;
 	}
+	root = NULL;
 
 	sb->s_root = d_make_root(root_inode);
 	if (!sb->s_root) {
@@ -3429,6 +3424,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	return 0;
 
 fail:
+	actiondfs_free_node(root);
 	actiondfs_put_super(sb);
 	return err;
 }
