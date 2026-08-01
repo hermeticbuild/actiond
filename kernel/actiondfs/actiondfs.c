@@ -932,7 +932,7 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	if (children->count == children->capacity) {
 		if (children->capacity > U32_MAX / 2)
 			return -EOVERFLOW;
-		capacity = children->capacity ? children->capacity * 2 : 8;
+		capacity = children->capacity ? children->capacity * 2 : 4;
 		entries = krealloc_array(children->entries, capacity,
 					 sizeof(*entries), GFP_KERNEL);
 		if (!entries)
