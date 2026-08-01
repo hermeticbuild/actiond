@@ -66,7 +66,6 @@
 
 struct actiondfs_cached_child {
 	char *name;
-	char *link_target;
 	u64 size;
 	u16 name_len;
 	umode_t mode;
@@ -774,7 +773,7 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 					     S_ISDIR(record->mode));
 	node->size = record->size;
 	if (S_ISLNK(record->mode))
-		node->link_target = record->link_target;
+		node->link_target = record->name + record->name_len + 1;
 	actiondfs_copy_hash(node->hash, record->hash);
 	return node;
 }
@@ -834,10 +833,8 @@ static void actiondfs_free_cached_children(
 {
 	size_t i;
 
-	for (i = 0; i < children->count; i++) {
+	for (i = 0; i < children->count; i++)
 		kfree(children->entries[i].name);
-		kfree(children->entries[i].link_target);
-	}
 	kfree(children->entries);
 }
 
@@ -924,7 +921,8 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 					 size_t name_len,
 					 umode_t mode,
 					 u64 size,
-					 const char *hash)
+					 const char *hash,
+					 const char *target)
 {
 	struct actiondfs_cached_child *entries;
 	struct actiondfs_cached_child *child;
@@ -955,9 +953,16 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 
 	child = &children->entries[children->count];
 	memset(child, 0, sizeof(*child));
-	child->name = kmemdup_nul(name, name_len, GFP_KERNEL);
+	child->name = kmalloc(name_len + 1 + (target ? size + 1 : 0),
+			      GFP_KERNEL);
 	if (!child->name)
 		return -ENOMEM;
+	memcpy(child->name, name, name_len);
+	child->name[name_len] = '\0';
+	if (target) {
+		memcpy(child->name + name_len + 1, target, size);
+		child->name[name_len + 1 + size] = '\0';
+	}
 	child->name_len = name_len;
 	child->mode = mode;
 	child->size = size;
@@ -972,28 +977,14 @@ static int actiondfs_append_cached_symlink_child(struct actiondfs_cached_dir *pa
 						 const char *target,
 						 size_t target_len)
 {
-	struct actiondfs_cached_child *child;
-	int err;
-
 	if (!target_len || target_len >= PATH_MAX ||
 	    memchr(target, '\0', target_len))
 		return -EINVAL;
 
-	err = actiondfs_append_cached_child(&parent->symlinks,
-					    name, name_len, S_IFLNK | 0777,
-					    target_len, ACTIONDFS_EMPTY_SHA256);
-	if (err)
-		return err;
-
-	child = &parent->symlinks.entries[parent->symlinks.count - 1];
-	child->link_target = kmemdup_nul(target, target_len, GFP_KERNEL);
-	if (!child->link_target) {
-		kfree(child->name);
-		child->name = NULL;
-		parent->symlinks.count--;
-		return -ENOMEM;
-	}
-	return 0;
+	return actiondfs_append_cached_child(&parent->symlinks,
+					     name, name_len, S_IFLNK | 0777,
+					     target_len, ACTIONDFS_EMPTY_SHA256,
+					     target);
 }
 
 static int actiondfs_valid_hash(const char *hash)
@@ -1823,7 +1814,7 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 	}
 	err = actiondfs_append_cached_child(children, child.name, child.name_len,
 					    mode, child.digest.size,
-					    child.digest.hash);
+					    child.digest.hash, NULL);
 	if (!err)
 		actiondfs_stat_inc(S_ISREG(mode) ?
 				  ACTIONDFS_STAT_CACHED_FILE_RECORDS :
