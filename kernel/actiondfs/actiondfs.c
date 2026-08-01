@@ -2380,7 +2380,6 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	char *link_target = NULL;
 	umode_t mode;
 	u64 size = 0;
-	bool merged_input = false;
 	int err;
 
 	err = actiondfs_stage_node_path(sbi, parent, &parent_path);
@@ -2410,7 +2409,6 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 						 dentry->d_name.name,
 						 dentry->d_name.len);
 		if (input_child && S_ISDIR(input_child->mode)) {
-			merged_input = true;
 			err = actiondfs_get_cached_dir(sbi, input_child->hash,
 						       input_child->size,
 						       &input_cached);
@@ -2430,7 +2428,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		goto out_negative;
 	}
 
-	if (merged_input) {
+	if (input_cached) {
 		node = actiondfs_materialize_cached_child(parent, input_child);
 		if (IS_ERR(node)) {
 			err = PTR_ERR(node);
@@ -2457,7 +2455,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		goto out_error;
 	}
 	if (inode->i_private != node) {
-		if (!merged_input)
+		if (!input_cached)
 			actiondfs_free_node(node);
 		node = inode->i_private;
 	}
@@ -2471,7 +2469,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 out_unlock:
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
 	path_put(&parent_path);
-	if (inode && !IS_ERR(inode) && merged_input) {
+	if (inode && !IS_ERR(inode) && input_cached) {
 		smp_store_release(&node->cached_dir, input_cached);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES);
 	}
