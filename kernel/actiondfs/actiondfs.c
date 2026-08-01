@@ -482,11 +482,11 @@ actiondfs_alloc_staged_node(struct actiondfs_node *parent,
 static void actiondfs_set_stage_dentry(struct actiondfs_node *node,
 				       struct dentry *dentry)
 {
-	struct dentry *old;
+	if (smp_load_acquire(&node->stage_dentry))
+		return;
 
 	dget(dentry);
-	old = cmpxchg(&node->stage_dentry, NULL, dentry);
-	if (old)
+	if (cmpxchg(&node->stage_dentry, NULL, dentry))
 		dput(dentry);
 }
 
