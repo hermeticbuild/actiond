@@ -1019,29 +1019,19 @@ static bool actiondfs_retry_stale(int err, unsigned int *attempts)
 	return true;
 }
 
-static bool actiondfs_retry_open_stale(int err, unsigned int *attempts)
+#if ACTIONDFS_ENABLE_STATS
+static bool actiondfs_retry_counted_stale(int err, unsigned int *attempts,
+					 enum actiondfs_stat stat)
 {
 	if (!actiondfs_retry_stale(err, attempts))
 		return false;
-	actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_OPEN_STALE_RETRIES);
+	actiondfs_stat_inc(stat);
 	return true;
 }
-
-static bool actiondfs_retry_backing_read_stale(int err, unsigned int *attempts)
-{
-	if (!actiondfs_retry_stale(err, attempts))
-		return false;
-	actiondfs_stat_inc(ACTIONDFS_STAT_BACKING_READ_STALE_RETRIES);
-	return true;
-}
-
-static bool actiondfs_retry_splice_read_stale(int err, unsigned int *attempts)
-{
-	if (!actiondfs_retry_stale(err, attempts))
-		return false;
-	actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES);
-	return true;
-}
+#else
+#define actiondfs_retry_counted_stale(err, attempts, stat) \
+	actiondfs_retry_stale((err), (attempts))
+#endif
 
 static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 						 const char *hash)
@@ -1080,7 +1070,9 @@ static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 		}
 
 		err = PTR_ERR(file);
-		if (!actiondfs_retry_open_stale(err, &stale_attempts))
+		if (!actiondfs_retry_counted_stale(
+			    err, &stale_attempts,
+			    ACTIONDFS_STAT_BLOB_OPEN_STALE_RETRIES))
 			return file;
 	}
 }
@@ -1134,7 +1126,9 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		if (err == -ESTALE)
 			actiondfs_drop_cached_blob_path(sbi, hash);
 retry:
-		if (!actiondfs_retry_open_stale(err, &stale_attempts))
+		if (!actiondfs_retry_counted_stale(
+			    err, &stale_attempts,
+			    ACTIONDFS_STAT_BLOB_OPEN_STALE_RETRIES))
 			break;
 	}
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_BLOB_OPEN_BACKING_TOTAL_NS,
@@ -1293,7 +1287,9 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 				nread = err;
 		}
 		fput(file);
-	} while (actiondfs_retry_backing_read_stale(nread, &stale_attempts));
+	} while (actiondfs_retry_counted_stale(
+		nread, &stale_attempts,
+		ACTIONDFS_STAT_BACKING_READ_STALE_RETRIES));
 
 	if (nread > 0)
 		actiondfs_stat_add(ACTIONDFS_STAT_BACKING_READ_BYTES, (u64)nread);
@@ -1518,7 +1514,9 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 				nread = err;
 		}
 		fput(file);
-	} while (actiondfs_retry_splice_read_stale(nread, &stale_attempts));
+	} while (actiondfs_retry_counted_stale(
+		nread, &stale_attempts,
+		ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES));
 
 	if (nread > 0) {
 		*ppos = pos;
