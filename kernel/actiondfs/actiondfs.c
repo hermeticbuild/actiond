@@ -2234,7 +2234,6 @@ static void actiondfs_init_inode(struct inode *inode,
 		inode->i_op = &actiondfs_symlink_iops;
 		inode_set_cached_link(inode, node->link_target, node->size);
 		i_size_write(inode, node->size);
-		set_nlink(inode, 1);
 	} else if (S_ISDIR(node->mode)) {
 		inode->i_op = &actiondfs_dir_iops;
 		inode->i_fop = &actiondfs_dir_fops;
@@ -2243,7 +2242,6 @@ static void actiondfs_init_inode(struct inode *inode,
 		inode->i_op = &actiondfs_file_iops;
 		inode->i_fop = &actiondfs_file_fops;
 		i_size_write(inode, node->size);
-		set_nlink(inode, 1);
 	}
 }
 
