@@ -2200,6 +2200,7 @@ static void actiondfs_init_inode(struct inode *inode,
 {
 	inode->i_ino = node->ino;
 	inode_init_owner(&nop_mnt_idmap, inode, NULL, node->mode);
+	inode_has_no_xattr(inode);
 	inode->i_private = node;
 	simple_inode_init_ts(inode);
 
@@ -3368,6 +3369,8 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 				&sbi->stage_path);
 		if (err)
 			goto fail;
+		if (sbi->stage_path.mnt->mnt_sb->s_flags & SB_NOSEC)
+			sb->s_flags |= SB_NOSEC;
 		root->stage_dentry = dget(sbi->stage_path.dentry);
 	} else {
 		sb->s_flags |= SB_RDONLY;
