@@ -877,6 +877,21 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
                 .SUCCESS => return filesystemFailure("unprivileged staged fchown unexpectedly succeeded"),
                 else => return filesystemFailure("unprivileged staged fchown returned an unexpected errno"),
             }
+
+            switch (std.os.linux.errno(linux.fchmod(file.handle, 0o6755))) {
+                .SUCCESS => {},
+                else => return filesystemFailure("staged setuid/setgid chmod failed"),
+            }
+            try requireFilesystem(
+                ((try file.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                "staged chmod did not expose setuid/setgid permissions",
+            );
+            try file.setLength(io, payload.len);
+            try requireFilesystem(
+                ((try file.stat(io)).permissions.toMode() & 0o6000) == 0,
+                "staged truncate did not clear setuid/setgid permissions",
+            );
+            try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o640));
         }
     }
 

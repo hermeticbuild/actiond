@@ -2894,6 +2894,8 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		goto out;
 
 	real_attr = *attr;
+	if (real_attr.ia_valid & (ATTR_KILL_SUID | ATTR_KILL_SGID))
+		real_attr.ia_valid &= ~ATTR_MODE;
 	if (real_attr.ia_valid & ATTR_FILE) {
 		if (!real_attr.ia_file || !real_attr.ia_file->private_data) {
 			err = -EBADF;
