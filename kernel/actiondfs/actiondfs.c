@@ -3099,21 +3099,12 @@ static int actiondfs_emit_stage_entries(struct inode *inode,
 	return 0;
 }
 
-static int actiondfs_dir_open(struct inode *inode, struct file *file)
-{
-	struct actiondfs_dir_file *dir_file;
-
-	dir_file = kzalloc(sizeof(*dir_file), GFP_KERNEL);
-	if (!dir_file)
-		return -ENOMEM;
-	file->private_data = dir_file;
-	return 0;
-}
-
 static int actiondfs_dir_release(struct inode *inode, struct file *file)
 {
 	struct actiondfs_dir_file *dir_file = file->private_data;
 
+	if (!dir_file)
+		return 0;
 	if (dir_file->stage_file)
 		fput(dir_file->stage_file);
 	kfree(dir_file);
@@ -3155,6 +3146,19 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	struct actiondfs_dir_file *dir_file = file->private_data;
 	loff_t base = 2;
 	int err;
+
+	if (!dir_file) {
+		struct actiondfs_dir_file *existing;
+
+		dir_file = kzalloc(sizeof(*dir_file), GFP_KERNEL);
+		if (!dir_file)
+			return -ENOMEM;
+		existing = cmpxchg(&file->private_data, NULL, dir_file);
+		if (existing) {
+			kfree(dir_file);
+			dir_file = existing;
+		}
+	}
 
 	if (!ctx->pos && (dir_file->stage_file || dir_file->stage_eof))
 		actiondfs_reset_stage_file(dir_file);
@@ -3268,7 +3272,6 @@ static const struct inode_operations actiondfs_dir_iops = {
 };
 
 static const struct file_operations actiondfs_dir_fops = {
-	.open = actiondfs_dir_open,
 	.release = actiondfs_dir_release,
 	.fsync = actiondfs_fsync,
 	.llseek = generic_file_llseek,
