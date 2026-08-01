@@ -2903,6 +2903,7 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		goto out;
 
 	real_attr = *attr;
+	real_attr.ia_valid &= ~ATTR_OPEN;
 	if (real_attr.ia_valid & (ATTR_KILL_SUID | ATTR_KILL_SGID))
 		real_attr.ia_valid &= ~ATTR_MODE;
 	if (real_attr.ia_valid & ATTR_FILE) {

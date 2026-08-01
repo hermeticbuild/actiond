@@ -929,6 +929,27 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
         }
     }
 
+    {
+        var populated = try dir.createFile(io, "truncate-open.txt", .{ .read = true });
+        try populated.writeStreamingAll(io, "nonempty staged file");
+        populated.close(io);
+
+        var truncated = try dir.createFile(io, "truncate-open.txt", .{
+            .read = true,
+            .truncate = true,
+        });
+        defer truncated.close(io);
+        try requireFilesystem(
+            (try truncated.stat(io)).size == 0,
+            "staged O_TRUNC open did not clear the open file size",
+        );
+        try requireFilesystem(
+            (try dir.statFile(io, "truncate-open.txt", .{})).size == 0,
+            "staged O_TRUNC open did not clear the directory entry size",
+        );
+    }
+    try dir.deleteFile(io, "truncate-open.txt");
+
     var second = try dir.openFile(io, "payload.txt", .{ .mode = .read_write });
     defer second.close(io);
     try file.setLength(io, 3);
