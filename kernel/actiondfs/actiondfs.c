@@ -12,6 +12,7 @@
 #include <linux/backing-file.h>
 #include <linux/atomic.h>
 #include <linux/cred.h>
+#include <linux/ctype.h>
 #include <linux/delay.h>
 #include <linux/delayed_call.h>
 #include <linux/err.h>
@@ -987,7 +988,7 @@ static int actiondfs_valid_hash(const char *hash, size_t len)
 	if (len != ACTIONDFS_HASH_HEX_LEN)
 		return -EINVAL;
 	for (i = 0; i < ACTIONDFS_HASH_HEX_LEN; i++) {
-		if (hex_to_bin(hash[i]) < 0)
+		if (!isxdigit(hash[i]))
 			return -EINVAL;
 	}
 	return 0;
