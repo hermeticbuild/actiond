@@ -2283,7 +2283,7 @@ static void actiondfs_insert_staged_inode(struct inode *inode,
 	node->ino = real_inode->i_ino & ~(1ULL << 63);
 	node->mode = (node->mode & S_IFMT) |
 		     (real_inode->i_mode & S_IALLUGO);
-	node->stage_dentry = dget(real_dentry);
+	node->stage_dentry = real_dentry;
 	inode->i_ino = node->ino;
 	inode->i_mode = node->mode;
 	insert_inode_hash(inode);
@@ -2563,7 +2563,6 @@ static int actiondfs_create_staged_child(struct inode *dir,
 		goto out_drop_write;
 	}
 	actiondfs_insert_staged_inode(inode, real_dentry);
-	dput(real_dentry);
 	if (S_ISDIR(mode))
 		inc_nlink(dir);
 	d_instantiate(dentry, inode);
