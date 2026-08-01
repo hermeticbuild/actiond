@@ -110,13 +110,15 @@ struct actiondfs_node {
 	u64 size;
 	enum actiondfs_node_origin origin;
 	umode_t mode;
-	char *link_target;
+	union {
+		char *link_target;
+		atomic64_t stage_generation;
+	};
 	const struct actiondfs_cached_child *input_child;
 	struct mutex load_lock;
 	struct actiondfs_node *parent;
 	struct dentry *stage_dentry;
 	struct actiondfs_cached_dir *cached_dir;
-	atomic64_t stage_generation;
 };
 
 struct actiondfs_sb_info {
@@ -425,7 +427,7 @@ static void actiondfs_free_node(struct actiondfs_node *node)
 		return;
 	if (node->stage_dentry)
 		dput(node->stage_dentry);
-	if (node->origin == ACTIONDFS_NODE_STAGED)
+	if (node->origin == ACTIONDFS_NODE_STAGED && S_ISLNK(node->mode))
 		kfree(node->link_target);
 	kfree(node);
 }
@@ -2475,8 +2477,10 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 	if (!node)
 		goto out_error;
-	node->link_target = link_target;
-	link_target = NULL;
+	if (S_ISLNK(mode)) {
+		node->link_target = link_target;
+		link_target = NULL;
+	}
 	inode = actiondfs_iget(dir->i_sb, node);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
