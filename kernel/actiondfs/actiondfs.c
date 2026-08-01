@@ -93,7 +93,7 @@ struct actiondfs_blob_path_cache_entry {
 	struct list_head list;
 	struct rcu_head rcu;
 	struct work_struct release_work;
-	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
+	const char *hash;
 	struct dentry *cas_root;
 	struct dentry *dentry;
 };
@@ -1968,7 +1968,7 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 		return;
 	}
 
-	actiondfs_copy_hash(entry->hash, hash);
+	entry->hash = hash;
 	entry->cas_root = dget(sbi->cas_path.dentry);
 	entry->dentry = dget(path->dentry);
 	INIT_WORK(&entry->release_work,
