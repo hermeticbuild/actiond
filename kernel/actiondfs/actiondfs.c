@@ -2399,10 +2399,11 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	mode = real_inode->i_mode;
 	if (S_ISDIR(mode)) {
 		mode = S_IFDIR | (mode & S_IALLUGO);
-		input_child = actiondfs_find_cached_child(parent,
-						 dentry->d_name.name,
-						 dentry->d_name.len);
-		if (input_child && S_ISDIR(input_child->mode)) {
+		if (parent->cached_dir)
+			input_child = actiondfs_find_cached_child_in(
+				&parent->cached_dir->dirs, dentry->d_name.name,
+				dentry->d_name.len);
+		if (input_child) {
 			err = actiondfs_get_cached_dir(sbi, input_child->hash,
 						       input_child->size,
 						       &input_cached);
