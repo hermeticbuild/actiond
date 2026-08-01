@@ -2417,6 +2417,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		node->link_target = link_target;
 		link_target = NULL;
 	}
+	node->stage_dentry = dget(real_dentry);
 	inode = actiondfs_iget(dir->i_sb, node);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
@@ -2427,13 +2428,13 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		if (!input_cached)
 			actiondfs_free_node(node);
 		node = inode->i_private;
+		actiondfs_set_stage_dentry(node, real_dentry);
 	}
 	if (S_ISDIR(mode)) {
 		node->mode = mode;
 		inode->i_mode = mode;
 	}
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_HITS);
-	actiondfs_set_stage_dentry(node, real_dentry);
 
 out_unlock:
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
