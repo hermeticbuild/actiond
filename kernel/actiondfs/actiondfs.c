@@ -1220,11 +1220,6 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		total_start = actiondfs_stat_time_start();
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_READ_CALLS);
 		file = iocb->ki_filp->private_data;
-		if (!file) {
-			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_READ_TOTAL_NS,
-						   total_start);
-			return -EBADF;
-		}
 		nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
 					       &ctx);
 		if (nread > 0)
@@ -1317,11 +1312,6 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	total_start = actiondfs_stat_time_start();
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_WRITE_CALLS);
 	file = iocb->ki_filp->private_data;
-	if (!file) {
-		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
-					   total_start);
-		return -EBADF;
-	}
 	nwritten = backing_file_write_iter(file, from, iocb,
 					   iocb->ki_flags, &ctx);
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
@@ -1367,8 +1357,6 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		real_in = actiondfs_get_node_blob_file(node_in, file_in);
 	} else {
 		real_in = file_in->private_data;
-		if (!real_in)
-			real_in = ERR_PTR(-EBADF);
 	}
 	if (IS_ERR(real_in)) {
 		copied = PTR_ERR(real_in);
@@ -1376,15 +1364,9 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	}
 
 	real_out = file_out->private_data;
-	if (!real_out) {
-		copied = -EBADF;
-		goto out_put_in;
-	}
-
 	copied = vfs_copy_file_range(real_in, pos_in, real_out, pos_out, len, 0);
 	if (copied > 0)
 		actiondfs_sync_staged_inode(inode_out, file_inode(real_out));
-out_put_in:
 	if (node_in->origin == ACTIONDFS_NODE_INPUT)
 		fput(real_in);
 
@@ -1424,11 +1406,6 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SPLICE_READ_CALLS);
 		file = actiondfs_file->private_data;
-		if (!file) {
-			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_SPLICE_READ_TOTAL_NS,
-						   total_start);
-			return -EBADF;
-		}
 		init_sync_kiocb(&backing_iocb, actiondfs_file);
 		backing_iocb.ki_pos = pos;
 		nread = backing_file_splice_read(file, &backing_iocb, pipe,
@@ -1502,12 +1479,6 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_CALLS);
 		file = actiondfs_file->private_data;
-		if (!file) {
-			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_FAILURES);
-			actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_MMAP_TOTAL_NS,
-						   total_start);
-			return -EBADF;
-		}
 		err = backing_file_mmap(file, vma, &ctx);
 		if (err)
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_FAILURES);
@@ -2901,8 +2872,6 @@ static int actiondfs_fsync(struct file *file, loff_t start, loff_t end,
 		if (node->origin != ACTIONDFS_NODE_STAGED)
 			return 0;
 		backing_file = file->private_data;
-		if (!backing_file)
-			return -EBADF;
 		return vfs_fsync_range(backing_file, start, end, datasync);
 	}
 
