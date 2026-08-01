@@ -1022,33 +1022,77 @@ static bool actiondfs_retry_counted_stale(int err, unsigned int *attempts,
 	actiondfs_retry_stale((err), (attempts))
 #endif
 
+static struct dentry *actiondfs_lookup_cas_blob(
+	struct actiondfs_sb_info *sbi, const char *hash)
+{
+	struct mnt_idmap *idmap = mnt_idmap(sbi->cas_path.mnt);
+	struct qstr shard_name = QSTR_LEN(hash, 2);
+	struct qstr blob_name = QSTR_LEN(hash, ACTIONDFS_HASH_HEX_LEN);
+	struct dentry *shard;
+	struct dentry *blob;
+	int err;
+
+	shard = lookup_one_positive_unlocked(idmap, &shard_name,
+					     sbi->cas_path.dentry);
+	if (IS_ERR(shard))
+		return shard;
+	if (d_managed(shard)) {
+		err = -EXDEV;
+		goto out_shard;
+	}
+	if (d_is_symlink(shard)) {
+		err = -ELOOP;
+		goto out_shard;
+	}
+	if (!d_can_lookup(shard)) {
+		err = -ENOTDIR;
+		goto out_shard;
+	}
+
+	blob = lookup_one_positive_unlocked(idmap, &blob_name, shard);
+	dput(shard);
+	if (IS_ERR(blob))
+		return blob;
+	if (d_managed(blob)) {
+		err = -EXDEV;
+		goto out_blob;
+	}
+	if (d_is_symlink(blob)) {
+		err = -ELOOP;
+		goto out_blob;
+	}
+	if (!d_is_reg(blob)) {
+		err = -EIO;
+		goto out_blob;
+	}
+	return blob;
+
+out_blob:
+	dput(blob);
+	return ERR_PTR(err);
+out_shard:
+	dput(shard);
+	return ERR_PTR(err);
+}
+
 static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 						 const char *hash)
 {
 	unsigned int stale_attempts = 0;
-	char path[ACTIONDFS_SHARDED_HASH_PATH_LEN + 1];
 	struct file *file;
-	struct inode *real_inode;
 	struct path real_path;
 	int err;
 
-	actiondfs_sharded_hash_path(hash, path);
 	while (true) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_BLOB_OPEN_ATTEMPTS);
-		err = vfs_path_lookup(sbi->cas_path.dentry, sbi->cas_path.mnt,
-				      path, LOOKUP_FOLLOW | LOOKUP_NO_SYMLINKS |
-					    LOOKUP_NO_XDEV, &real_path);
-		if (err) {
-			file = ERR_PTR(err);
+		real_path.mnt = sbi->cas_path.mnt;
+		real_path.dentry = actiondfs_lookup_cas_blob(sbi, hash);
+		if (IS_ERR(real_path.dentry)) {
+			file = ERR_CAST(real_path.dentry);
 		} else {
-			real_inode = d_inode(real_path.dentry);
-			if (!real_inode || !S_ISREG(real_inode->i_mode)) {
-				path_put(&real_path);
-				return ERR_PTR(-EIO);
-			}
 			file = dentry_open(&real_path, O_RDONLY | O_NONBLOCK,
 					   current_cred());
-			path_put(&real_path);
+			dput(real_path.dentry);
 		}
 		if (!IS_ERR(file))
 			return file;
