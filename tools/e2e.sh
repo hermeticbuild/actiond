@@ -275,6 +275,8 @@ run_vm_e2e() {
   trap 'cleanup_e2e_server $?' EXIT
 
   wait_for_port "${e2e_host}" "${e2e_port}" 180
+  python3 "${repo_root}/tools/e2e_sandbox_regression.py" \
+    "${endpoint}" "${test_workspace}/tool/action-tool"
   run_stress_workspace
   cleanup_e2e_server 0
   trap - EXIT
