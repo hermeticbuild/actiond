@@ -2862,6 +2862,7 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 {
 	struct inode *inode = d_inode(dentry);
 	struct actiondfs_node *node = inode->i_private;
+	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 	struct path real_path;
 	struct iattr real_attr;
 	bool changing_size = attr->ia_valid & ATTR_SIZE;
@@ -2875,15 +2876,19 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	err = setattr_prepare(idmap, dentry, attr);
 	if (err)
 		goto out;
-	err = actiondfs_stage_node_path(actiondfs_sbi(inode->i_sb), node,
-				       &real_path);
-	if (err)
-		goto out;
-	err = mnt_want_write(real_path.mnt);
-	if (err) {
-		path_put(&real_path);
+	if (!sbi->stage_path.dentry) {
+		err = -EROFS;
 		goto out;
 	}
+	real_path.mnt = sbi->stage_path.mnt;
+	real_path.dentry = READ_ONCE(node->stage_dentry);
+	if (!real_path.dentry) {
+		err = -ENOENT;
+		goto out;
+	}
+	err = mnt_want_write(real_path.mnt);
+	if (err)
+		goto out;
 
 	real_attr = *attr;
 	if (real_attr.ia_valid & ATTR_FILE) {
@@ -2910,7 +2915,6 @@ static int actiondfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 
 out_drop_write:
 	mnt_drop_write(real_path.mnt);
-	path_put(&real_path);
 out:
 	if (changing_size) {
 		if (err)
