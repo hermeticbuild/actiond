@@ -91,8 +91,10 @@ struct actiondfs_cached_dir {
 struct actiondfs_blob_path_cache_entry {
 	struct hlist_node hnode;
 	struct list_head list;
-	struct rcu_head rcu;
-	struct work_struct release_work;
+	union {
+		struct rcu_head rcu;
+		struct work_struct release_work;
+	};
 	const char *hash;
 	struct dentry *cas_root;
 	struct dentry *dentry;
@@ -881,6 +883,8 @@ static void actiondfs_release_blob_path_cache_entry_rcu(struct rcu_head *rcu)
 	struct actiondfs_blob_path_cache_entry *entry =
 		container_of(rcu, struct actiondfs_blob_path_cache_entry, rcu);
 
+	INIT_WORK(&entry->release_work,
+		  actiondfs_release_blob_path_cache_entry_work);
 	queue_work(actiondfs_blob_path_cache_release_wq, &entry->release_work);
 }
 
@@ -1971,8 +1975,6 @@ static void actiondfs_insert_blob_path_cache(struct actiondfs_sb_info *sbi,
 	entry->hash = hash;
 	entry->cas_root = dget(sbi->cas_path.dentry);
 	entry->dentry = dget(path->dentry);
-	INIT_WORK(&entry->release_work,
-		  actiondfs_release_blob_path_cache_entry_work);
 
 	mutex_lock(&actiondfs_blob_path_cache_lock);
 	existing = actiondfs_find_blob_path_cache_locked(sbi, hash);
