@@ -1122,19 +1122,19 @@ retry:
 	return file;
 }
 
-static struct file *actiondfs_get_node_blob_file(struct actiondfs_node *node,
-						 struct file *actiondfs_file)
+static struct file *actiondfs_get_node_blob_file(struct file *actiondfs_file)
 {
+	struct file __rcu **slot =
+		(struct file __rcu **)&actiondfs_file->private_data;
 	struct file *file;
 
-	mutex_lock(&node->load_lock);
-	file = actiondfs_file->private_data;
-	if (file) {
-		get_file(file);
-		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
-	}
-	mutex_unlock(&node->load_lock);
-	return file ? file : ERR_PTR(-EBADF);
+	rcu_read_lock();
+	file = get_file_rcu(slot);
+	rcu_read_unlock();
+	if (!file)
+		return ERR_PTR(-EBADF);
+	actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
+	return file;
 }
 
 static int actiondfs_reopen_node_blob_if_current(struct actiondfs_sb_info *sbi,
@@ -1154,7 +1154,9 @@ static int actiondfs_reopen_node_blob_if_current(struct actiondfs_sb_info *sbi,
 		if (IS_ERR(replacement)) {
 			err = PTR_ERR(replacement);
 		} else {
-			actiondfs_file->private_data = replacement;
+			rcu_assign_pointer(
+				*(struct file __rcu **)&actiondfs_file->private_data,
+				replacement);
 			fput(current_file);
 		}
 	}
@@ -1252,7 +1254,7 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	iov_iter_truncate(to, wanted);
 
 	do {
-		file = actiondfs_get_node_blob_file(node, iocb->ki_filp);
+		file = actiondfs_get_node_blob_file(iocb->ki_filp);
 		if (IS_ERR(file))
 			return PTR_ERR(file);
 
@@ -1369,7 +1371,7 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		goto out;
 	len = min_t(u64, (u64)len, node_in->size - pos_in);
 	if (node_in->origin == ACTIONDFS_NODE_INPUT) {
-		real_in = actiondfs_get_node_blob_file(node_in, file_in);
+		real_in = actiondfs_get_node_blob_file(file_in);
 	} else {
 		real_in = file_in->private_data;
 	}
@@ -1454,7 +1456,7 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 	do {
 		struct kiocb backing_iocb;
 
-		file = actiondfs_get_node_blob_file(node, actiondfs_file);
+		file = actiondfs_get_node_blob_file(actiondfs_file);
 		if (IS_ERR(file))
 			return PTR_ERR(file);
 
@@ -1512,7 +1514,7 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 		return err;
 	}
 
-	file = actiondfs_get_node_blob_file(node, actiondfs_file);
+	file = actiondfs_get_node_blob_file(actiondfs_file);
 	if (IS_ERR(file)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_MMAP_FAILURES);
 		return PTR_ERR(file);
@@ -2835,7 +2837,8 @@ static int actiondfs_open(struct inode *inode, struct file *file)
 	}
 	if (IS_ERR(backing_file))
 		return PTR_ERR(backing_file);
-	file->private_data = backing_file;
+	rcu_assign_pointer(*(struct file __rcu **)&file->private_data,
+			   backing_file);
 	return 0;
 }
 
