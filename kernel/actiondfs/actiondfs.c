@@ -2706,10 +2706,6 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 						 &new_parent_path);
 	if (err)
 		goto out_done;
-	if (old_parent_path.mnt != new_parent_path.mnt) {
-		err = -EXDEV;
-		goto out_put_new_path;
-	}
 	err = mnt_want_write(old_parent_path.mnt);
 	if (err)
 		goto out_put_new_path;
