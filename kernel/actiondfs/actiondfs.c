@@ -623,7 +623,7 @@ static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 		ancestor_node = ancestor_node->parent;
 	}
 
-	ancestors = kcalloc(depth, sizeof(*ancestors), GFP_KERNEL);
+	ancestors = kmalloc_array(depth, sizeof(*ancestors), GFP_KERNEL);
 	if (!ancestors) {
 		err = -ENOMEM;
 		goto out_error;
