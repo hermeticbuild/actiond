@@ -69,7 +69,7 @@ struct actiondfs_cached_child {
 	u64 size;
 	u16 name_len;
 	umode_t mode;
-	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
+	char hash[ACTIONDFS_HASH_HEX_LEN];
 };
 
 struct actiondfs_cached_children {
@@ -81,7 +81,7 @@ struct actiondfs_cached_children {
 struct actiondfs_cached_dir {
 	struct hlist_node hnode;
 	struct dentry *cas_root;
-	char hash[ACTIONDFS_HASH_HEX_LEN + 1];
+	char hash[ACTIONDFS_HASH_HEX_LEN];
 	u32 size;
 	struct actiondfs_cached_children files;
 	struct actiondfs_cached_children dirs;
@@ -125,7 +125,7 @@ struct actiondfs_sb_info {
 	struct path cas_path;
 	struct path stage_path;
 	struct actiondfs_node *root;
-	char root_hash[ACTIONDFS_HASH_HEX_LEN + 1];
+	char root_hash[ACTIONDFS_HASH_HEX_LEN];
 };
 
 struct actiondfs_mount_options {
@@ -413,12 +413,6 @@ static void actiondfs_drop_cached_blob_path(struct actiondfs_sb_info *sbi,
 static struct actiondfs_sb_info *actiondfs_sbi(struct super_block *sb)
 {
 	return sb->s_fs_info;
-}
-
-static void actiondfs_copy_hash(char *destination, const void *source)
-{
-	memcpy(destination, source, ACTIONDFS_HASH_HEX_LEN);
-	destination[ACTIONDFS_HASH_HEX_LEN] = '\0';
 }
 
 static void actiondfs_free_node(struct actiondfs_node *node)
@@ -965,7 +959,7 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	child->name_len = name_len;
 	child->mode = mode;
 	child->size = size;
-	actiondfs_copy_hash(child->hash, hash);
+	memcpy(child->hash, hash, ACTIONDFS_HASH_HEX_LEN);
 	children->count++;
 	return 0;
 }
@@ -2077,7 +2071,7 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 	if (!entry)
 		return -ENOMEM;
 	entry->cas_root = dget(sbi->cas_path.dentry);
-	actiondfs_copy_hash(entry->hash, hash);
+	memcpy(entry->hash, hash, ACTIONDFS_HASH_HEX_LEN);
 
 	err = actiondfs_read_cas_blob(sbi, hash, expected_size, &buffer, &len);
 	if (err)
@@ -3459,7 +3453,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	} else {
 		sb->s_flags |= SB_RDONLY;
 	}
-	actiondfs_copy_hash(sbi->root_hash, opts.root_hash);
+	memcpy(sbi->root_hash, opts.root_hash, ACTIONDFS_HASH_HEX_LEN);
 	sbi->root->size = opts.root_size;
 
 	root_inode = actiondfs_iget(sb, sbi->root);
