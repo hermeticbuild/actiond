@@ -758,10 +758,18 @@ fn exerciseFilesystem(
         return filesystemFailure("filesystem output path did not include an output parent");
     var iterable_root = try root.openDir(io, ".", .{ .iterate = true });
     defer iterable_root.close(io);
+    try requireSandboxOwnership(
+        iterable_root.handle,
+        "staged workspace root did not preserve backing filesystem ownership",
+    );
     try expectDirectoryEntry(io, iterable_root, output_path[0..output_root_end], .directory, true);
 
     var output_dir = try root.openDir(io, output_path, .{ .iterate = true });
     defer output_dir.close(io);
+    try requireSandboxOwnership(
+        output_dir.handle,
+        "staged output directory did not preserve backing filesystem ownership",
+    );
     try output_dir.createDirPath(io, "filesystem");
     try requireFilesystem((try output_dir.stat(io)).nlink == 3, "creating a staged subdirectory did not increment the output directory link count");
     try exerciseInputDirectoryLinkCounts(io, root);
@@ -776,6 +784,31 @@ fn exerciseFilesystem(
     try exerciseImmutableInputAuthorization(io, allocator, root, inputs);
     try syncDirectory(dir);
     try syncDirectory(output_dir);
+}
+
+fn requireSandboxOwnership(fd: std.posix.fd_t, comptime message: []const u8) !void {
+    if (comptime @import("builtin").os.tag != .linux) return;
+
+    const linux = std.os.linux;
+    var ownership = std.mem.zeroes(linux.Statx);
+    switch (linux.errno(linux.statx(
+        fd,
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .UID = true, .GID = true },
+        &ownership,
+    ))) {
+        .SUCCESS => {},
+        else => return filesystemFailure("staged ownership statx failed"),
+    }
+    try requireFilesystem(
+        ownership.mask.UID and ownership.mask.GID,
+        "staged ownership statx omitted uid or gid",
+    );
+    try requireFilesystem(
+        ownership.uid == linux.geteuid() and ownership.gid == linux.getegid(),
+        message,
+    );
 }
 
 fn exerciseDirectoryPermissions(io: std.Io, dir: std.Io.Dir) !void {
@@ -850,6 +883,10 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
         .permissions = .default_file,
     });
     defer file.close(io);
+    try requireSandboxOwnership(
+        file.handle,
+        "created staged file did not preserve backing filesystem ownership",
+    );
     const payload = "actiondfs staged payload\n";
     try file.writeStreamingAll(io, payload);
     try file.sync(io);

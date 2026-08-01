@@ -413,6 +413,18 @@ static struct actiondfs_sb_info *actiondfs_sbi(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
+static void actiondfs_copy_stage_owner(struct inode *inode,
+				      struct inode *real_inode)
+{
+	struct mnt_idmap *idmap =
+		mnt_idmap(actiondfs_sbi(inode->i_sb)->stage_path.mnt);
+
+	spin_lock(&inode->i_lock);
+	inode->i_uid = vfsuid_into_kuid(i_uid_into_vfsuid(idmap, real_inode));
+	inode->i_gid = vfsgid_into_kgid(i_gid_into_vfsgid(idmap, real_inode));
+	spin_unlock(&inode->i_lock);
+}
+
 static void actiondfs_free_node(struct actiondfs_node *node)
 {
 	if (!node)
@@ -2229,6 +2241,8 @@ static void actiondfs_init_inode(struct inode *inode,
 {
 	inode->i_ino = node->ino;
 	inode_init_owner(&nop_mnt_idmap, inode, NULL, node->mode);
+	if (node->stage_dentry)
+		actiondfs_copy_stage_owner(inode, d_inode(node->stage_dentry));
 	inode_has_no_xattr(inode);
 	inode->i_private = node;
 	simple_inode_init_ts(inode);
@@ -2316,6 +2330,7 @@ static void actiondfs_insert_staged_inode(struct inode *inode,
 	node->stage_dentry = real_dentry;
 	inode->i_ino = node->ino;
 	inode->i_mode = node->mode;
+	actiondfs_copy_stage_owner(inode, real_inode);
 	insert_inode_hash(inode);
 }
 
@@ -2431,6 +2446,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 	if (inode->i_private != node) {
 		node = inode->i_private;
+		actiondfs_copy_stage_owner(inode, real_inode);
 		actiondfs_set_stage_dentry(node, real_dentry);
 	}
 	if (S_ISDIR(mode)) {
