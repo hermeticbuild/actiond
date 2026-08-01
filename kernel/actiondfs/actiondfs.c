@@ -2932,7 +2932,7 @@ static int actiondfs_fsync(struct file *file, loff_t start, loff_t end,
 		backing_file = file->private_data;
 		if (!backing_file)
 			return -EBADF;
-		get_file(backing_file);
+		return vfs_fsync_range(backing_file, start, end, datasync);
 	}
 
 	err = vfs_fsync_range(backing_file, start, end, datasync);
