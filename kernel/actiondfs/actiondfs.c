@@ -1370,8 +1370,6 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		real_in = file_in->private_data;
 		if (!real_in)
 			real_in = ERR_PTR(-EBADF);
-		else
-			get_file(real_in);
 	}
 	if (IS_ERR(real_in)) {
 		copied = PTR_ERR(real_in);
@@ -1388,7 +1386,8 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	if (copied > 0)
 		actiondfs_sync_staged_inode(inode_out, file_inode(real_out));
 out_put_in:
-	fput(real_in);
+	if (node_in->origin == ACTIONDFS_NODE_INPUT)
+		fput(real_in);
 
 out:
 	if (copied >= 0) {
