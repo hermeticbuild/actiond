@@ -2409,7 +2409,7 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	struct path parent_path;
 	struct dentry *real_dentry;
 	struct inode *real_inode;
-	struct inode *inode;
+	struct inode *inode = NULL;
 	struct actiondfs_node *node;
 	char *link_target = NULL;
 	umode_t mode;
@@ -2440,12 +2440,8 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
 		return ERR_PTR(err);
 	}
-	if (!d_inode(real_dentry)) {
-		actiondfs_stage_unlock_child(&parent_path, real_dentry);
-		path_put(&parent_path);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE);
-		return NULL;
-	}
+	if (!d_inode(real_dentry))
+		goto out_negative;
 
 	real_inode = d_inode(real_dentry);
 	mode = real_inode->i_mode;
@@ -2459,12 +2455,8 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 			err = actiondfs_get_cached_dir(sbi, input_child->hash,
 						       input_child->size,
 						       &input_cached);
-			if (err) {
-				actiondfs_stage_unlock_child(&parent_path, real_dentry);
-				path_put(&parent_path);
-				actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
-				return ERR_PTR(err);
-			}
+			if (err)
+				goto out_error;
 		}
 	} else if (S_ISREG(mode)) {
 		mode = S_IFREG | (mode & 0777);
@@ -2472,18 +2464,11 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	} else if (S_ISLNK(mode)) {
 		err = actiondfs_read_stage_symlink(real_dentry, &link_target,
 						    &size);
-		if (err) {
-			actiondfs_stage_unlock_child(&parent_path, real_dentry);
-			path_put(&parent_path);
-			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
-			return ERR_PTR(err);
-		}
+		if (err)
+			goto out_error;
 		mode = S_IFLNK | 0777;
 	} else {
-		actiondfs_stage_unlock_child(&parent_path, real_dentry);
-		path_put(&parent_path);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE);
-		return NULL;
+		goto out_negative;
 	}
 
 	if (merged_input) {
@@ -2500,40 +2485,46 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		if (!node)
 			err = -ENOMEM;
 	}
-	if (!node) {
-		kfree(link_target);
-		actiondfs_stage_unlock_child(&parent_path, real_dentry);
-		path_put(&parent_path);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
-		return ERR_PTR(err);
-	}
+	if (!node)
+		goto out_error;
 	node->link_target = link_target;
+	link_target = NULL;
 	inode = actiondfs_iget(dir->i_sb, node);
 	if (IS_ERR(inode)) {
+		err = PTR_ERR(inode);
 		actiondfs_free_node(node);
-		actiondfs_stage_unlock_child(&parent_path, real_dentry);
-		path_put(&parent_path);
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
-	} else {
-		if (inode->i_private != node) {
-			if (!merged_input)
-				actiondfs_free_node(node);
-			node = inode->i_private;
-		}
-		if (S_ISDIR(mode)) {
-			node->mode = mode;
-			inode->i_mode = mode;
-		}
-		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_HITS);
-		actiondfs_set_stage_dentry(node, real_dentry);
-		actiondfs_stage_unlock_child(&parent_path, real_dentry);
-		path_put(&parent_path);
+		goto out_error;
 	}
-	if (!IS_ERR(inode) && merged_input) {
+	if (inode->i_private != node) {
+		if (!merged_input)
+			actiondfs_free_node(node);
+		node = inode->i_private;
+	}
+	if (S_ISDIR(mode)) {
+		node->mode = mode;
+		inode->i_mode = mode;
+	}
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_HITS);
+	actiondfs_set_stage_dentry(node, real_dentry);
+
+out_unlock:
+	actiondfs_stage_unlock_child(&parent_path, real_dentry);
+	path_put(&parent_path);
+	if (inode && !IS_ERR(inode) && merged_input) {
 		smp_store_release(&node->cached_dir, input_cached);
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_INPUT_DIR_MERGES);
 	}
 	return inode;
+
+out_negative:
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_NEGATIVE);
+	goto out_unlock;
+
+out_error:
+	kfree(link_target);
+	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_INODE_LOOKUP_ERRORS);
+	inode = ERR_PTR(err);
+	goto out_unlock;
 }
 
 static struct dentry *actiondfs_lookup(struct inode *dir,
