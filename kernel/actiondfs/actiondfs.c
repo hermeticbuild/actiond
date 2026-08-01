@@ -2199,8 +2199,7 @@ static struct inode *actiondfs_iget(struct super_block *sb,
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 	if (!(inode->i_state & I_NEW)) {
-		if (input_child)
-			actiondfs_free_node(node);
+		actiondfs_free_node(node);
 		return inode;
 	}
 
@@ -2373,8 +2372,6 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		goto out_error;
 	}
 	if (inode->i_private != node) {
-		if (!input_cached)
-			actiondfs_free_node(node);
 		node = inode->i_private;
 		actiondfs_set_stage_dentry(node, real_dentry);
 	}
