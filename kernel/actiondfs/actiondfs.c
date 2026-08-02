@@ -2220,7 +2220,8 @@ static void actiondfs_init_inode(struct inode *inode,
 		inode->i_mode = node->mode;
 		actiondfs_copy_stage_owner(inode, d_inode(node->stage_dentry));
 	} else {
-		inode_init_owner(&nop_mnt_idmap, inode, NULL, node->mode);
+		inode->i_mode = node->mode;
+		current_fsuid_fsgid(&inode->i_uid, &inode->i_gid);
 	}
 	inode_has_no_xattr(inode);
 	inode->i_private = node;
