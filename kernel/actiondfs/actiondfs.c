@@ -2270,8 +2270,10 @@ static int actiondfs_set_input_inode(struct inode *inode, void *data)
 static void actiondfs_init_inode(struct inode *inode,
 				 struct actiondfs_node *node)
 {
-	if (!node->input_child)
+	if (!node->input_child) {
 		inode->i_ino = node->ino;
+		inode->i_private = node;
+	}
 	if (node->stage_dentry) {
 		inode->i_mode = node->mode;
 		actiondfs_copy_stage_owner(inode, d_inode(node->stage_dentry));
@@ -2280,7 +2282,6 @@ static void actiondfs_init_inode(struct inode *inode,
 		current_fsuid_fsgid(&inode->i_uid, &inode->i_gid);
 	}
 	inode_has_no_xattr(inode);
-	inode->i_private = node;
 	if (node->input_child) {
 		struct inode *root = d_inode(inode->i_sb->s_root);
 
