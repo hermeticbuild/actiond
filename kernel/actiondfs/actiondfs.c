@@ -3371,6 +3371,10 @@ static int actiondfs_parse_monolithic(struct fs_context *fc, void *data)
 
 	if (!data)
 		return -EINVAL;
+	if (fc->oldapi) {
+		fc->fs_private = data;
+		return 0;
+	}
 
 	options = kstrdup(data, GFP_KERNEL);
 	if (!options)
@@ -3383,7 +3387,8 @@ static int actiondfs_parse_monolithic(struct fs_context *fc, void *data)
 
 static void actiondfs_free_context(struct fs_context *fc)
 {
-	kfree(fc->fs_private);
+	if (!fc->oldapi)
+		kfree(fc->fs_private);
 }
 
 static const struct fs_context_operations actiondfs_context_ops = {
