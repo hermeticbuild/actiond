@@ -1317,9 +1317,6 @@ static void actiondfs_stage_end_write(struct kiocb *iocb, ssize_t written)
 		return;
 
 	backing_file = iocb->ki_filp->private_data;
-	if (!backing_file)
-		return;
-
 	actiondfs_sync_staged_inode(file_inode(iocb->ki_filp),
 				    file_inode(backing_file));
 	actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES, (u64)written);
