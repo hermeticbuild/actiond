@@ -2151,10 +2151,11 @@ static int actiondfs_parse_options(struct actiondfs_mount_options *opts,
 static int actiondfs_test_input_inode(struct inode *inode, void *data)
 {
 	struct actiondfs_node *candidate = data;
-	struct actiondfs_node *existing = inode->i_private;
+	struct actiondfs_node *existing = READ_ONCE(inode->i_private);
 
-	return existing && existing->parent == candidate->parent &&
-	       existing->input_child == candidate->input_child;
+	return existing &&
+	       READ_ONCE(existing->input_child) == candidate->input_child &&
+	       READ_ONCE(existing->parent) == candidate->parent;
 }
 
 static int actiondfs_set_input_inode(struct inode *inode, void *data)
@@ -2205,8 +2206,8 @@ static struct inode *actiondfs_iget(struct super_block *sb,
 	bool input_child = node->input_child != NULL;
 
 	if (input_child)
-		inode = iget5_locked(sb, node->ino, actiondfs_test_input_inode,
-				     actiondfs_set_input_inode, node);
+		inode = iget5_locked_rcu(sb, node->ino, actiondfs_test_input_inode,
+					 actiondfs_set_input_inode, node);
 	else
 		inode = iget_locked(sb, node->ino);
 	if (!inode)
