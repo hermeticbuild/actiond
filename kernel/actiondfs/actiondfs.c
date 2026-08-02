@@ -2198,7 +2198,15 @@ static void actiondfs_init_inode(struct inode *inode,
 	}
 	inode_has_no_xattr(inode);
 	inode->i_private = node;
-	simple_inode_init_ts(inode);
+	if (node->input_child) {
+		struct inode *root = d_inode(inode->i_sb->s_root);
+
+		inode_set_atime_to_ts(inode, inode_get_atime(root));
+		inode_set_mtime_to_ts(inode, inode_get_mtime(root));
+		inode_set_ctime_to_ts(inode, inode_get_ctime(root));
+	} else {
+		simple_inode_init_ts(inode);
+	}
 
 	if (S_ISLNK(node->mode)) {
 		inode->i_op = &actiondfs_symlink_iops;
