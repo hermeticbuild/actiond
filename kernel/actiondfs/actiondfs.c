@@ -115,7 +115,6 @@ struct actiondfs_node {
 		u64 stage_generation;
 	};
 	const struct actiondfs_cached_child *input_child;
-	struct mutex load_lock;
 	struct actiondfs_node *parent;
 	struct dentry *stage_dentry;
 	struct actiondfs_cached_dir *cached_dir;
@@ -778,8 +777,6 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 	node->size = record->size;
 	if (S_ISLNK(record->mode))
 		node->link_target = record->name + record->name_len + 1;
-	else
-		mutex_init(&node->load_lock);
 	return node;
 }
 
@@ -2090,37 +2087,19 @@ static int actiondfs_ensure_loaded(struct super_block *sb,
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(sb);
 	struct actiondfs_cached_dir *cached;
 	const char *hash;
-	int err = 0;
+	int err;
 
 	if (dir->origin == ACTIONDFS_NODE_STAGED ||
 	    smp_load_acquire(&dir->cached_dir))
 		return 0;
 
 	hash = dir->input_child ? dir->input_child->hash : sbi->root_hash;
-	rcu_read_lock();
-	cached = actiondfs_find_cached_dir(sbi, hash);
-	rcu_read_unlock();
-	if (cached) {
-		if (dir->size != ACTIONDFS_UNKNOWN_SIZE &&
-		    cached->size != dir->size)
-			return -EINVAL;
-		actiondfs_stat_inc(ACTIONDFS_STAT_CACHED_DIR_REQUESTS);
-		actiondfs_stat_inc(ACTIONDFS_STAT_DIR_CACHE_HITS);
-		if (!cmpxchg_release(&dir->cached_dir, NULL, cached))
-			actiondfs_stat_inc(ACTIONDFS_STAT_DIR_LOADS);
-		return 0;
-	}
-
-	mutex_lock(&dir->load_lock);
-	if (!smp_load_acquire(&dir->cached_dir)) {
+	err = actiondfs_get_cached_dir(sbi, hash, dir->size, &cached);
+	if (err)
+		return err;
+	if (!cmpxchg_release(&dir->cached_dir, NULL, cached))
 		actiondfs_stat_inc(ACTIONDFS_STAT_DIR_LOADS);
-		err = actiondfs_get_cached_dir(sbi, hash, dir->size,
-						&cached);
-		if (!err)
-			smp_store_release(&dir->cached_dir, cached);
-	}
-	mutex_unlock(&dir->load_lock);
-	return err;
+	return 0;
 }
 
 static int actiondfs_parse_options(struct actiondfs_mount_options *opts,
@@ -3340,7 +3319,6 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		err = -ENOMEM;
 		goto fail;
 	}
-	mutex_init(&root->load_lock);
 	root->ino = 1;
 
 	err = actiondfs_parse_options(&opts, fc->fs_private);
