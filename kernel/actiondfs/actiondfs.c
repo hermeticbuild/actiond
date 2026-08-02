@@ -1302,10 +1302,8 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 	iov_iter_truncate(to, node->size - iocb->ki_pos);
 
-	file = actiondfs_get_node_blob_file(iocb->ki_filp);
-	if (IS_ERR(file))
-		return PTR_ERR(file);
-
+	file = iocb->ki_filp->private_data;
+	actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
 	actiondfs_stat_inc(ACTIONDFS_STAT_BACKING_READS);
 	nread = actiondfs_backing_read_iter(file, to, iocb);
 
@@ -1433,13 +1431,10 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 		goto out;
 	len = min_t(u64, (u64)len, node_in->size - pos_in);
 	if (node_in->origin == ACTIONDFS_NODE_INPUT) {
-		real_in = actiondfs_get_node_blob_file(file_in);
+		real_in = file_in->private_data;
+		actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
 	} else {
 		real_in = file_in->private_data;
-	}
-	if (IS_ERR(real_in)) {
-		copied = PTR_ERR(real_in);
-		goto out;
 	}
 
 	real_out = file_out->private_data;
@@ -1506,10 +1501,8 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 
 	wanted = min_t(u64, (u64)len, node->size - pos);
 
-	file = actiondfs_get_node_blob_file(actiondfs_file);
-	if (IS_ERR(file))
-		return PTR_ERR(file);
-
+	file = actiondfs_file->private_data;
+	actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
 	actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READS);
 	nread = vfs_splice_read(file, &pos, pipe, wanted, flags);
 	if (nread > 0) {
