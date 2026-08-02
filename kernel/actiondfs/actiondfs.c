@@ -1168,44 +1168,12 @@ retry:
 
 static struct file *actiondfs_get_node_blob_file(struct file *actiondfs_file)
 {
-	struct file __rcu **slot =
-		(struct file __rcu **)&actiondfs_file->private_data;
-	struct file *file;
+	struct file *file = actiondfs_file->private_data;
 
-	rcu_read_lock();
-	file = get_file_rcu(slot);
-	rcu_read_unlock();
 	if (!file)
 		return ERR_PTR(-EBADF);
 	actiondfs_stat_inc(ACTIONDFS_STAT_NODE_BLOB_CACHE_HITS);
 	return file;
-}
-
-static int actiondfs_reopen_node_blob_if_current(struct actiondfs_sb_info *sbi,
-						 struct actiondfs_node *node,
-						 struct file *actiondfs_file,
-						 struct file *current_file)
-{
-	const char *hash = node->input_child->hash;
-	struct file *replacement;
-	int err = 0;
-
-	mutex_lock(&node->load_lock);
-	if (actiondfs_file->private_data == current_file) {
-		actiondfs_drop_cached_blob_path(sbi, hash);
-		replacement = actiondfs_open_backing_cas_blob(
-			sbi, hash, file_user_path(actiondfs_file), node->size);
-		if (IS_ERR(replacement)) {
-			err = PTR_ERR(replacement);
-		} else {
-			rcu_assign_pointer(
-				*(struct file __rcu **)&actiondfs_file->private_data,
-				replacement);
-			fput(current_file);
-		}
-	}
-	mutex_unlock(&node->load_lock);
-	return err;
 }
 
 static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
@@ -1260,12 +1228,10 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
 	struct actiondfs_node *node = inode->i_private;
-	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 	struct file *file;
 	size_t requested = iov_iter_count(to);
 	size_t wanted;
 	ssize_t nread;
-	unsigned int stale_attempts = 0;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
 	};
@@ -1297,25 +1263,13 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	wanted = min_t(u64, (u64)requested, node->size - iocb->ki_pos);
 	iov_iter_truncate(to, wanted);
 
-	do {
-		file = actiondfs_get_node_blob_file(iocb->ki_filp);
-		if (IS_ERR(file))
-			return PTR_ERR(file);
+	file = actiondfs_get_node_blob_file(iocb->ki_filp);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
 
-		actiondfs_stat_inc(ACTIONDFS_STAT_BACKING_READS);
-		nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
-					       &ctx);
-		if (nread == -ESTALE) {
-			int err = actiondfs_reopen_node_blob_if_current(
-				sbi, node, iocb->ki_filp, file);
-
-			if (err)
-				nread = err;
-		}
-		fput(file);
-	} while (actiondfs_retry_counted_stale(
-		nread, &stale_attempts,
-		ACTIONDFS_STAT_BACKING_READ_STALE_RETRIES));
+	actiondfs_stat_inc(ACTIONDFS_STAT_BACKING_READS);
+	nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
+				       &ctx);
 
 	if (nread > 0)
 		actiondfs_stat_add(ACTIONDFS_STAT_BACKING_READ_BYTES, (u64)nread);
@@ -1435,8 +1389,6 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 
 out_unlock:
 	inode_unlock(inode_out);
-	if (node_in->origin == ACTIONDFS_NODE_INPUT)
-		fput(real_in);
 
 out:
 	if (copied >= 0) {
@@ -1458,12 +1410,11 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 {
 	struct inode *inode = file_inode(actiondfs_file);
 	struct actiondfs_node *node = inode->i_private;
-	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 	struct file *file;
+	struct kiocb backing_iocb;
 	loff_t pos = *ppos;
 	size_t wanted;
 	ssize_t nread;
-	unsigned int stale_attempts = 0;
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
 	};
@@ -1497,31 +1448,17 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 
 	wanted = min_t(u64, (u64)len, node->size - pos);
 
-	do {
-		struct kiocb backing_iocb;
+	file = actiondfs_get_node_blob_file(actiondfs_file);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
 
-		file = actiondfs_get_node_blob_file(actiondfs_file);
-		if (IS_ERR(file))
-			return PTR_ERR(file);
-
-		init_sync_kiocb(&backing_iocb, actiondfs_file);
-		backing_iocb.ki_pos = pos;
-		actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READS);
-		nread = backing_file_splice_read(file, &backing_iocb, pipe,
-						 wanted, flags, &ctx);
-		if (nread > 0)
-			pos = backing_iocb.ki_pos;
-		if (nread == -ESTALE) {
-			int err = actiondfs_reopen_node_blob_if_current(
-				sbi, node, actiondfs_file, file);
-
-			if (err)
-				nread = err;
-		}
-		fput(file);
-	} while (actiondfs_retry_counted_stale(
-		nread, &stale_attempts,
-		ACTIONDFS_STAT_SPLICE_READ_STALE_RETRIES));
+	init_sync_kiocb(&backing_iocb, actiondfs_file);
+	backing_iocb.ki_pos = pos;
+	actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READS);
+	nread = backing_file_splice_read(file, &backing_iocb, pipe, wanted,
+					 flags, &ctx);
+	if (nread > 0)
+		pos = backing_iocb.ki_pos;
 
 	if (nread > 0) {
 		*ppos = pos;
@@ -1535,7 +1472,6 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 {
 	struct inode *inode = file_inode(actiondfs_file);
 	struct actiondfs_node *node = inode->i_private;
-	struct actiondfs_sb_info *sbi = actiondfs_sbi(inode->i_sb);
 	struct file *file;
 	int err;
 	struct backing_file_ctx ctx = {
@@ -1566,20 +1502,11 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_MMAPS);
 	err = backing_file_mmap(file, vma, &ctx);
-	if (err) {
+	if (err)
 		actiondfs_stat_inc(ACTIONDFS_STAT_MMAP_FAILURES);
-		if (err == -ESTALE) {
-			int reopen_err = actiondfs_reopen_node_blob_if_current(
-				sbi, node, actiondfs_file, file);
-
-			if (reopen_err)
-				err = reopen_err;
-		}
-	} else {
+	else
 		actiondfs_stat_add(ACTIONDFS_STAT_MMAP_BYTES,
 				   (u64)(vma->vm_end - vma->vm_start));
-	}
-	fput(file);
 	return err;
 }
 
@@ -2880,8 +2807,7 @@ static int actiondfs_open(struct inode *inode, struct file *file)
 	}
 	if (IS_ERR(backing_file))
 		return PTR_ERR(backing_file);
-	rcu_assign_pointer(*(struct file __rcu **)&file->private_data,
-			   backing_file);
+	file->private_data = backing_file;
 	return 0;
 }
 
