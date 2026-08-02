@@ -1457,26 +1457,18 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 	struct inode *inode = file_inode(actiondfs_file);
 	struct actiondfs_node *node = inode->i_private;
 	struct file *file;
-	struct kiocb backing_iocb;
 	loff_t pos = *ppos;
 	size_t wanted;
 	ssize_t nread;
-	struct backing_file_ctx ctx = {
-		.cred = current_cred(),
-	};
 
 	if (node->origin == ACTIONDFS_NODE_STAGED) {
-		struct kiocb backing_iocb;
 		u64 total_start = actiondfs_stat_time_start();
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_SPLICE_READ_CALLS);
 		file = actiondfs_file->private_data;
-		init_sync_kiocb(&backing_iocb, actiondfs_file);
-		backing_iocb.ki_pos = pos;
-		nread = backing_file_splice_read(file, &backing_iocb, pipe,
-						 len, flags, &ctx);
+		nread = vfs_splice_read(file, &pos, pipe, len, flags);
 		if (nread > 0) {
-			*ppos = backing_iocb.ki_pos;
+			*ppos = pos;
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_SPLICE_READ_BYTES,
 					   (u64)nread);
 		}
@@ -1498,14 +1490,8 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
-	init_sync_kiocb(&backing_iocb, actiondfs_file);
-	backing_iocb.ki_pos = pos;
 	actiondfs_stat_inc(ACTIONDFS_STAT_SPLICE_READS);
-	nread = backing_file_splice_read(file, &backing_iocb, pipe, wanted,
-					 flags, &ctx);
-	if (nread > 0)
-		pos = backing_iocb.ki_pos;
-
+	nread = vfs_splice_read(file, &pos, pipe, wanted, flags);
 	if (nread > 0) {
 		*ppos = pos;
 		actiondfs_stat_add(ACTIONDFS_STAT_SPLICE_READ_BYTES, (u64)nread);
