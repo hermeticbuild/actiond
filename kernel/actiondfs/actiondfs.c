@@ -93,7 +93,7 @@ struct actiondfs_cached_children {
 struct actiondfs_cached_dir {
 	struct hlist_node hnode;
 	struct dentry *cas_root;
-	u8 hash[ACTIONDFS_HASH_LEN];
+	const u8 *hash;
 	u32 size;
 	u32 directory_count;
 	char *names;
@@ -1951,14 +1951,23 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 	u8 *buffer;
 	size_t len;
 	size_t pos = 0;
+	size_t hash_bytes;
 	u32 previous[3] = { U32_MAX, U32_MAX, U32_MAX };
 	int err;
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	hash_bytes = hash == sbi->root_hash ? ACTIONDFS_HASH_LEN : 0;
+	entry = kzalloc(sizeof(*entry) + hash_bytes, GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
 	entry->cas_root = dget(sbi->cas_path.dentry);
-	memcpy(entry->hash, hash, ACTIONDFS_HASH_LEN);
+	if (hash_bytes) {
+		u8 *owned_hash = (u8 *)(entry + 1);
+
+		memcpy(owned_hash, hash, ACTIONDFS_HASH_LEN);
+		entry->hash = owned_hash;
+	} else {
+		entry->hash = hash;
+	}
 
 	err = actiondfs_read_cas_blob(sbi, hash, expected_size, &buffer, &len);
 	if (err)
