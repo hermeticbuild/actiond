@@ -2096,10 +2096,24 @@ static int actiondfs_ensure_loaded(struct super_block *sb,
 	    smp_load_acquire(&dir->cached_dir))
 		return 0;
 
+	hash = dir->input_child ? dir->input_child->hash : sbi->root_hash;
+	rcu_read_lock();
+	cached = actiondfs_find_cached_dir(sbi, hash);
+	rcu_read_unlock();
+	if (cached) {
+		if (dir->size != ACTIONDFS_UNKNOWN_SIZE &&
+		    cached->size != dir->size)
+			return -EINVAL;
+		actiondfs_stat_inc(ACTIONDFS_STAT_CACHED_DIR_REQUESTS);
+		actiondfs_stat_inc(ACTIONDFS_STAT_DIR_CACHE_HITS);
+		if (!cmpxchg_release(&dir->cached_dir, NULL, cached))
+			actiondfs_stat_inc(ACTIONDFS_STAT_DIR_LOADS);
+		return 0;
+	}
+
 	mutex_lock(&dir->load_lock);
 	if (!smp_load_acquire(&dir->cached_dir)) {
 		actiondfs_stat_inc(ACTIONDFS_STAT_DIR_LOADS);
-		hash = dir->input_child ? dir->input_child->hash : sbi->root_hash;
 		err = actiondfs_get_cached_dir(sbi, hash, dir->size,
 						&cached);
 		if (!err)
