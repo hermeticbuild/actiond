@@ -1573,6 +1573,11 @@ static int actiondfs_pb_read_varint(const u8 *data, size_t len,
 	u64 out = 0;
 	unsigned int shift = 0;
 
+	if (*pos < len && !(data[*pos] & 0x80)) {
+		*value = data[(*pos)++];
+		return 0;
+	}
+
 	while (*pos < len && shift < 64) {
 		u8 byte = data[(*pos)++];
 
