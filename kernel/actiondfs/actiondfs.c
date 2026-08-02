@@ -2100,9 +2100,13 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 		}
 	}
 
-	err = actiondfs_sort_cached_children(entry, buffer);
-	if (err)
-		goto out_buffer;
+	if ((previous[0] != U32_MAX) +
+	    (previous[1] != U32_MAX) +
+	    (previous[2] != U32_MAX) > 1) {
+		err = actiondfs_sort_cached_children(entry, buffer);
+		if (err)
+			goto out_buffer;
+	}
 	err = actiondfs_pack_cached_dir_names(entry, buffer);
 	if (err)
 		goto out_buffer;
