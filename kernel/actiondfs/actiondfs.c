@@ -1116,7 +1116,6 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 	struct file *file;
 	struct inode *real_inode;
 	struct path real_path;
-	loff_t real_size;
 	u64 total_start = actiondfs_stat_time_start();
 	int err;
 
@@ -1137,9 +1136,7 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		}
 
 		real_inode = d_inode(real_path.dentry);
-		real_size = real_inode ? i_size_read(real_inode) : -1;
-		if (!real_inode || !S_ISREG(real_inode->i_mode) ||
-		    (u64)real_size != expected_size) {
+		if ((u64)i_size_read(real_inode) != expected_size) {
 			dput(real_path.dentry);
 			file = ERR_PTR(-EIO);
 			break;
