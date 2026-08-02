@@ -1467,6 +1467,15 @@ static ssize_t actiondfs_splice_read(struct file *actiondfs_file, loff_t *ppos,
 	return nread;
 }
 
+static int actiondfs_backing_mmap(struct file *file,
+				  struct vm_area_struct *vma)
+{
+	if (!can_mmap_file(file))
+		return -ENODEV;
+	vma_set_file(vma, file);
+	return vfs_mmap(file, vma);
+}
+
 static int actiondfs_mmap(struct file *actiondfs_file,
 			  struct vm_area_struct *vma)
 {
@@ -1474,16 +1483,13 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 	struct actiondfs_node *node = inode->i_private;
 	struct file *file;
 	int err;
-	struct backing_file_ctx ctx = {
-		.cred = current_cred(),
-	};
 
 	if (node->origin == ACTIONDFS_NODE_STAGED) {
 		u64 total_start = actiondfs_stat_time_start();
 
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_CALLS);
 		file = actiondfs_file->private_data;
-		err = backing_file_mmap(file, vma, &ctx);
+		err = actiondfs_backing_mmap(file, vma);
 		if (err)
 			actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_MMAP_FAILURES);
 		else
@@ -1501,7 +1507,7 @@ static int actiondfs_mmap(struct file *actiondfs_file,
 	}
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_MMAPS);
-	err = backing_file_mmap(file, vma, &ctx);
+	err = actiondfs_backing_mmap(file, vma);
 	if (err)
 		actiondfs_stat_inc(ACTIONDFS_STAT_MMAP_FAILURES);
 	else
