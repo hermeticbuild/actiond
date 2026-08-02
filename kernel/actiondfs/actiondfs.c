@@ -908,6 +908,29 @@ static void actiondfs_destroy_blob_path_cache(void)
 	mutex_unlock(&actiondfs_blob_path_cache_lock);
 }
 
+static int actiondfs_reserve_cached_child(
+	struct actiondfs_cached_children *children)
+{
+	struct actiondfs_cached_child *entries;
+	size_t bytes;
+	u32 capacity;
+
+	if (children->count < children->capacity)
+		return 0;
+	if (children->capacity > U32_MAX / 2)
+		return -EOVERFLOW;
+	capacity = children->capacity ? children->capacity * 2 : 4;
+	bytes = kmalloc_size_roundup(array_size(capacity, sizeof(*entries)));
+	capacity = min_t(size_t, bytes / sizeof(*entries), U32_MAX);
+	entries = krealloc_array(children->entries, capacity,
+				 sizeof(*entries), GFP_KERNEL);
+	if (!entries)
+		return -ENOMEM;
+	children->entries = entries;
+	children->capacity = capacity;
+	return 0;
+}
+
 static int actiondfs_append_cached_child(struct actiondfs_cached_children *children,
 					 const u8 *source,
 					 size_t *names_bytes,
@@ -915,15 +938,12 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 					 size_t name_len,
 					 umode_t mode,
 					 u64 size,
-					 const u8 *hash,
 					 const char *target,
 					 u32 previous)
 {
-	struct actiondfs_cached_child *entries;
 	struct actiondfs_cached_child *child;
 	size_t packed_bytes;
 	size_t total;
-	u32 capacity;
 	int err;
 
 	if (target && (!size || size >= PATH_MAX || memchr(target, '\0', size)))
@@ -946,23 +966,6 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	if (check_add_overflow(*names_bytes, packed_bytes, &total))
 		return -EOVERFLOW;
 
-	if (children->count == children->capacity) {
-		size_t bytes;
-
-		if (children->capacity > U32_MAX / 2)
-			return -EOVERFLOW;
-		capacity = children->capacity ? children->capacity * 2 : 4;
-		bytes = kmalloc_size_roundup(array_size(capacity,
-						      sizeof(*entries)));
-		capacity = min_t(size_t, bytes / sizeof(*entries), U32_MAX);
-		entries = krealloc_array(children->entries, capacity,
-					 sizeof(*entries), GFP_KERNEL);
-		if (!entries)
-			return -ENOMEM;
-		children->entries = entries;
-		children->capacity = capacity;
-	}
-
 	child = &children->entries[children->count];
 	child->name_offset = (const u8 *)name - source;
 	child->name_len = name_len;
@@ -970,8 +973,6 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	child->size = size;
 	if (target)
 		child->target = target;
-	else
-		memcpy(child->hash, hash, ACTIONDFS_HASH_LEN);
 	children->count++;
 	*names_bytes = total;
 	return 0;
@@ -1641,7 +1642,6 @@ static int actiondfs_pb_skip(const u8 *data, size_t len, size_t *pos, u64 wire)
 }
 
 struct actiondfs_reapi_digest {
-	u8 hash[ACTIONDFS_HASH_LEN];
 	u64 size;
 	bool present;
 };
@@ -1660,7 +1660,8 @@ struct actiondfs_parsed_child {
 };
 
 static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
-					struct actiondfs_reapi_digest *digest)
+					struct actiondfs_reapi_digest *digest,
+					u8 *hash)
 {
 	size_t pos = 0;
 	int err;
@@ -1684,7 +1685,7 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 			if (err)
 				return err;
 			if (field_len != ACTIONDFS_HASH_HEX_LEN ||
-			    hex2bin(digest->hash, (const char *)field,
+			    hex2bin(hash, (const char *)field,
 				    ACTIONDFS_HASH_LEN))
 				return -EINVAL;
 			digest->present = true;
@@ -1710,7 +1711,7 @@ static int actiondfs_parse_reapi_digest(const u8 *data, size_t len,
 
 static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 					      struct actiondfs_parsed_child *out,
-					      umode_t mode)
+					      umode_t mode, u8 *hash)
 {
 	size_t pos = 0;
 	int err;
@@ -1747,7 +1748,7 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 				out->symlink.target_len = field_len;
 			} else {
 				err = actiondfs_parse_reapi_digest(field, field_len,
-								 &out->digest);
+								 &out->digest, hash);
 				if (err)
 					return err;
 			}
@@ -1790,7 +1791,12 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 	bool regular;
 	int err;
 
-	err = actiondfs_parse_reapi_child_fields(data, len, &child, mode);
+	err = actiondfs_reserve_cached_child(&parent->children);
+	if (err)
+		return err;
+	err = actiondfs_parse_reapi_child_fields(
+		data, len, &child, mode,
+		parent->children.entries[parent->children.count].hash);
 	if (err)
 		return err;
 	if (S_ISLNK(mode)) {
@@ -1798,7 +1804,7 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 			&parent->children, source, names_bytes, child.name,
 			child.name_len,
 			S_IFLNK | 0777, child.symlink.target_len,
-			NULL, child.symlink.target, *previous);
+			child.symlink.target, *previous);
 		if (!err)
 			*previous = parent->children.count - 1;
 		return err;
@@ -1813,7 +1819,7 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 					    names_bytes,
 					    child.name, child.name_len,
 					    mode, child.digest.size,
-					    child.digest.hash, NULL, *previous);
+					    NULL, *previous);
 	if (!err) {
 		*previous = parent->children.count - 1;
 		if (!regular)
