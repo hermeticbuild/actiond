@@ -1907,7 +1907,8 @@ actiondfs_find_blob_path_cache(struct actiondfs_sb_info *sbi,
 				   lockdep_is_held(&actiondfs_blob_path_cache_lock)) {
 		if (entry->cas_root == sbi->cas_path.dentry &&
 		    (entry->hash == hash ||
-		     !memcmp(entry->hash, hash, ACTIONDFS_HASH_LEN)))
+		     (actiondfs_digest_cache_key(entry->hash) == key &&
+		      !memcmp(entry->hash, hash, ACTIONDFS_HASH_LEN))))
 			return entry;
 	}
 	return NULL;
