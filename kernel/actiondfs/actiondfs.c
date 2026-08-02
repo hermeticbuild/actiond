@@ -30,6 +30,7 @@
 #include <linux/mount.h>
 #include <linux/mutex.h>
 #include <linux/namei.h>
+#include <linux/overflow.h>
 #include <linux/path.h>
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
@@ -76,7 +77,10 @@ struct actiondfs_cached_child {
 	u64 size;
 	u16 name_len;
 	umode_t mode;
-	u8 hash[ACTIONDFS_HASH_LEN];
+	union {
+		u8 hash[ACTIONDFS_HASH_LEN];
+		const char *target;
+	};
 };
 
 struct actiondfs_cached_children {
@@ -90,6 +94,7 @@ struct actiondfs_cached_dir {
 	struct dentry *cas_root;
 	u8 hash[ACTIONDFS_HASH_LEN];
 	u32 size;
+	char *names;
 	struct actiondfs_cached_children files;
 	struct actiondfs_cached_children dirs;
 	struct actiondfs_cached_children symlinks;
@@ -840,10 +845,6 @@ static int actiondfs_valid_component(const char *name, size_t len)
 static void actiondfs_free_cached_children(
 	struct actiondfs_cached_children *children)
 {
-	size_t i;
-
-	for (i = 0; i < children->count; i++)
-		kfree(children->entries[i].name);
 	kfree(children->entries);
 }
 
@@ -852,6 +853,7 @@ static void actiondfs_free_cached_dir(struct actiondfs_cached_dir *dir)
 	actiondfs_free_cached_children(&dir->files);
 	actiondfs_free_cached_children(&dir->dirs);
 	actiondfs_free_cached_children(&dir->symlinks);
+	kvfree(dir->names);
 	dput(dir->cas_root);
 	kfree(dir);
 }
@@ -966,22 +968,69 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	}
 
 	child = &children->entries[children->count];
-	child->name = kmalloc(name_len + 1 + (target ? size + 1 : 0),
-			      GFP_KERNEL);
-	if (!child->name)
-		return -ENOMEM;
-	memcpy(child->name, name, name_len);
-	child->name[name_len] = '\0';
-	if (target) {
-		memcpy(child->name + name_len + 1, target, size);
-		child->name[name_len + 1 + size] = '\0';
-	}
+	child->name = (char *)name;
 	child->name_len = name_len;
 	child->mode = mode;
 	child->size = size;
-	if (!target)
+	if (target)
+		child->target = target;
+	else
 		memcpy(child->hash, hash, ACTIONDFS_HASH_LEN);
 	children->count++;
+	return 0;
+}
+
+static int actiondfs_pack_cached_dir_names(struct actiondfs_cached_dir *dir)
+{
+	struct actiondfs_cached_children *groups[] = {
+		&dir->files, &dir->dirs, &dir->symlinks,
+	};
+	size_t total = 0;
+	char *next;
+	size_t i;
+	size_t j;
+
+	for (i = 0; i < ARRAY_SIZE(groups); i++) {
+		for (j = 0; j < groups[i]->count; j++) {
+			struct actiondfs_cached_child *child =
+				&groups[i]->entries[j];
+
+			if (check_add_overflow(total,
+					       (size_t)child->name_len + 1,
+					       &total))
+				return -EOVERFLOW;
+			if (S_ISLNK(child->mode) &&
+			    check_add_overflow(total, (size_t)child->size + 1,
+					       &total))
+				return -EOVERFLOW;
+		}
+	}
+	if (!total)
+		return 0;
+
+	dir->names = kvmalloc(total, GFP_KERNEL);
+	if (!dir->names)
+		return -ENOMEM;
+	next = dir->names;
+	for (i = 0; i < ARRAY_SIZE(groups); i++) {
+		for (j = 0; j < groups[i]->count; j++) {
+			struct actiondfs_cached_child *child =
+				&groups[i]->entries[j];
+			const char *target = S_ISLNK(child->mode) ?
+				child->target : NULL;
+
+			memcpy(next, child->name, child->name_len);
+			child->name = next;
+			next += child->name_len;
+			*next++ = '\0';
+			if (target) {
+				memcpy(next, target, child->size);
+				child->target = next;
+				next += child->size;
+				*next++ = '\0';
+			}
+		}
+	}
 	return 0;
 }
 
@@ -2017,6 +2066,9 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 	}
 
 	err = actiondfs_validate_no_cross_type_cached_duplicates(entry);
+	if (err)
+		goto out_buffer;
+	err = actiondfs_pack_cached_dir_names(entry);
 	if (err)
 		goto out_buffer;
 
