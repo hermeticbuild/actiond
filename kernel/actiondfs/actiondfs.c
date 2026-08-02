@@ -1883,7 +1883,7 @@ static int actiondfs_read_cas_blob_once(struct actiondfs_sb_info *sbi,
 	err = 0;
 
 out_close:
-	filp_close(file, NULL);
+	fput(file);
 	return err;
 }
 
