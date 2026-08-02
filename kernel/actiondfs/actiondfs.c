@@ -1246,7 +1246,6 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	struct actiondfs_node *node = inode->i_private;
 	struct file *file;
 	size_t requested = iov_iter_count(to);
-	size_t wanted;
 	ssize_t nread;
 
 	if (!requested)
@@ -1272,8 +1271,7 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (iocb->ki_pos >= node->size)
 		return 0;
 
-	wanted = min_t(u64, (u64)requested, node->size - iocb->ki_pos);
-	iov_iter_truncate(to, wanted);
+	iov_iter_truncate(to, node->size - iocb->ki_pos);
 
 	file = actiondfs_get_node_blob_file(iocb->ki_filp);
 	if (IS_ERR(file))
