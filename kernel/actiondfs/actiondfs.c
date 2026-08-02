@@ -1217,14 +1217,19 @@ static int actiondfs_staged_backing_flags(const struct file *file)
 	return O_RDONLY;
 }
 
-static ssize_t actiondfs_backing_read_iter(struct file *file,
-					  struct iov_iter *to,
-					  struct kiocb *iocb)
+static noinline_for_stack ssize_t actiondfs_backing_read_iter_slow(
+	struct file *file, struct iov_iter *to, struct kiocb *iocb)
 {
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
 	};
 
+	return backing_file_read_iter(file, to, iocb, iocb->ki_flags, &ctx);
+}
+
+static __always_inline ssize_t actiondfs_backing_read_iter(
+	struct file *file, struct iov_iter *to, struct kiocb *iocb)
+{
 	if (is_sync_kiocb(iocb) && !(iocb->ki_flags & IOCB_DIRECT)) {
 		rwf_t flags = (__force rwf_t)(iocb->ki_flags &
 			(IOCB_NOWAIT | IOCB_HIPRI | IOCB_DSYNC |
@@ -1232,7 +1237,7 @@ static ssize_t actiondfs_backing_read_iter(struct file *file,
 
 		return vfs_iter_read(file, to, &iocb->ki_pos, flags);
 	}
-	return backing_file_read_iter(file, to, iocb, iocb->ki_flags, &ctx);
+	return actiondfs_backing_read_iter_slow(file, to, iocb);
 }
 
 static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
