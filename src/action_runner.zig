@@ -646,9 +646,10 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     };
     for (action.bind_mounts) |mount| childBindMount(mount);
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
+    childSyscallName(linux.chdir("/"), "chdir_root");
     childSyscallName(linux.mount("proc", "/proc", "proc", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, 0), "mount_proc");
-    childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
+    childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childInstallSocketFilter();
     childRestoreSigpipeDefault();
     childWriteSetupComplete();

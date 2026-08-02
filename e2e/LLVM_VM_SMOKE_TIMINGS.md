@@ -27,21 +27,21 @@ subset of the VM `llvm-tblgen` graph.
 
 ## Latest Checked-In Result
 
-- Generated: `2026-08-01 15:44:38 EDT`
+- Generated: `2026-08-01 18:24:59 EDT`
 - Command: `ACTIOND_BAZEL_BUILD_FLAGS="--jobs=32 --distdir=/private/tmp/actiond-audit-distdir --override_repository=llvm++osx+macos_sdk=/private/tmp/actiond-audit-macos-sdk" ACTIOND_LLVM_SMOKE_MAC_HOST=0 e2e/run_llvm_vm_smoke.sh`
-- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.yu77B2`
+- Output root: `/var/folders/p4/xn8y5q_j24l5xwgwd_jx5c340000gn/T/actiond-llvm-vm-smoke.G6vg1w`
 - Workload: `@llvm-project//llvm:llvm-tblgen`, jobs=8
 - VM warmup target: `//e2e:llvm_exec_warmup`
 - Target and VM host platform: `@llvm//platforms:linux_arm64_musl`
 - Build mode: `-c opt --strip=always --stripopt=--strip-all`
-- VM warmup: `82.129s`; `2207 processes: 190 internal, 2017 remote`
-- Measured VM build: `92.336s`; `2310 processes: 4 action cache hit, 204 internal, 2106 remote`
+- VM warmup: `90.262s`; `2207 processes: 190 internal, 2017 remote`
+- Measured VM build: `98.569s`; `2310 processes: 4 action cache hit, 204 internal, 2106 remote`
 - Measured executions and timing records: `2106`
 - Mac-host baseline: not run (`ACTIOND_LLVM_SMOKE_MAC_HOST=0`)
 
 The previous checked-in run used the same jobs=8 and completed the warmup in
-`83.160s` and measured build in `88.494s`. The current measured build is 4.3%
-slower with the same 2,106 actions, while its warmup is 1.2% faster with the
+`82.129s` and measured build in `92.336s`. The current measured build is 6.8%
+slower with the same 2,106 actions, while its warmup is 9.9% slower with the
 same 2,017 actions. A repeat with the previous code completed the warmup in
 `63.992s` and the measured build in `86.002s`. Intermediate runs on the same
 machine completed the warmup/measured builds in `96.032s`/`104.393s` and
@@ -63,9 +63,12 @@ Counters include both warmup and measured builds.
 | ------------------------------------ | ----------: | ----------: |
 | actiondfs mounts                     |       4,122 |       4,122 |
 | root directory parses                |       1,405 |       1,405 |
-| cached directory hits                |     163,011 |     162,998 |
-| cached directory misses              |       6,606 |       6,619 |
-| directory blob reads                 |       6,605 |       6,618 |
+| directory loads                      |     151,235 |     169,617 |
+| cached directory requests            |     169,617 |     169,617 |
+| cached directory hits                |     162,998 |     163,010 |
+| cached directory misses              |       6,619 |       6,607 |
+| cached directory races               |          13 |           1 |
+| directory blob reads                 |       6,618 |       6,606 |
 | staged ensure-directory calls        |      15,996 |      15,996 |
 | staged ensure-directory components   |          16 |          16 |
 | staged ensure-directory existing     |           0 |           0 |
@@ -76,19 +79,29 @@ Counters include both warmup and measured builds.
 | blob-path cache evictions            |           0 |           0 |
 | blob-path cache insertion races      |           0 |           0 |
 | staged backing open attempts         |      15,825 |      15,825 |
-| staged backing open lookup           | 0.705 ms    | 0.297 ms    |
+| staged backing open lookup           | 0.297 ms    | 0.324 ms    |
 | staged `copy_file_range` successes   |       3,828 |       3,828 |
 | staged `copy_file_range` fallbacks   |           0 |           0 |
 
 The workload retained the same 2,017 warmup actions and 2,106 measured actions.
-All 162,998 cached-directory hits used RCU instead of the global directory-cache
+All 163,010 cached-directory hits used RCU instead of the global directory-cache
 mutex, and all 18,382 staged input-directory merges searched only cached input
-directories. Root inode ownership reduced each of the 4,122 superblock
-allocations from 128 bytes to 96 bytes, and unhashed root inodes avoided global
-inode-hash insertion on each mount. CAS blob lookups and staged parent lookups
-borrowed existing mount or path references. Root-directory parsing, staged
-parent-directory reuse, and blob-path cache behavior remain close to the previous
-checked-in result.
+directories. The 169,617 cached-directory requests were unchanged: merged input
+directories deferred metadata loading until first access instead of removing
+directory-cache requests. The 472,190 input backing-file acquisitions used RCU,
+and 75,358 staged positive or negative inode lookups avoided exclusive backing
+directory locks. Resolving 6,883 CAS cache misses and 6,606 directory blobs
+directly avoided 13,489 temporary `PATH_MAX` pathname allocations, or about
+52.7 MiB of cumulative allocation. Root inode ownership reduced each of the
+4,122 superblock allocations from 128 bytes to 96 bytes, and unhashed root
+inodes avoided global inode-hash insertion on each mount.
+
+Staged inode ownership followed the backing inode through the staged mount
+idmap, preserving sandbox uid and gid checks. Unsupported extended attributes
+were skipped without bypassing normal inode permission checks, and backing
+filesystem security flags were inherited only when the backing filesystem
+advertised the same guarantees. Staged create, mkdir, unlink, rename, size
+updates, mmap, and child lookups reported zero failures.
 
 ## VM Stage Timing
 
@@ -96,10 +109,10 @@ All timing values are milliseconds.
 
 | Stage                 |   Min |    p25 |    p50 |     p75 |      p95 |    Mean |       Max |
 | --------------------- | ----: | -----: | -----: | ------: | -------: | ------: | --------: |
-| total                 | 7.303 | 22.280 | 31.502 |  72.387 | 1654.434 | 304.721 |  9170.784 |
-| input fetch/setup     | 0.405 |  0.586 |  0.642 |   0.996 |    1.994 |   1.034 |    60.478 |
-| execute               | 5.979 | 20.755 | 29.458 |  71.567 | 1651.500 | 302.320 |  9161.111 |
-| output upload/collect | 0.022 |  0.138 |  0.262 |   1.601 |    5.233 |   1.367 |   157.599 |
+| total                 | 7.179 | 24.020 | 34.068 |  93.793 | 1725.016 | 315.365 | 11505.363 |
+| input fetch/setup     | 0.400 |  0.582 |  0.668 |   1.053 |    2.103 |   1.269 |    84.561 |
+| execute               | 6.238 | 22.263 | 31.895 |  91.312 | 1722.654 | 312.755 | 11499.724 |
+| output upload/collect | 0.026 |  0.136 |  0.258 |   1.312 |    5.180 |   1.341 |   121.919 |
 
 ## Runner Timing
 
@@ -109,12 +122,12 @@ and lazy actiondfs input reads. All timing values are milliseconds.
 
 | Runner Stage   |   Min |    p25 |    p50 |    p75 |      p95 |    Mean |       Max |
 | -------------- | ----: | -----: | -----: | -----: | -------: | ------: | --------: |
-| parent prepare | 0.049 |  0.100 |  0.124 |  0.154 |    0.395 |   0.193 |    12.384 |
-| fork           | 0.252 |  0.505 |  0.576 |  1.042 |    5.887 |   1.766 |   201.901 |
-| child setup    | 0.004 |  1.761 |  3.161 |  6.020 |   21.088 |   6.044 |   107.745 |
-| process/io     | 0.588 | 15.747 | 22.252 | 52.498 | 1646.214 | 293.593 |  9134.104 |
-| wait           | 0.000 |  0.000 |  0.000 |  0.000 |    4.334 |   0.575 |    14.531 |
-| stdio digest   | 0.000 |  0.001 |  0.001 |  0.001 |    0.001 |   0.001 |     0.142 |
+| parent prepare | 0.057 |  0.105 |  0.135 |  0.199 |    0.412 |   0.280 |    55.961 |
+| fork           | 0.438 |  0.723 |  0.819 |  1.902 |    7.894 |   2.690 |   143.889 |
+| child setup    | 0.004 |  2.816 |  4.654 |  8.657 |   30.668 |   9.209 |   220.184 |
+| process/io     | 0.002 | 15.844 | 23.161 | 64.357 | 1716.234 | 299.968 | 11479.045 |
+| wait           | 0.000 |  0.000 |  0.000 |  0.000 |    3.570 |   0.385 |    23.227 |
+| stdio digest   | 0.000 |  0.000 |  0.001 |  0.001 |    0.001 |   0.001 |     0.135 |
 
 ## actiondfs Counters
 
@@ -124,13 +137,16 @@ These `/proc/actiondfs_stats` counters cover the VM lifetime.
 | ----------------------------- | --------------: |
 | mounts                        |           4,122 |
 | root directory parses         |           1,405 |
+| directory loads               |         169,617 |
 | cached directory requests     |         169,617 |
-| cached directory hits         |         162,998 |
-| cached directory misses       |           6,619 |
+| cached directory hits         |         163,010 |
+| cached directory misses       |           6,607 |
+| cached directory races        |               1 |
 | lookups                       |       1,406,668 |
 | lookup hits                   |         841,778 |
 | lookup negative               |         564,890 |
-| blob open attempts            |         474,193 |
+| blob open attempts            |         474,181 |
+| blob open stale retries       |               0 |
 | blob-path cache hits          |         460,692 |
 | blob-path cache misses        |           6,883 |
 | blob-path cache evictions     |               0 |
@@ -139,11 +155,12 @@ These `/proc/actiondfs_stats` counters cover the VM lifetime.
 | node blob cache misses        |         467,575 |
 | backing reads                 |         415,332 |
 | backing read bytes            |   1,303,012,282 |
+| backing read stale retries    |               0 |
 | mmap calls                    |          53,030 |
 | mmap bytes                    | 1,900,832,624,640 |
 | mmap failures                 |               0 |
-| directory blob reads          |           6,618 |
-| directory blob bytes          |       2,732,839 |
+| directory blob reads          |           6,606 |
+| directory blob bytes          |       2,720,139 |
 
 ## Staged Filesystem Counters
 
@@ -154,27 +171,41 @@ These `/proc/actiondfs_stats` counters cover the VM lifetime.
 | staged ensure-directory existing     |           0 |
 | staged ensure-directory created      |          16 |
 | staged parent dentry hits            |      15,980 |
+| staged child lookups                 |      87,568 |
+| staged child lookup hits             |      35,533 |
+| staged child lookup negative         |      52,035 |
+| staged child lookup failures         |           0 |
 | staged inode lookups                 |   1,406,668 |
-| staged inode unstaged-parent skips   |   1,331,308 |
+| staged inode unstaged-parent skips   |   1,331,310 |
 | staged inode lookup hits             |      35,518 |
-| staged inode lookup negative         |      39,842 |
+| staged inode lookup negative         |      39,840 |
+| staged inode lookup failures         |           0 |
 | staged inode input-directory merges  |      18,382 |
 | staged backing open attempts         |      15,825 |
 | staged backing open failures         |           0 |
-| staged backing open total            |   12.784 ms |
-| staged backing open lookup           |    0.297 ms |
-| staged backing open file             |   10.582 ms |
+| staged backing open total            |   12.790 ms |
+| staged backing open lookup           |    0.324 ms |
+| staged backing open file             |   10.718 ms |
 | staged create calls/successes        |      11,981 |
+| staged create failures               |           0 |
 | staged mkdir calls/successes         |         198 |
+| staged mkdir failures                |           0 |
+| staged unlink calls/successes        |          15 |
+| staged unlink failures               |           0 |
 | staged rename calls/successes        |       3,817 |
+| staged rename failures               |           0 |
 | staged size updates/successes        |       3,874 |
-| staged write calls                   |      37,140 |
-| staged write bytes                   | 106,132,435 |
+| staged size update failures          |           0 |
+| staged write calls                   |      37,065 |
+| staged write bytes                   | 105,766,927 |
+| staged mmap calls                    |          30 |
+| staged mmap bytes                    |   2,084,864 |
+| staged mmap failures                 |           0 |
 | staged `copy_file_range` successes   |       3,828 |
 | staged `copy_file_range` bytes       |  31,630,764 |
 | staged `copy_file_range` fallbacks   |           0 |
 
-The staged-negative filter skipped 1,331,308 lookups with known-unstaged
+The staged-negative filter skipped 1,331,310 lookups with known-unstaged
 parents. All 3,828 `copy_file_range` attempts succeeded without a buffered
 fallback.
 
@@ -186,10 +217,10 @@ fallback.
 | CAS promotion attempts               |      7,947 |
 | CAS promotion success                |      2,087 |
 | CAS existing-blob hits               |      5,860 |
-| CAS promoted bytes                   | 32,082,447 |
-| CAS digest bytes                     | 84,416,399 |
-| CAS promotion digest                 | 642.254 ms |
-| CAS promotion rename                 | 127.801 ms |
+| CAS promoted bytes                   | 31,718,871 |
+| CAS digest bytes                     | 84,052,823 |
+| CAS promotion digest                 | 661.226 ms |
+| CAS promotion rename                 | 174.472 ms |
 | CAS cross-device fallbacks           |          0 |
 | CAS permission fallbacks             |          0 |
 | CAS put-file copy calls              |          0 |
@@ -199,7 +230,7 @@ fallback.
 | Counter                              |      Value |
 | ------------------------------------ | ---------: |
 | ByteStream file reads                |      4,038 |
-| ByteStream file bytes                | 57,616,538 |
+| ByteStream file bytes                | 57,614,606 |
 | ByteStream buffered reads            |          0 |
 | gRPC response tasks started          |     36,229 |
 | gRPC response tasks failed           |          0 |
@@ -207,10 +238,10 @@ fallback.
 | gRPC data frames                     |     37,011 |
 | gRPC file payload frames             |      6,902 |
 | gRPC `sendfile` attempts/successes   |      6,902 |
-| gRPC `sendfile` bytes                | 57,616,538 |
+| gRPC `sendfile` bytes                | 57,614,606 |
 | gRPC `sendfile` fallbacks            |          0 |
 
-The measured TCP-to-vsock bridge logged two connections, 28.25 MiB from client
-to guest, 37.36 MiB from guest to client, and zero read/write pump errors.
+The measured TCP-to-vsock bridge logged two connections, 28.15 MiB from client
+to guest, 37.37 MiB from guest to client, and zero read/write pump errors.
 ByteStream reads remained file-backed and all 6,902 gRPC `sendfile` attempts
 succeeded.
