@@ -458,17 +458,10 @@ static struct actiondfs_node *actiondfs_alloc_node(umode_t mode)
 static u64 actiondfs_input_child_ino(struct actiondfs_node *parent,
 				     const struct actiondfs_cached_child *child)
 {
-	u64 hash = 1469598103934665603ULL;
-	size_t i;
+	u64 index = child - parent->cached_dir->children.entries;
+	u64 hash = parent->ino * 11400714819323198485ULL;
 
-	hash ^= parent->ino;
-	hash *= 1099511628211ULL;
-	hash ^= S_ISDIR(child->mode) ? 'd' : 'f';
-	hash *= 1099511628211ULL;
-	for (i = 0; i < child->name_len; i++) {
-		hash ^= (u8)child->name[i];
-		hash *= 1099511628211ULL;
-	}
+	hash ^= index + 1;
 
 	/*
 	 * Keep synthetic input inode numbers separate from staged and root
