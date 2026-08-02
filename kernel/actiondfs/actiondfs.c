@@ -1318,19 +1318,25 @@ static void actiondfs_stage_end_write(struct kiocb *iocb, ssize_t written)
 	actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES, (u64)written);
 }
 
-static ssize_t actiondfs_backing_write_iter(struct file *file,
-					   struct iov_iter *from,
-					   struct kiocb *iocb)
+static noinline_for_stack ssize_t actiondfs_backing_write_iter_slow(
+	struct file *file, struct iov_iter *from, struct kiocb *iocb)
 {
 	struct backing_file_ctx ctx = {
 		.cred = current_cred(),
 		.end_write = actiondfs_stage_end_write,
 	};
+
+	return backing_file_write_iter(file, from, iocb,
+				       iocb->ki_flags, &ctx);
+}
+
+static __always_inline ssize_t actiondfs_backing_write_iter(
+	struct file *file, struct iov_iter *from, struct kiocb *iocb)
+{
 	ssize_t written;
 
 	if (!is_sync_kiocb(iocb) || (iocb->ki_flags & IOCB_DIRECT))
-		return backing_file_write_iter(file, from, iocb,
-					       iocb->ki_flags, &ctx);
+		return actiondfs_backing_write_iter_slow(file, from, iocb);
 	if (!iov_iter_count(from))
 		return 0;
 	written = file_remove_privs(iocb->ki_filp);
