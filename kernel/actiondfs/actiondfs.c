@@ -1211,6 +1211,24 @@ static int actiondfs_staged_backing_flags(const struct file *file)
 	return O_RDONLY;
 }
 
+static ssize_t actiondfs_backing_read_iter(struct file *file,
+					  struct iov_iter *to,
+					  struct kiocb *iocb)
+{
+	struct backing_file_ctx ctx = {
+		.cred = current_cred(),
+	};
+
+	if (is_sync_kiocb(iocb) && !(iocb->ki_flags & IOCB_DIRECT)) {
+		rwf_t flags = (__force rwf_t)(iocb->ki_flags &
+			(IOCB_NOWAIT | IOCB_HIPRI | IOCB_DSYNC |
+			 IOCB_SYNC | IOCB_APPEND));
+
+		return vfs_iter_read(file, to, &iocb->ki_pos, flags);
+	}
+	return backing_file_read_iter(file, to, iocb, iocb->ki_flags, &ctx);
+}
+
 static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -1219,9 +1237,6 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	size_t requested = iov_iter_count(to);
 	size_t wanted;
 	ssize_t nread;
-	struct backing_file_ctx ctx = {
-		.cred = current_cred(),
-	};
 
 	if (!requested)
 		return 0;
@@ -1232,8 +1247,7 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		total_start = actiondfs_stat_time_start();
 		actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_READ_CALLS);
 		file = iocb->ki_filp->private_data;
-		nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
-					       &ctx);
+		nread = actiondfs_backing_read_iter(file, to, iocb);
 		if (nread > 0)
 			actiondfs_stat_add(ACTIONDFS_STAT_STAGE_READ_BYTES,
 					   (u64)nread);
@@ -1255,8 +1269,7 @@ static ssize_t actiondfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		return PTR_ERR(file);
 
 	actiondfs_stat_inc(ACTIONDFS_STAT_BACKING_READS);
-	nread = backing_file_read_iter(file, to, iocb, iocb->ki_flags,
-				       &ctx);
+	nread = actiondfs_backing_read_iter(file, to, iocb);
 
 	if (nread > 0)
 		actiondfs_stat_add(ACTIONDFS_STAT_BACKING_READ_BYTES, (u64)nread);
