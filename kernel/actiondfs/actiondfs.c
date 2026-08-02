@@ -2478,9 +2478,15 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	}
 	if (inode->i_private != node) {
 		node = inode->i_private;
-		spin_lock(&inode->i_lock);
-		actiondfs_copy_stage_owner(inode, real_inode);
-		spin_unlock(&inode->i_lock);
+		if (mnt_idmap(sbi->stage_path.mnt) != &nop_mnt_idmap ||
+		    !uid_eq(READ_ONCE(inode->i_uid),
+			    READ_ONCE(real_inode->i_uid)) ||
+		    !gid_eq(READ_ONCE(inode->i_gid),
+			    READ_ONCE(real_inode->i_gid))) {
+			spin_lock(&inode->i_lock);
+			actiondfs_copy_stage_owner(inode, real_inode);
+			spin_unlock(&inode->i_lock);
+		}
 		actiondfs_set_stage_dentry(node, real_dentry);
 	}
 	if (S_ISDIR(mode)) {
