@@ -2155,8 +2155,12 @@ static noinline_for_stack int actiondfs_load_dir(struct super_block *sb,
 	err = actiondfs_get_cached_dir(sbi, hash, dir->size, &cached);
 	if (err)
 		return err;
+#if ACTIONDFS_ENABLE_STATS
 	if (!cmpxchg_release(&dir->cached_dir, NULL, cached))
 		actiondfs_stat_inc(ACTIONDFS_STAT_DIR_LOADS);
+#else
+	smp_store_release(&dir->cached_dir, cached);
+#endif
 	return 0;
 }
 
