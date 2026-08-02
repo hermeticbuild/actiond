@@ -2315,7 +2315,7 @@ static struct inode *actiondfs_prealloc_staged_inode(
 		actiondfs_free_node(node);
 		return ERR_PTR(-ENOMEM);
 	}
-	actiondfs_init_inode(inode, node);
+	inode->i_private = node;
 	return inode;
 }
 
@@ -2329,9 +2329,7 @@ static void actiondfs_insert_staged_inode(struct inode *inode,
 	node->mode = (node->mode & S_IFMT) |
 		     (real_inode->i_mode & S_IALLUGO);
 	node->stage_dentry = real_dentry;
-	inode->i_ino = node->ino;
-	inode->i_mode = node->mode;
-	actiondfs_copy_stage_owner(inode, real_inode);
+	actiondfs_init_inode(inode, node);
 	insert_inode_hash(inode);
 }
 
