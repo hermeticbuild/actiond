@@ -1996,10 +1996,10 @@ actiondfs_find_cached_dir(struct actiondfs_sb_info *sbi,
 
 	hash_for_each_possible_rcu(actiondfs_dir_cache, entry, hnode, key,
 				   lockdep_is_held(&actiondfs_dir_cache_lock)) {
-		if (entry->cas_root == sbi->cas_path.dentry &&
-		    (entry->hash == hash ||
-		     (actiondfs_digest_cache_key(entry->hash) == key &&
-		      !memcmp(entry->hash, hash, ACTIONDFS_HASH_LEN))))
+		if (entry->hash == hash ||
+		    (entry->cas_root == sbi->cas_path.dentry &&
+		     actiondfs_digest_cache_key(entry->hash) == key &&
+		     !memcmp(entry->hash, hash, ACTIONDFS_HASH_LEN)))
 			return entry;
 	}
 	return NULL;
