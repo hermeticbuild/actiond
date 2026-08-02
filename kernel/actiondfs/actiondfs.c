@@ -2158,9 +2158,12 @@ static void actiondfs_init_inode(struct inode *inode,
 				 struct actiondfs_node *node)
 {
 	inode->i_ino = node->ino;
-	inode_init_owner(&nop_mnt_idmap, inode, NULL, node->mode);
-	if (node->stage_dentry)
+	if (node->stage_dentry) {
+		inode->i_mode = node->mode;
 		actiondfs_copy_stage_owner(inode, d_inode(node->stage_dentry));
+	} else {
+		inode_init_owner(&nop_mnt_idmap, inode, NULL, node->mode);
+	}
 	inode_has_no_xattr(inode);
 	inode->i_private = node;
 	simple_inode_init_ts(inode);
