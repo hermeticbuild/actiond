@@ -3260,9 +3260,7 @@ static int actiondfs_dir_getattr(struct mnt_idmap *idmap,
 	err = actiondfs_ensure_loaded(inode->i_sb, node);
 	if (err)
 		return err;
-	err = simple_getattr(idmap, path, stat, request_mask, query_flags);
-	if (err)
-		return err;
+	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 
 	cached = node->cached_dir;
 	stage_dentry = READ_ONCE(node->stage_dentry);
@@ -3290,13 +3288,11 @@ static int actiondfs_dir_getattr(struct mnt_idmap *idmap,
 }
 
 static const struct inode_operations actiondfs_file_iops = {
-	.getattr = simple_getattr,
 	.setattr = actiondfs_setattr,
 };
 
 static const struct inode_operations actiondfs_symlink_iops = {
 	.get_link = simple_get_link,
-	.getattr = simple_getattr,
 	.setattr = actiondfs_setattr,
 };
 
