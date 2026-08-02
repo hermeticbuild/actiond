@@ -428,6 +428,12 @@ static void actiondfs_copy_stage_owner(struct inode *inode,
 	struct mnt_idmap *idmap =
 		mnt_idmap(actiondfs_sbi(inode->i_sb)->stage_path.mnt);
 
+	if (idmap == &nop_mnt_idmap) {
+		inode->i_uid = real_inode->i_uid;
+		inode->i_gid = real_inode->i_gid;
+		return;
+	}
+
 	inode->i_uid = vfsuid_into_kuid(i_uid_into_vfsuid(idmap, real_inode));
 	inode->i_gid = vfsgid_into_kgid(i_gid_into_vfsgid(idmap, real_inode));
 }
