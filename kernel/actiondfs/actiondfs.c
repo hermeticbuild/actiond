@@ -36,6 +36,7 @@
 #include <linux/rcupdate.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/sort.h>
 #include <linux/splice.h>
 #include <linux/statfs.h>
 #include <linux/string.h>
@@ -94,10 +95,9 @@ struct actiondfs_cached_dir {
 	struct dentry *cas_root;
 	u8 hash[ACTIONDFS_HASH_LEN];
 	u32 size;
+	u32 directory_count;
 	char *names;
-	struct actiondfs_cached_children files;
-	struct actiondfs_cached_children dirs;
-	struct actiondfs_cached_children symlinks;
+	struct actiondfs_cached_children children;
 };
 
 struct actiondfs_blob_path_cache_entry {
@@ -759,18 +759,10 @@ actiondfs_find_cached_child(struct actiondfs_node *dir,
 			    const char *name, size_t len)
 {
 	struct actiondfs_cached_dir *cached = dir->cached_dir;
-	struct actiondfs_cached_child *child;
 
 	if (!cached)
 		return NULL;
-
-	child = actiondfs_find_cached_child_in(&cached->files, name, len);
-	if (child)
-		return child;
-	child = actiondfs_find_cached_child_in(&cached->dirs, name, len);
-	if (child)
-		return child;
-	return actiondfs_find_cached_child_in(&cached->symlinks, name, len);
+	return actiondfs_find_cached_child_in(&cached->children, name, len);
 }
 
 static struct actiondfs_node *
@@ -792,41 +784,28 @@ actiondfs_materialize_cached_child(struct actiondfs_node *parent,
 	return node;
 }
 
-static bool actiondfs_cached_children_overlap(
-	const struct actiondfs_cached_children *lhs,
-	const struct actiondfs_cached_children *rhs)
+static int actiondfs_compare_cached_children(const void *lhs, const void *rhs)
 {
-	const struct actiondfs_cached_child *lhs_entry = lhs->entries;
-	const struct actiondfs_cached_child *rhs_entry = rhs->entries;
-	size_t lhs_count = lhs->count;
-	size_t rhs_count = rhs->count;
+	const struct actiondfs_cached_child *left = lhs;
+	const struct actiondfs_cached_child *right = rhs;
 
-	while (lhs_count && rhs_count) {
-		int cmp = actiondfs_compare_name(lhs_entry->name,
-						 lhs_entry->name_len,
-						 rhs_entry->name,
-						 rhs_entry->name_len);
-
-		if (!cmp)
-			return true;
-		if (cmp < 0) {
-			lhs_entry++;
-			lhs_count--;
-		} else {
-			rhs_entry++;
-			rhs_count--;
-		}
-	}
-	return false;
+	return actiondfs_compare_name(left->name, left->name_len,
+				      right->name, right->name_len);
 }
 
-static int
-actiondfs_validate_no_cross_type_cached_duplicates(struct actiondfs_cached_dir *dir)
+static int actiondfs_sort_cached_children(struct actiondfs_cached_dir *dir)
 {
-	if (actiondfs_cached_children_overlap(&dir->files, &dir->dirs) ||
-	    actiondfs_cached_children_overlap(&dir->files, &dir->symlinks) ||
-	    actiondfs_cached_children_overlap(&dir->dirs, &dir->symlinks))
-		return -EEXIST;
+	struct actiondfs_cached_children *children = &dir->children;
+	size_t i;
+
+	sort_nonatomic(children->entries, children->count,
+		       sizeof(*children->entries),
+		       actiondfs_compare_cached_children, NULL);
+	for (i = 1; i < children->count; i++) {
+		if (!actiondfs_compare_cached_children(
+			    &children->entries[i - 1], &children->entries[i]))
+			return -EEXIST;
+	}
 	return 0;
 }
 
@@ -850,9 +829,7 @@ static void actiondfs_free_cached_children(
 
 static void actiondfs_free_cached_dir(struct actiondfs_cached_dir *dir)
 {
-	actiondfs_free_cached_children(&dir->files);
-	actiondfs_free_cached_children(&dir->dirs);
-	actiondfs_free_cached_children(&dir->symlinks);
+	actiondfs_free_cached_children(&dir->children);
 	kvfree(dir->names);
 	dput(dir->cas_root);
 	kfree(dir);
@@ -931,7 +908,8 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 					 umode_t mode,
 					 u64 size,
 					 const u8 *hash,
-					 const char *target)
+					 const char *target,
+					 u32 previous)
 {
 	struct actiondfs_cached_child *entries;
 	struct actiondfs_cached_child *child;
@@ -943,8 +921,8 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	err = actiondfs_valid_component(name, name_len);
 	if (err)
 		return err;
-	if (children->count) {
-		child = &children->entries[children->count - 1];
+	if (previous != U32_MAX) {
+		child = &children->entries[previous];
 		if (actiondfs_compare_name(child->name, child->name_len,
 					   name, name_len) >= 0)
 			return -EINVAL;
@@ -982,28 +960,20 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 
 static int actiondfs_pack_cached_dir_names(struct actiondfs_cached_dir *dir)
 {
-	struct actiondfs_cached_children *groups[] = {
-		&dir->files, &dir->dirs, &dir->symlinks,
-	};
+	struct actiondfs_cached_children *children = &dir->children;
 	size_t total = 0;
 	char *next;
 	size_t i;
-	size_t j;
 
-	for (i = 0; i < ARRAY_SIZE(groups); i++) {
-		for (j = 0; j < groups[i]->count; j++) {
-			struct actiondfs_cached_child *child =
-				&groups[i]->entries[j];
+	for (i = 0; i < children->count; i++) {
+		struct actiondfs_cached_child *child = &children->entries[i];
 
-			if (check_add_overflow(total,
-					       (size_t)child->name_len + 1,
-					       &total))
-				return -EOVERFLOW;
-			if (S_ISLNK(child->mode) &&
-			    check_add_overflow(total, (size_t)child->size + 1,
-					       &total))
-				return -EOVERFLOW;
-		}
+		if (check_add_overflow(total, (size_t)child->name_len + 1,
+				       &total))
+			return -EOVERFLOW;
+		if (S_ISLNK(child->mode) &&
+		    check_add_overflow(total, (size_t)child->size + 1, &total))
+			return -EOVERFLOW;
 	}
 	if (!total)
 		return 0;
@@ -1012,23 +982,19 @@ static int actiondfs_pack_cached_dir_names(struct actiondfs_cached_dir *dir)
 	if (!dir->names)
 		return -ENOMEM;
 	next = dir->names;
-	for (i = 0; i < ARRAY_SIZE(groups); i++) {
-		for (j = 0; j < groups[i]->count; j++) {
-			struct actiondfs_cached_child *child =
-				&groups[i]->entries[j];
-			const char *target = S_ISLNK(child->mode) ?
-				child->target : NULL;
+	for (i = 0; i < children->count; i++) {
+		struct actiondfs_cached_child *child = &children->entries[i];
+		const char *target = S_ISLNK(child->mode) ? child->target : NULL;
 
-			memcpy(next, child->name, child->name_len);
-			child->name = next;
-			next += child->name_len;
+		memcpy(next, child->name, child->name_len);
+		child->name = next;
+		next += child->name_len;
+		*next++ = '\0';
+		if (target) {
+			memcpy(next, target, child->size);
+			child->target = next;
+			next += child->size;
 			*next++ = '\0';
-			if (target) {
-				memcpy(next, target, child->size);
-				child->target = next;
-				next += child->size;
-				*next++ = '\0';
-			}
 		}
 	}
 	return 0;
@@ -1763,37 +1729,42 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 
 static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *parent,
 					      const u8 *data, size_t len,
-					      umode_t mode)
+					      umode_t mode, u32 *previous)
 {
 	struct actiondfs_parsed_child child;
-	struct actiondfs_cached_children *children;
 	bool regular;
 	int err;
 
 	err = actiondfs_parse_reapi_child_fields(data, len, &child, mode);
 	if (err)
 		return err;
-	if (S_ISLNK(mode))
-		return actiondfs_append_cached_child(
-			&parent->symlinks, child.name, child.name_len,
+	if (S_ISLNK(mode)) {
+		err = actiondfs_append_cached_child(
+			&parent->children, child.name, child.name_len,
 			S_IFLNK | 0777, child.symlink.target_len,
-			NULL, child.symlink.target);
+			NULL, child.symlink.target, *previous);
+		if (!err)
+			*previous = parent->children.count - 1;
+		return err;
+	}
 
 	regular = S_ISREG(mode);
-	if (regular) {
-		children = &parent->files;
+	if (regular)
 		mode |= child.executable ? 0555 : 0444;
-	} else {
-		children = &parent->dirs;
+	else
 		mode |= ACTIONDFS_DIR_MODE;
-	}
-	err = actiondfs_append_cached_child(children, child.name, child.name_len,
+	err = actiondfs_append_cached_child(&parent->children,
+					    child.name, child.name_len,
 					    mode, child.digest.size,
-					    child.digest.hash, NULL);
-	if (!err)
+					    child.digest.hash, NULL, *previous);
+	if (!err) {
+		*previous = parent->children.count - 1;
+		if (!regular)
+			parent->directory_count++;
 		actiondfs_stat_inc(regular ?
 				  ACTIONDFS_STAT_CACHED_FILE_RECORDS :
 				  ACTIONDFS_STAT_CACHED_DIR_RECORDS);
+	}
 	return err;
 }
 
@@ -2013,6 +1984,7 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 	u8 *buffer;
 	size_t len;
 	size_t pos = 0;
+	u32 previous[3] = { U32_MAX, U32_MAX, U32_MAX };
 	int err;
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
@@ -2054,7 +2026,8 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 			err = actiondfs_parse_reapi_cached_child(
 				entry, field, field_len,
 				(key >> 3) == 1 ? S_IFREG :
-				(key >> 3) == 2 ? S_IFDIR : S_IFLNK);
+				(key >> 3) == 2 ? S_IFDIR : S_IFLNK,
+				&previous[(key >> 3) - 1]);
 			if (err)
 				goto out_buffer;
 			break;
@@ -2065,7 +2038,7 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 		}
 	}
 
-	err = actiondfs_validate_no_cross_type_cached_duplicates(entry);
+	err = actiondfs_sort_cached_children(entry);
 	if (err)
 		goto out_buffer;
 	err = actiondfs_pack_cached_dir_names(entry);
@@ -2371,10 +2344,10 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 	mode = real_inode->i_mode;
 	if (S_ISDIR(mode)) {
 		mode = S_IFDIR | (mode & S_IALLUGO);
-		if (parent->cached_dir)
-			input_child = actiondfs_find_cached_child_in(
-				&parent->cached_dir->dirs, dentry->d_name.name,
-				dentry->d_name.len);
+		input_child = actiondfs_find_cached_child(
+			parent, dentry->d_name.name, dentry->d_name.len);
+		if (input_child && !S_ISDIR(input_child->mode))
+			input_child = NULL;
 	} else if (S_ISREG(mode)) {
 		mode = S_IFREG | (mode & S_IALLUGO);
 		size = i_size_read(real_inode);
@@ -3127,7 +3100,7 @@ static int actiondfs_dir_release(struct inode *inode, struct file *file)
 static bool actiondfs_emit_cached_children(
 	struct actiondfs_node *dir, struct dir_context *ctx,
 	struct actiondfs_cached_children *children,
-	loff_t *base, unsigned int d_type)
+	loff_t *base)
 {
 	size_t index = 0;
 
@@ -3143,7 +3116,8 @@ static bool actiondfs_emit_cached_children(
 		struct actiondfs_cached_child *child = &children->entries[index];
 
 		if (!dir_emit(ctx, child->name, child->name_len,
-			      actiondfs_input_child_ino(dir, child), d_type))
+			      actiondfs_input_child_ino(dir, child),
+			      fs_umode_to_dtype(child->mode)))
 			return false;
 		actiondfs_stat_inc(ACTIONDFS_STAT_READDIR_ENTRIES);
 		ctx->pos = *base + index + 1;
@@ -3190,12 +3164,8 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	if (dir->cached_dir) {
 		struct actiondfs_cached_dir *cached = dir->cached_dir;
 
-		if (!actiondfs_emit_cached_children(dir, ctx, &cached->files,
-						   &base, DT_REG) ||
-		    !actiondfs_emit_cached_children(dir, ctx, &cached->dirs,
-						   &base, DT_DIR) ||
-		    !actiondfs_emit_cached_children(dir, ctx, &cached->symlinks,
-						   &base, DT_LNK))
+		if (!actiondfs_emit_cached_children(dir, ctx,
+						   &cached->children, &base))
 			return 0;
 	}
 
@@ -3239,7 +3209,7 @@ static int actiondfs_dir_getattr(struct mnt_idmap *idmap,
 		return 0;
 	}
 
-	input_dir_count = cached->dirs.count;
+	input_dir_count = cached->directory_count;
 	if (!stage_dentry || backing_nlink == 2)
 		stat->nlink = 2 + input_dir_count;
 	else if (!input_dir_count)
