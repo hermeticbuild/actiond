@@ -1092,8 +1092,8 @@ static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 		if (IS_ERR(real_path.dentry)) {
 			file = ERR_CAST(real_path.dentry);
 		} else {
-			file = dentry_open(&real_path, O_RDONLY | O_NONBLOCK,
-					   current_cred());
+			file = kernel_file_open(&real_path, O_RDONLY | O_NONBLOCK,
+						current_cred());
 			dput(real_path.dentry);
 		}
 		if (!IS_ERR(file))
