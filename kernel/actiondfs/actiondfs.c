@@ -3215,20 +3215,8 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	loff_t base = 2;
 	int err;
 
-	if (!dir_file) {
-		struct actiondfs_dir_file *existing;
-
-		dir_file = kzalloc(sizeof(*dir_file), GFP_KERNEL);
-		if (!dir_file)
-			return -ENOMEM;
-		existing = cmpxchg(&file->private_data, NULL, dir_file);
-		if (existing) {
-			kfree(dir_file);
-			dir_file = existing;
-		}
-	}
-
-	if (!ctx->pos && (dir_file->stage_file || dir_file->stage_eof))
+	if (dir_file && !ctx->pos &&
+	    (dir_file->stage_file || dir_file->stage_eof))
 		actiondfs_reset_stage_file(dir_file);
 
 	err = actiondfs_ensure_loaded(inode->i_sb, dir);
@@ -3248,6 +3236,21 @@ static int actiondfs_iterate_shared(struct file *file, struct dir_context *ctx)
 		if (!actiondfs_emit_cached_children(dir, ctx,
 						   &cached->children, &base))
 			return 0;
+	}
+
+	if (!READ_ONCE(dir->stage_dentry))
+		return 0;
+	if (!dir_file) {
+		struct actiondfs_dir_file *existing;
+
+		dir_file = kzalloc(sizeof(*dir_file), GFP_KERNEL);
+		if (!dir_file)
+			return -ENOMEM;
+		existing = cmpxchg(&file->private_data, NULL, dir_file);
+		if (existing) {
+			kfree(dir_file);
+			dir_file = existing;
+		}
 	}
 
 	return actiondfs_emit_stage_entries(inode, dir, dir_file, ctx, base);
