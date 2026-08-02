@@ -2261,7 +2261,8 @@ static int actiondfs_set_input_inode(struct inode *inode, void *data)
 static void actiondfs_init_inode(struct inode *inode,
 				 struct actiondfs_node *node)
 {
-	inode->i_ino = node->ino;
+	if (!node->input_child)
+		inode->i_ino = node->ino;
 	if (node->stage_dentry) {
 		inode->i_mode = node->mode;
 		actiondfs_copy_stage_owner(inode, d_inode(node->stage_dentry));
