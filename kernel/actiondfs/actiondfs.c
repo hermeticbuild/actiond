@@ -2133,17 +2133,13 @@ static int actiondfs_get_cached_dir(struct actiondfs_sb_info *sbi,
 	return 0;
 }
 
-static int actiondfs_ensure_loaded(struct super_block *sb,
-				   struct actiondfs_node *dir)
+static noinline_for_stack int actiondfs_load_dir(struct super_block *sb,
+						 struct actiondfs_node *dir)
 {
 	struct actiondfs_sb_info *sbi = actiondfs_sbi(sb);
 	struct actiondfs_cached_dir *cached;
 	const u8 *hash;
 	int err;
-
-	if (dir->origin == ACTIONDFS_NODE_STAGED ||
-	    smp_load_acquire(&dir->cached_dir))
-		return 0;
 
 	hash = dir->input_child ? dir->input_child->hash : sbi->root_hash;
 	err = actiondfs_get_cached_dir(sbi, hash, dir->size, &cached);
@@ -2152,6 +2148,15 @@ static int actiondfs_ensure_loaded(struct super_block *sb,
 	if (!cmpxchg_release(&dir->cached_dir, NULL, cached))
 		actiondfs_stat_inc(ACTIONDFS_STAT_DIR_LOADS);
 	return 0;
+}
+
+static __always_inline int actiondfs_ensure_loaded(struct super_block *sb,
+						  struct actiondfs_node *dir)
+{
+	if (dir->origin == ACTIONDFS_NODE_STAGED ||
+	    smp_load_acquire(&dir->cached_dir))
+		return 0;
+	return actiondfs_load_dir(sb, dir);
 }
 
 static int actiondfs_parse_options(struct actiondfs_mount_options *opts,
