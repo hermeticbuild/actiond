@@ -936,6 +936,36 @@ fn exerciseFileMetadata(io: std.Io, dir: std.Io.Dir) !void {
                 ((try file.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
                 "staged chmod did not expose setuid/setgid permissions",
             );
+            const zero_written = linux.write(file.handle, payload.ptr, 0);
+            switch (linux.errno(zero_written)) {
+                .SUCCESS => {},
+                else => return filesystemFailure("zero-length staged write failed"),
+            }
+            try requireFilesystem(zero_written == 0, "zero-length staged write returned a nonzero byte count");
+            try requireFilesystem(
+                ((try file.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                "zero-length staged write cleared setuid/setgid permissions",
+            );
+
+            const written = linux.write(file.handle, payload.ptr, 1);
+            switch (linux.errno(written)) {
+                .SUCCESS => {},
+                else => return filesystemFailure("staged write with setuid/setgid permissions failed"),
+            }
+            try requireFilesystem(written == 1, "staged permission regression write returned an unexpected byte count");
+            try requireFilesystem(
+                ((try file.stat(io)).permissions.toMode() & 0o6000) == 0,
+                "staged write did not clear setuid/setgid permissions",
+            );
+
+            switch (linux.errno(linux.fchmod(file.handle, 0o6755))) {
+                .SUCCESS => {},
+                else => return filesystemFailure("restoring setuid/setgid permissions before staged truncate failed"),
+            }
+            try requireFilesystem(
+                ((try file.stat(io)).permissions.toMode() & 0o6000) == 0o6000,
+                "staged chmod did not restore setuid/setgid permissions before truncate",
+            );
             try file.setLength(io, payload.len);
             try requireFilesystem(
                 ((try file.stat(io)).permissions.toMode() & 0o6000) == 0,

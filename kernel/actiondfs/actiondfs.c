@@ -1307,6 +1307,32 @@ static void actiondfs_stage_end_write(struct kiocb *iocb, ssize_t written)
 	actiondfs_stat_add(ACTIONDFS_STAT_STAGE_WRITE_BYTES, (u64)written);
 }
 
+static ssize_t actiondfs_backing_write_iter(struct file *file,
+					   struct iov_iter *from,
+					   struct kiocb *iocb)
+{
+	struct backing_file_ctx ctx = {
+		.cred = current_cred(),
+		.end_write = actiondfs_stage_end_write,
+	};
+	ssize_t written;
+
+	if (!is_sync_kiocb(iocb) || (iocb->ki_flags & IOCB_DIRECT))
+		return backing_file_write_iter(file, from, iocb,
+					       iocb->ki_flags, &ctx);
+	if (!iov_iter_count(from))
+		return 0;
+	written = file_remove_privs(iocb->ki_filp);
+	if (written)
+		return written;
+	written = vfs_iter_write(file, from, &iocb->ki_pos,
+				 (__force rwf_t)(iocb->ki_flags &
+					(IOCB_NOWAIT | IOCB_HIPRI | IOCB_DSYNC |
+					 IOCB_SYNC | IOCB_APPEND)));
+	actiondfs_stage_end_write(iocb, written);
+	return written;
+}
+
 static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -1314,10 +1340,6 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	struct file *file;
 	ssize_t nwritten;
 	u64 total_start;
-	struct backing_file_ctx ctx = {
-		.cred = current_cred(),
-		.end_write = actiondfs_stage_end_write,
-	};
 
 	if (node->origin != ACTIONDFS_NODE_STAGED)
 		return -EROFS;
@@ -1326,8 +1348,7 @@ static ssize_t actiondfs_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	actiondfs_stat_inc(ACTIONDFS_STAT_STAGE_WRITE_CALLS);
 	file = iocb->ki_filp->private_data;
 	inode_lock(inode);
-	nwritten = backing_file_write_iter(file, from, iocb,
-					   iocb->ki_flags, &ctx);
+	nwritten = actiondfs_backing_write_iter(file, from, iocb);
 	inode_unlock(inode);
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_WRITE_TOTAL_NS,
 				   total_start);
