@@ -910,6 +910,7 @@ static void actiondfs_destroy_blob_path_cache(void)
 
 static int actiondfs_append_cached_child(struct actiondfs_cached_children *children,
 					 const u8 *source,
+					 size_t *names_bytes,
 					 const char *name,
 					 size_t name_len,
 					 umode_t mode,
@@ -920,6 +921,8 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 {
 	struct actiondfs_cached_child *entries;
 	struct actiondfs_cached_child *child;
+	size_t packed_bytes;
+	size_t total;
 	u32 capacity;
 	int err;
 
@@ -935,6 +938,13 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 					   child->name_len, name, name_len) >= 0)
 			return -EINVAL;
 	}
+
+	packed_bytes = name_len + 1;
+	if (target &&
+	    check_add_overflow(packed_bytes, (size_t)size + 1, &packed_bytes))
+		return -EOVERFLOW;
+	if (check_add_overflow(*names_bytes, packed_bytes, &total))
+		return -EOVERFLOW;
 
 	if (children->count == children->capacity) {
 		size_t bytes;
@@ -963,28 +973,19 @@ static int actiondfs_append_cached_child(struct actiondfs_cached_children *child
 	else
 		memcpy(child->hash, hash, ACTIONDFS_HASH_LEN);
 	children->count++;
+	*names_bytes = total;
 	return 0;
 }
 
 static int actiondfs_pack_cached_dir_names(struct actiondfs_cached_dir *dir,
-					   const u8 *source)
+					   const u8 *source,
+					   size_t total)
 {
 	struct actiondfs_cached_children *children = &dir->children;
-	size_t total = 0;
 	size_t available;
 	char *next;
 	size_t i;
 
-	for (i = 0; i < children->count; i++) {
-		struct actiondfs_cached_child *child = &children->entries[i];
-
-		if (check_add_overflow(total, (size_t)child->name_len + 1,
-				       &total))
-			return -EOVERFLOW;
-		if (S_ISLNK(child->mode) &&
-		    check_add_overflow(total, (size_t)child->size + 1, &total))
-			return -EOVERFLOW;
-	}
 	if (!total)
 		return 0;
 
@@ -1788,6 +1789,7 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 
 static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *parent,
 					      const u8 *source,
+					      size_t *names_bytes,
 					      const u8 *data, size_t len,
 					      umode_t mode, u32 *previous)
 {
@@ -1800,7 +1802,8 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 		return err;
 	if (S_ISLNK(mode)) {
 		err = actiondfs_append_cached_child(
-			&parent->children, source, child.name, child.name_len,
+			&parent->children, source, names_bytes, child.name,
+			child.name_len,
 			S_IFLNK | 0777, child.symlink.target_len,
 			NULL, child.symlink.target, *previous);
 		if (!err)
@@ -1814,6 +1817,7 @@ static int actiondfs_parse_reapi_cached_child(struct actiondfs_cached_dir *paren
 	else
 		mode |= ACTIONDFS_DIR_MODE;
 	err = actiondfs_append_cached_child(&parent->children, source,
+					    names_bytes,
 					    child.name, child.name_len,
 					    mode, child.digest.size,
 					    child.digest.hash, NULL, *previous);
@@ -2047,6 +2051,7 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 	u8 *buffer;
 	size_t len;
 	size_t pos = 0;
+	size_t names_bytes = 0;
 	size_t hash_bytes;
 	u32 previous[3] = { U32_MAX, U32_MAX, U32_MAX };
 	int err;
@@ -2096,7 +2101,7 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 			if (err)
 				goto out_buffer;
 			err = actiondfs_parse_reapi_cached_child(
-				entry, buffer, field, field_len,
+				entry, buffer, &names_bytes, field, field_len,
 				(key >> 3) == 1 ? S_IFREG :
 				(key >> 3) == 2 ? S_IFDIR : S_IFLNK,
 				&previous[(key >> 3) - 1]);
@@ -2117,7 +2122,7 @@ static int actiondfs_build_cached_dir(struct actiondfs_sb_info *sbi,
 		if (err)
 			goto out_buffer;
 	}
-	err = actiondfs_pack_cached_dir_names(entry, buffer);
+	err = actiondfs_pack_cached_dir_names(entry, buffer, names_bytes);
 	if (err)
 		goto out_buffer;
 
