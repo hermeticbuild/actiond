@@ -838,8 +838,10 @@ static void actiondfs_free_cached_children(
 
 static void actiondfs_free_cached_dir(struct actiondfs_cached_dir *dir)
 {
+	if (dir->names &&
+	    dir->names != (char *)(dir->children.entries + dir->children.count))
+		kvfree(dir->names);
 	actiondfs_free_cached_children(&dir->children);
-	kvfree(dir->names);
 	dput(dir->cas_root);
 	kfree(dir);
 }
@@ -947,6 +949,7 @@ static int actiondfs_pack_cached_dir_names(struct actiondfs_cached_dir *dir)
 {
 	struct actiondfs_cached_children *children = &dir->children;
 	size_t total = 0;
+	size_t available;
 	char *next;
 	size_t i;
 
@@ -963,9 +966,15 @@ static int actiondfs_pack_cached_dir_names(struct actiondfs_cached_dir *dir)
 	if (!total)
 		return 0;
 
-	dir->names = kvmalloc(total, GFP_KERNEL);
-	if (!dir->names)
-		return -ENOMEM;
+	available = (size_t)(children->capacity - children->count) *
+		    sizeof(*children->entries);
+	if (total <= available) {
+		dir->names = (char *)(children->entries + children->count);
+	} else {
+		dir->names = kvmalloc(total, GFP_KERNEL);
+		if (!dir->names)
+			return -ENOMEM;
+	}
 	next = dir->names;
 	for (i = 0; i < children->count; i++) {
 		struct actiondfs_cached_child *child = &children->entries[i];
