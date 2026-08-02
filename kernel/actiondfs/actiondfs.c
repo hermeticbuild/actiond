@@ -1346,9 +1346,11 @@ static __always_inline ssize_t actiondfs_backing_write_iter(
 		return actiondfs_backing_write_iter_slow(file, from, iocb);
 	if (!iov_iter_count(from))
 		return 0;
-	written = file_remove_privs(iocb->ki_filp);
-	if (written)
-		return written;
+	if (!IS_NOSEC(file_inode(iocb->ki_filp))) {
+		written = file_remove_privs(iocb->ki_filp);
+		if (written)
+			return written;
+	}
 	written = vfs_iter_write(file, from, &iocb->ki_pos,
 				 (__force rwf_t)(iocb->ki_flags &
 					(IOCB_NOWAIT | IOCB_HIPRI | IOCB_DSYNC |
@@ -1425,9 +1427,11 @@ static ssize_t actiondfs_copy_file_range(struct file *file_in, loff_t pos_in,
 
 	real_out = file_out->private_data;
 	inode_lock(inode_out);
-	copied = file_remove_privs(file_out);
-	if (copied)
-		goto out_unlock;
+	if (!IS_NOSEC(inode_out)) {
+		copied = file_remove_privs(file_out);
+		if (copied)
+			goto out_unlock;
+	}
 	copied = vfs_copy_file_range(real_in, pos_in, real_out, pos_out, len, 0);
 	if (copied > 0)
 		actiondfs_sync_staged_inode(inode_out, file_inode(real_out));
