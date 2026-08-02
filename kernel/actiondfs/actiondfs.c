@@ -789,6 +789,18 @@ static int actiondfs_sort_cached_children(struct actiondfs_cached_dir *dir)
 	struct actiondfs_cached_children *children = &dir->children;
 	size_t i;
 
+	for (i = 1; i < children->count; i++) {
+		int cmp = actiondfs_compare_cached_children(
+			&children->entries[i - 1], &children->entries[i]);
+
+		if (!cmp)
+			return -EEXIST;
+		if (cmp > 0)
+			goto sort;
+	}
+	return 0;
+
+sort:
 	sort_nonatomic(children->entries, children->count,
 		       sizeof(*children->entries),
 		       actiondfs_compare_cached_children, NULL);
