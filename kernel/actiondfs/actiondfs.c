@@ -2183,8 +2183,8 @@ static noinline_for_stack int actiondfs_load_dir(struct super_block *sb,
 static __always_inline int actiondfs_ensure_loaded(struct super_block *sb,
 						  struct actiondfs_node *dir)
 {
-	if (dir->origin == ACTIONDFS_NODE_STAGED ||
-	    smp_load_acquire(&dir->cached_dir))
+	if (smp_load_acquire(&dir->cached_dir) ||
+	    dir->origin == ACTIONDFS_NODE_STAGED)
 		return 0;
 	return actiondfs_load_dir(sb, dir);
 }
