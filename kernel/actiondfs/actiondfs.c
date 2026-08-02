@@ -1721,7 +1721,12 @@ static int actiondfs_parse_reapi_child_fields(const u8 *data, size_t len,
 	size_t pos = 0;
 	int err;
 
-	memset(out, 0, sizeof(*out));
+	out->name = NULL;
+	out->executable = false;
+	if (S_ISLNK(mode))
+		out->symlink.target = NULL;
+	else
+		out->digest.present = false;
 	while (pos < len) {
 		const u8 *field;
 		size_t field_len;
