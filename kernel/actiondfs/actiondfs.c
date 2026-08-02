@@ -2468,12 +2468,6 @@ static int actiondfs_create_staged_child(struct inode *dir,
 			return -EINVAL;
 	}
 
-	err = actiondfs_ensure_loaded(dir->i_sb, parent);
-	if (err)
-		return err;
-	if (actiondfs_find_cached_child(parent, dentry->d_name.name,
-						dentry->d_name.len))
-		return -EROFS;
 	inode = actiondfs_prealloc_staged_inode(dir->i_sb, parent, mode,
 					       target, target_len);
 	if (IS_ERR(inode))
