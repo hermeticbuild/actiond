@@ -136,6 +136,7 @@ struct actiondfs_node {
 struct actiondfs_sb_info {
 	struct path cas_path;
 	struct path stage_path;
+	const struct cred *creator_cred;
 	u8 root_hash[ACTIONDFS_HASH_LEN];
 };
 
@@ -1116,8 +1117,11 @@ static struct file *actiondfs_open_directory_blob(struct actiondfs_sb_info *sbi,
 		if (IS_ERR(real_path.dentry)) {
 			file = ERR_CAST(real_path.dentry);
 		} else {
+			const struct cred *old_cred = override_creds(sbi->creator_cred);
+
 			file = kernel_file_open(&real_path, O_RDONLY | O_NONBLOCK,
 						current_cred());
+			revert_creds(old_cred);
 			dput(real_path.dentry);
 		}
 		if (!IS_ERR(file))
@@ -1167,8 +1171,13 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		}
 
 		open_start = actiondfs_stat_time_start();
-		file = backing_file_open(user_path, O_RDONLY, &real_path,
-					 current_cred());
+		{
+			const struct cred *old_cred = override_creds(sbi->creator_cred);
+
+			file = backing_file_open(user_path, O_RDONLY, &real_path,
+						 current_cred());
+			revert_creds(old_cred);
+		}
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_BLOB_OPEN_BACKING_FILE_NS,
 					   open_start);
 		dput(real_path.dentry);
@@ -1226,8 +1235,13 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	}
 
 	phase_start = actiondfs_stat_time_start();
-	file = backing_file_open(file_user_path(actiondfs_file), flags,
-				 &real_path, current_cred());
+	{
+		const struct cred *old_cred = override_creds(sbi->creator_cred);
+
+		file = backing_file_open(file_user_path(actiondfs_file), flags,
+					 &real_path, current_cred());
+		revert_creds(old_cred);
+	}
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
 				   phase_start);
 out:
@@ -3403,6 +3417,8 @@ static void actiondfs_put_super(struct super_block *sb)
 		path_put(&sbi->cas_path);
 	if (sbi->stage_path.dentry)
 		path_put(&sbi->stage_path);
+	if (sbi->creator_cred)
+		put_cred(sbi->creator_cred);
 	kfree(sbi);
 	sb->s_fs_info = NULL;
 }
@@ -3427,6 +3443,7 @@ static int actiondfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
 	if (!sbi)
 		return -ENOMEM;
+	sbi->creator_cred = get_current_cred();
 
 	sb->s_fs_info = sbi;
 	sb->s_magic = ACTIONDFS_MAGIC;
