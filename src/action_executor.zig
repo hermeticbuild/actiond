@@ -2109,7 +2109,7 @@ fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void
 }
 
 fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
-    try chroot_root.createDirPath(io, "dev");
+    try chroot_root.createDirPath(io, "dev/shm");
     try chroot_root.createDirPath(io, "proc");
     try chroot_root.createDirPath(io, "tmp");
     try chroot_root.createDirPath(io, "var/tmp");
@@ -3641,6 +3641,7 @@ test "prepareChrootBaseDirs creates temporary directories" {
     defer work_dir.close(std.testing.io);
 
     try prepareChrootBaseDirs(std.testing.io, work_dir);
+    try work_dir.access(std.testing.io, "dev/shm", .{});
     try work_dir.access(std.testing.io, "tmp", .{});
     try work_dir.access(std.testing.io, "var/tmp", .{});
 }
