@@ -259,37 +259,12 @@ fn expectBpfProgramsBlocked() !void {
         return error.SeccompCheckFailed;
     }
 
-    const blocked_calls = [_]struct { name: []const u8, result: usize }{
-        .{
-            .name = "seccomp",
-            .result = linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, null),
+    switch (linux.errno(linux.syscall3(.bpf, 0, 0, 0))) {
+        .PERM, .ACCES => {},
+        else => |err| {
+            std.debug.print("sandboxed action unexpectedly reached bpf: {s}\n", .{@tagName(err)});
+            return error.SeccompCheckFailed;
         },
-        .{
-            .name = "prctl(PR_SET_SECCOMP)",
-            .result = linux.prctl(
-                @intFromEnum(linux.PR.SET_SECCOMP),
-                linux.SECCOMP.MODE.FILTER,
-                0,
-                0,
-                0,
-            ),
-        },
-        .{
-            .name = "bpf",
-            .result = linux.syscall3(.bpf, 0, 0, 0),
-        },
-    };
-    for (blocked_calls) |blocked_call| {
-        switch (linux.errno(blocked_call.result)) {
-            .PERM, .ACCES => {},
-            else => |err| {
-                std.debug.print(
-                    "sandboxed action unexpectedly reached {s}: {s}\n",
-                    .{ blocked_call.name, @tagName(err) },
-                );
-                return error.SeccompCheckFailed;
-            },
-        }
     }
 
     const socket_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
@@ -331,6 +306,27 @@ fn expectBpfProgramsBlocked() !void {
     );
     if (linux.errno(reuse_address) != .SUCCESS) {
         std.debug.print("sandbox seccomp filter rejected SO_REUSEADDR\n", .{});
+        return error.SeccompCheckFailed;
+    }
+
+    const Instruction = extern struct { code: u16, jump_true: u8, jump_false: u8, data: u32 };
+    const Program = extern struct { length: u16, instructions: [*]const Instruction };
+    const instructions = [_]Instruction{.{
+        .code = 0x06,
+        .jump_true = 0,
+        .jump_false = 0,
+        .data = linux.SECCOMP.RET.ALLOW,
+    }};
+    const program = Program{ .length = instructions.len, .instructions = &instructions };
+    const nested = linux.prctl(
+        @intFromEnum(linux.PR.SET_SECCOMP),
+        linux.SECCOMP.MODE.FILTER,
+        @intFromPtr(&program),
+        0,
+        0,
+    );
+    if (linux.errno(nested) != .SUCCESS) {
+        std.debug.print("sandbox rejected an additional seccomp filter: {s}\n", .{@tagName(linux.errno(nested))});
         return error.SeccompCheckFailed;
     }
 }
