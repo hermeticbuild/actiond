@@ -2110,6 +2110,8 @@ fn createOutputParent(io: std.Io, work_root: std.Io.Dir, path: []const u8) !void
 
 fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
     try chroot_root.createDirPath(io, "dev");
+    try chroot_root.createDirPath(io, "dev/pts");
+    try chroot_root.symLink(io, "pts/ptmx", "dev/ptmx", .{});
     try chroot_root.createDirPath(io, "proc");
     try chroot_root.createDirPath(io, "tmp");
     try chroot_root.createDirPath(io, "var/tmp");
@@ -3641,6 +3643,10 @@ test "prepareChrootBaseDirs creates temporary directories" {
     defer work_dir.close(std.testing.io);
 
     try prepareChrootBaseDirs(std.testing.io, work_dir);
+    try work_dir.access(std.testing.io, "dev/pts", .{});
+    var pseudo_terminal_target: [64]u8 = undefined;
+    const pseudo_terminal_target_len = try work_dir.readLink(std.testing.io, "dev/ptmx", &pseudo_terminal_target);
+    try std.testing.expectEqualStrings("pts/ptmx", pseudo_terminal_target[0..pseudo_terminal_target_len]);
     try work_dir.access(std.testing.io, "tmp", .{});
     try work_dir.access(std.testing.io, "var/tmp", .{});
 }
