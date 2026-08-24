@@ -820,24 +820,20 @@ fn actionAuditArchitecture() u32 {
     };
 }
 
-fn actionSeccompFilterInstructions() [23]SeccompFilterInstruction {
+fn actionSeccompFilterInstructions() [19]SeccompFilterInstruction {
     const linux = std.os.linux;
     return .{
         .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 4 },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 0, .jump_false = 19, .data = actionAuditArchitecture() },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 0, .jump_false = 15, .data = actionAuditArchitecture() },
         .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 0 },
         .{ .code = classic_bpf_bitwise_and_constant, .jump_true = 0, .jump_false = 0, .data = ~x86_x32_syscall_bit },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 6, .jump_false = 0, .data = @intFromEnum(linux.SYS.socket) },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 14, .jump_false = 0, .data = @intFromEnum(linux.SYS.io_uring_setup) },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 13, .jump_false = 0, .data = @intFromEnum(linux.SYS.seccomp) },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 12, .jump_false = 0, .data = @intFromEnum(linux.SYS.bpf) },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 4, .jump_false = 0, .data = @intFromEnum(linux.SYS.prctl) },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 5, .jump_false = 0, .data = @intFromEnum(linux.SYS.setsockopt) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 4, .jump_false = 0, .data = @intFromEnum(linux.SYS.socket) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 10, .jump_false = 0, .data = @intFromEnum(linux.SYS.io_uring_setup) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 9, .jump_false = 0, .data = @intFromEnum(linux.SYS.bpf) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 3, .jump_false = 0, .data = @intFromEnum(linux.SYS.setsockopt) },
         .{ .code = classic_bpf_return_constant, .jump_true = 0, .jump_false = 0, .data = linux.SECCOMP.RET.ALLOW },
         .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 16 },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 7, .jump_false = 9, .data = linux.AF.VSOCK },
-        .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 16 },
-        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 5, .jump_false = 7, .data = @intCast(@intFromEnum(linux.PR.SET_SECCOMP)) },
+        .{ .code = classic_bpf_jump_equal_constant, .jump_true = 5, .jump_false = 7, .data = linux.AF.VSOCK },
         .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 24 },
         .{ .code = classic_bpf_jump_equal_constant, .jump_true = 0, .jump_false = 5, .data = linux.SOL.SOCKET },
         .{ .code = classic_bpf_load_absolute_word, .jump_true = 0, .jump_false = 0, .data = 32 },
@@ -1554,24 +1550,14 @@ test "sandbox seccomp rejects AF_VSOCK and io_uring_setup" {
     ));
 }
 
-test "sandbox seccomp rejects untrusted classic BPF JIT entry points" {
+test "sandbox seccomp rejects untrusted BPF and socket filter entry points" {
     const linux = std.os.linux;
     const denied = @as(u32, linux.SECCOMP.RET.ERRNO) | @as(u32, @intFromEnum(std.posix.E.PERM));
 
     try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
         actionAuditArchitecture(),
-        @intFromEnum(linux.SYS.seccomp),
-        .{ 0, 0, 0, 0, 0, 0 },
-    ));
-    try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
-        actionAuditArchitecture(),
         @intFromEnum(linux.SYS.bpf),
         .{ 0, 0, 0, 0, 0, 0 },
-    ));
-    try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
-        actionAuditArchitecture(),
-        @intFromEnum(linux.SYS.prctl),
-        .{ @intCast(@intFromEnum(linux.PR.SET_SECCOMP)), 0, 0, 0, 0, 0 },
     ));
     for ([_]u32{ linux.SO.ATTACH_FILTER, linux.SO.ATTACH_REUSEPORT_CBPF }) |option| {
         try std.testing.expectEqual(denied, try evaluateActionSeccompFilterForTest(
@@ -1580,6 +1566,22 @@ test "sandbox seccomp rejects untrusted classic BPF JIT entry points" {
             .{ 7, linux.SOL.SOCKET, option, 0, 0, 0 },
         ));
     }
+}
+
+test "sandbox seccomp allows additional restrictive filters" {
+    const linux = std.os.linux;
+    const allowed: u32 = linux.SECCOMP.RET.ALLOW;
+
+    try std.testing.expectEqual(allowed, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.seccomp),
+        .{ linux.SECCOMP.SET_MODE_FILTER, 0, 0, 0, 0, 0 },
+    ));
+    try std.testing.expectEqual(allowed, try evaluateActionSeccompFilterForTest(
+        actionAuditArchitecture(),
+        @intFromEnum(linux.SYS.prctl),
+        .{ @intCast(@intFromEnum(linux.PR.SET_SECCOMP)), linux.SECCOMP.MODE.FILTER, 0, 0, 0, 0 },
+    ));
 }
 
 test "sandbox seccomp allows unrelated socket options and prctl operations" {
