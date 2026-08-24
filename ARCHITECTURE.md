@@ -119,7 +119,7 @@ the worker lifetime. It is an optimization only; `/cas` is the source of truth.
 
 VM execution uses `actiondfs`, a small Linux filesystem built into the VM
 kernel. Bazel sends an input root digest; actiondfs receives that digest plus
-the guest CAS blob root and exposes the action input tree at `/workspace`.
+the guest CAS blob root and exposes the action input tree at `/execroot`.
 
 Important properties:
 
@@ -142,7 +142,7 @@ execution_requirements = {"mutates_inputs": "1"}
 ```
 
 That path mounts actiondfs read-only as an overlay lowerdir and mounts stock
-overlayfs at `/workspace` with a per-action upper/work directory. Normal actions
+overlayfs at `/execroot` with a per-action upper/work directory. Normal actions
 should not use it.
 
 actiondfs caches parsed non-root REAPI Directory protos by digest for the VM
@@ -193,7 +193,7 @@ execution_requirements = {"libc": "glibc2.35"}
 ```
 
 When selected, actiond bind-mounts the matching runtime paths into the action
-chroot. Runtime-backed actions run with their execroot at `/workspace` so
+chroot. Runtime-backed actions run with their execroot at `/execroot` so
 runtime root paths such as `/etc` do not hide user input paths.
 
 ## Performance Model

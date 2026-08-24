@@ -15,7 +15,7 @@ const max_output_tree_proto_bytes = 64 * 1024 * 1024;
 const max_output_metadata_bytes = 128 * 1024 * 1024;
 const max_output_entries = 256 * 1024;
 const max_output_directory_depth = 128;
-const chroot_execroot_prefix = "/workspace/";
+const chroot_execroot_prefix = "/execroot/";
 const worker_name = "actiond";
 const supported_libc_runtimes = [_][]const u8{ "glibc2.31", "glibc2.35", "glibc2.39" };
 var next_actiondfs_workspace_id = std.atomic.Value(u64).init(0);
@@ -250,8 +250,8 @@ pub fn executeDecodedActionWithOptions(
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try work_root.realPath(io, &cwd_buffer);
     const work_root_path = cwd_buffer[0..cwd_len];
-    try work_root.createDirPath(io, "workspace");
-    const workspace_path = try std.fmt.allocPrint(allocator, "{s}/workspace", .{work_root_path});
+    try work_root.createDirPath(io, "execroot");
+    const workspace_path = try std.fmt.allocPrint(allocator, "{s}/execroot", .{work_root_path});
     defer allocator.free(workspace_path);
     try prepareChrootBaseDirs(io, work_root);
     try checkExecutionCancellation(options.cancellation);
@@ -294,10 +294,10 @@ pub fn executeDecodedActionWithOptions(
     var chroot_cwd_owned: ?[]u8 = null;
     defer if (chroot_cwd_owned) |path| allocator.free(path);
     const chroot_cwd = if (command.working_directory.len == 0)
-        "/workspace"
+        "/execroot"
     else cwd: {
         try validatePath(command.working_directory);
-        const value = try std.fmt.allocPrint(allocator, "/workspace/{s}", .{command.working_directory});
+        const value = try std.fmt.allocPrint(allocator, "/execroot/{s}", .{command.working_directory});
         chroot_cwd_owned = value;
         break :cwd value;
     };
@@ -685,7 +685,7 @@ const ActiondfsCollectionNamespace = struct {
             if (std.os.linux.errno(remount_rc) != .SUCCESS) return error.MountFailed;
         }
 
-        namespace.merged_workspace = try chroot_root.openDir(io, "workspace", .{
+        namespace.merged_workspace = try chroot_root.openDir(io, "execroot", .{
             .iterate = true,
             .follow_symlinks = false,
         });
@@ -1553,9 +1553,9 @@ fn validateLegacyOutputSymlinkTargetInChroot(
     const resolved_path = if (std.fs.path.isAbsolute(target))
         try allocator.dupeZ(u8, target)
     else if (std.mem.lastIndexOfScalar(u8, path, '/')) |parent_end|
-        try std.fmt.allocPrintSentinel(allocator, "/workspace/{s}/{s}", .{ path[0..parent_end], target }, 0)
+        try std.fmt.allocPrintSentinel(allocator, "/execroot/{s}/{s}", .{ path[0..parent_end], target }, 0)
     else
-        try std.fmt.allocPrintSentinel(allocator, "/workspace/{s}", .{target}, 0);
+        try std.fmt.allocPrintSentinel(allocator, "/execroot/{s}", .{target}, 0);
     defer allocator.free(resolved_path);
 
     const target_kind = if (comptime builtin.os.tag == .linux)
@@ -2529,7 +2529,7 @@ test "actiondfs workspace uses build-time filesystem name without mount option n
         "/cas/blobs/sha256",
         null,
         work_path,
-        "/workspace",
+        "/execroot",
         cas.Digest.empty(),
         .actiondfs_strict,
     );
@@ -2634,7 +2634,7 @@ test "executeDecodedActionWithOptions rejects excessive declared outputs before 
         .{ .command_digest = command_digest.toReapi(&command_hash) },
         .{},
     ));
-    try std.testing.expectError(error.FileNotFound, work_dir.statFile(std.testing.io, "workspace", .{}));
+    try std.testing.expectError(error.FileNotFound, work_dir.statFile(std.testing.io, "execroot", .{}));
     try std.testing.expectError(error.FileNotFound, work_dir.statFile(std.testing.io, "generated", .{}));
 }
 
@@ -2926,7 +2926,7 @@ test "collectOutputFiles reports modern output symlinks without resolving their 
     try work_dir.writeFile(std.testing.io, .{ .sub_path = "links/actual.txt", .data = "artifact" });
     try work_dir.symLink(std.testing.io, "actual.txt", "links/file", .{});
     try work_dir.symLink(std.testing.io, "missing/target", "links/dangling", .{});
-    try work_dir.symLink(std.testing.io, "/workspace/absolute", "links/absolute", .{});
+    try work_dir.symLink(std.testing.io, "/execroot/absolute", "links/absolute", .{});
     try work_dir.symLink(std.testing.io, "../outside", "links/parent", .{});
 
     var outcome: action_runner.Outcome = .{
@@ -2947,7 +2947,7 @@ test "collectOutputFiles reports modern output symlinks without resolving their 
     try std.testing.expectEqual(@as(usize, 0), outcome.output_directory_symlinks.len);
     try std.testing.expectEqualStrings("actual.txt", outcome.output_symlinks[0].target);
     try std.testing.expectEqualStrings("missing/target", outcome.output_symlinks[1].target);
-    try std.testing.expectEqualStrings("/workspace/absolute", outcome.output_symlinks[2].target);
+    try std.testing.expectEqualStrings("/execroot/absolute", outcome.output_symlinks[2].target);
     try std.testing.expectEqualStrings("../outside", outcome.output_symlinks[3].target);
 
     var result = try actionResultFromOutcomeOwned(std.testing.allocator, outcome);
@@ -2964,7 +2964,7 @@ test "collectOutputFiles reports modern output symlinks without resolving their 
     var decoded = try reapi.ActionResult.decodeOwned(std.testing.allocator, &reader);
     defer decoded.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 4), decoded.output_symlinks.len);
-    try std.testing.expectEqualStrings("/workspace/absolute", decoded.output_symlinks[2].target);
+    try std.testing.expectEqualStrings("/execroot/absolute", decoded.output_symlinks[2].target);
 }
 
 test "collectOutputFiles reports legacy file and directory symlinks separately" {
@@ -3022,23 +3022,23 @@ test "collectOutputFiles resolves absolute, input, and runtime legacy symlinks i
     defer cas_dir.close(std.testing.io);
     var chroot = try tmp.dir.createDirPathOpen(std.testing.io, "chroot", .{});
     defer chroot.close(std.testing.io);
-    try chroot.createDirPath(std.testing.io, "workspace/out");
-    try chroot.createDirPath(std.testing.io, "workspace/input-directory");
+    try chroot.createDirPath(std.testing.io, "execroot/out");
+    try chroot.createDirPath(std.testing.io, "execroot/input-directory");
     try chroot.createDirPath(std.testing.io, "etc/runtime-directory");
-    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/input.txt", .data = "immutable input" });
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "execroot/input.txt", .data = "immutable input" });
     try chroot.writeFile(std.testing.io, .{ .sub_path = "etc/runtime.txt", .data = "runtime input" });
-    try chroot.symLink(std.testing.io, "/etc/runtime.txt", "workspace/input-alias", .{});
+    try chroot.symLink(std.testing.io, "/etc/runtime.txt", "execroot/input-alias", .{});
 
-    var workspace = try chroot.openDir(std.testing.io, "workspace", .{ .iterate = true });
+    var workspace = try chroot.openDir(std.testing.io, "execroot", .{ .iterate = true });
     defer workspace.close(std.testing.io);
     var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
     defer stage.close(std.testing.io);
     try stage.createDirPath(std.testing.io, "out");
     try stage.symLink(std.testing.io, "../input.txt", "out/relative-input", .{});
-    try stage.symLink(std.testing.io, "/workspace/input.txt", "out/absolute-input", .{});
+    try stage.symLink(std.testing.io, "/execroot/input.txt", "out/absolute-input", .{});
     try stage.symLink(std.testing.io, "/etc/runtime.txt", "out/runtime-file", .{});
     try stage.symLink(std.testing.io, "../input-alias", "out/input-chain", .{});
-    try stage.symLink(std.testing.io, "/workspace/input-directory", "out/input-directory", .{ .is_directory = true });
+    try stage.symLink(std.testing.io, "/execroot/input-directory", "out/input-directory", .{ .is_directory = true });
     try stage.symLink(std.testing.io, "/etc/runtime-directory", "out/runtime-directory", .{ .is_directory = true });
 
     var outcome: action_runner.Outcome = .{
@@ -3069,10 +3069,10 @@ test "collectOutputFiles resolves absolute, input, and runtime legacy symlinks i
     try std.testing.expectEqual(@as(usize, 4), outcome.output_file_symlinks.len);
     try std.testing.expectEqual(@as(usize, 2), outcome.output_directory_symlinks.len);
     try std.testing.expectEqualStrings("../input.txt", outcome.output_file_symlinks[0].target);
-    try std.testing.expectEqualStrings("/workspace/input.txt", outcome.output_file_symlinks[1].target);
+    try std.testing.expectEqualStrings("/execroot/input.txt", outcome.output_file_symlinks[1].target);
     try std.testing.expectEqualStrings("/etc/runtime.txt", outcome.output_file_symlinks[2].target);
     try std.testing.expectEqualStrings("../input-alias", outcome.output_file_symlinks[3].target);
-    try std.testing.expectEqualStrings("/workspace/input-directory", outcome.output_directory_symlinks[0].target);
+    try std.testing.expectEqualStrings("/execroot/input-directory", outcome.output_directory_symlinks[0].target);
     try std.testing.expectEqualStrings("/etc/runtime-directory", outcome.output_directory_symlinks[1].target);
 }
 
@@ -3084,20 +3084,20 @@ test "collectOutputFiles rejects dangling, incorrectly typed, and invalid traver
     defer cas_dir.close(std.testing.io);
     var chroot = try tmp.dir.createDirPathOpen(std.testing.io, "chroot", .{});
     defer chroot.close(std.testing.io);
-    try chroot.createDirPath(std.testing.io, "workspace/out");
-    try chroot.createDirPath(std.testing.io, "workspace/directory");
-    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/out/file.txt", .data = "input" });
-    try chroot.symLink(std.testing.io, "/workspace/out/loop", "workspace/out/loop", .{});
-    try chroot.symLink(std.testing.io, "/workspace/directory", "workspace/out/nested-directory", .{ .is_directory = true });
+    try chroot.createDirPath(std.testing.io, "execroot/out");
+    try chroot.createDirPath(std.testing.io, "execroot/directory");
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "execroot/out/file.txt", .data = "input" });
+    try chroot.symLink(std.testing.io, "/execroot/out/loop", "execroot/out/loop", .{});
+    try chroot.symLink(std.testing.io, "/execroot/directory", "execroot/out/nested-directory", .{ .is_directory = true });
 
-    var workspace = try chroot.openDir(std.testing.io, "workspace", .{ .iterate = true });
+    var workspace = try chroot.openDir(std.testing.io, "execroot", .{ .iterate = true });
     defer workspace.close(std.testing.io);
     var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
     defer stage.close(std.testing.io);
     try stage.createDirPath(std.testing.io, "out");
-    try stage.symLink(std.testing.io, "/workspace/missing", "out/dangling", .{});
-    try stage.symLink(std.testing.io, "/workspace/directory", "out/directory-as-file", .{ .is_directory = true });
-    try stage.symLink(std.testing.io, "/workspace/out/file.txt", "out/file-as-directory", .{});
+    try stage.symLink(std.testing.io, "/execroot/missing", "out/dangling", .{});
+    try stage.symLink(std.testing.io, "/execroot/directory", "out/directory-as-file", .{ .is_directory = true });
+    try stage.symLink(std.testing.io, "/execroot/out/file.txt", "out/file-as-directory", .{});
     try stage.symLink(std.testing.io, "missing/../file.txt", "out/missing-parent", .{});
     try stage.symLink(std.testing.io, "file.txt/../file.txt", "out/file-parent", .{});
     try stage.symLink(std.testing.io, "loop", "out/loop", .{});
@@ -3248,7 +3248,7 @@ test "collectOutputFiles serializes sorted symlinks in output directory trees" {
     try work_dir.createDirPath(std.testing.io, "tree/child");
     try work_dir.writeFile(std.testing.io, .{ .sub_path = "tree/child/file.txt", .data = "artifact" });
     try work_dir.symLink(std.testing.io, "../outside", "tree/z-link", .{});
-    try work_dir.symLink(std.testing.io, "/workspace/input", "tree/a-link", .{});
+    try work_dir.symLink(std.testing.io, "/execroot/input", "tree/a-link", .{});
     try work_dir.symLink(std.testing.io, "../missing", "tree/child/nested-link", .{});
 
     var outcome: action_runner.Outcome = .{
@@ -3283,7 +3283,7 @@ test "collectOutputFiles serializes sorted symlinks in output directory trees" {
 
     try std.testing.expectEqual(@as(usize, 2), root.?.symlinks.len);
     try std.testing.expectEqualStrings("a-link", root.?.symlinks[0].name);
-    try std.testing.expectEqualStrings("/workspace/input", root.?.symlinks[0].target);
+    try std.testing.expectEqualStrings("/execroot/input", root.?.symlinks[0].target);
     try std.testing.expectEqualStrings("z-link", root.?.symlinks[1].name);
     try std.testing.expectEqualStrings("../outside", root.?.symlinks[1].target);
     try std.testing.expectEqual(@as(usize, 1), child.?.symlinks.len);
@@ -3300,10 +3300,10 @@ test "collectOutputFiles supports the empty legacy output directory with merged 
     const store = cas.Store.init(cas_dir);
     var chroot = try tmp.dir.createDirPathOpen(std.testing.io, "chroot", .{});
     defer chroot.close(std.testing.io);
-    try chroot.createDirPath(std.testing.io, "workspace");
-    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/input.txt", .data = "immutable input" });
-    try chroot.writeFile(std.testing.io, .{ .sub_path = "workspace/output.txt", .data = "generated output" });
-    var workspace = try chroot.openDir(std.testing.io, "workspace", .{ .iterate = true });
+    try chroot.createDirPath(std.testing.io, "execroot");
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "execroot/input.txt", .data = "immutable input" });
+    try chroot.writeFile(std.testing.io, .{ .sub_path = "execroot/output.txt", .data = "generated output" });
+    var workspace = try chroot.openDir(std.testing.io, "execroot", .{ .iterate = true });
     defer workspace.close(std.testing.io);
     var stage = try tmp.dir.createDirPathOpen(std.testing.io, "stage", .{});
     defer stage.close(std.testing.io);
@@ -3393,7 +3393,7 @@ test "collectOutputFiles strips chroot execroot prefix from depfiles" {
     try work_dir.createDirPath(std.testing.io, "bazel-out/pkg");
     try work_dir.writeFile(std.testing.io, .{
         .sub_path = "bazel-out/pkg/file.d",
-        .data = "bazel-out/pkg/file.o: /workspace/external/tool/include/stddef.h /workspace/pkg/input.c\n",
+        .data = "bazel-out/pkg/file.o: /execroot/external/tool/include/stddef.h /execroot/pkg/input.c\n",
     });
 
     var outcome: action_runner.Outcome = .{ .status = .{ .exited = 0 }, .stdout = &.{}, .stderr = &.{} };

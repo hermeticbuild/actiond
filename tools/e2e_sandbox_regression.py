@@ -186,13 +186,13 @@ def main():
     directory_digest = digest(directory)
 
     scenarios = [
-        (name, command(name, ("/workspace/tool",)), None)
+        (name, command(name, ("/execroot/tool",)), None)
         for name, _ in attacks
     ]
     scenarios.append(
         (
             "staged-output-parent",
-            command("sub", ("/workspace/tool", "--out-file", "out"), ("sub/out",)),
+            command("sub", ("/execroot/tool", "--out-file", "out"), ("sub/out",)),
             "sub/out",
         )
     )
