@@ -304,6 +304,9 @@ pub fn executeDecodedActionWithOptions(
 
     const libc_runtime = try libcRuntimeFromPlatform(platform);
     const shell_runtime = try shellRuntimeFromPlatform(platform);
+    const input_rootfs = try resolveInputRootfs(platform, command);
+    if (input_rootfs != null and (libc_runtime != null or shell_runtime != null))
+        return error.ConflictingRuntimeProperties;
     var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
     var borrowed_source_count: usize = 0;
     defer {
@@ -313,7 +316,9 @@ pub fn executeDecodedActionWithOptions(
         }
         bind_mounts.deinit(allocator);
     }
-    if (options.runtime_mount_cache) |cache| {
+    if (input_rootfs) |rootfs| {
+        try prepareInputRootfs(io, allocator, store, input_root_digest, work_root, rootfs, options.cancellation);
+    } else if (options.runtime_mount_cache) |cache| {
         borrowed_source_count = std.math.maxInt(usize);
         try checkExecutionCancellation(options.cancellation);
         try appendCachedRuntimeMount(io, allocator, work_root, work_root_path, cache.common_etc, "etc", &bind_mounts);
@@ -440,6 +445,75 @@ fn shellRuntimeFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
         return "bash";
     }
     return null;
+}
+
+fn inputRootfsFromPlatform(platform: ?reapi.Platform) !?[]const u8 {
+    var result: ?[]const u8 = null;
+    for ((platform orelse return null).properties) |property| {
+        if (!std.mem.eql(u8, property.name, "input-rootfs")) continue;
+        if (result != null) return error.DuplicateInputRootfs;
+        try validatePath(property.value);
+        result = property.value;
+    }
+    return result;
+}
+
+fn resolveInputRootfs(platform: ?reapi.Platform, command: reapi.Command) !?[]const u8 {
+    var result = try inputRootfsFromPlatform(platform);
+    var found_env = false;
+    for ((platform orelse return result).properties) |property| {
+        if (!std.mem.eql(u8, property.name, "input-rootfs-env")) continue;
+        if (found_env or result != null) return error.ConflictingRuntimeProperties;
+        found_env = true;
+        if (property.value.len == 0) return error.MissingInputRootfsVariable;
+        for (command.environment_variables) |variable| {
+            if (!std.mem.eql(u8, variable.name, property.value)) continue;
+            if (result != null) return error.DuplicateInputRootfs;
+            try validatePath(variable.value);
+            result = variable.value;
+        }
+        if (result == null) return error.MissingInputRootfsVariable;
+    }
+    return result;
+}
+
+// Link only runtime locations. /dev, /proc, /tmp, /var/tmp and /workspace
+// remain owned by the executor. Targets resolve after chroot, against CAS inputs.
+fn prepareInputRootfs(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: cas.Store,
+    input_root_digest: cas.Digest,
+    work_root: std.Io.Dir,
+    path: []const u8,
+    cancellation: ?*const std.atomic.Value(bool),
+) !void {
+    try validatePath(path);
+    var inputs: OutputParentValidator = .{
+        .io = io,
+        .allocator = allocator,
+        .store = store,
+        .root_digest = input_root_digest,
+        .cancellation = cancellation,
+    };
+    defer inputs.deinit();
+    var digest = input_root_digest;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        const directory = try inputs.getDirectory(digest);
+        const child = findInputDirectoryEntry(reapi.DirectoryNode, directory.directories, part) orelse
+            return error.InputRootfsNotDirectory;
+        digest = try cas.Digest.fromReapi(child.digest orelse return error.MissingInputDirectoryDigest);
+    }
+    const directory = try inputs.getDirectory(digest);
+    for ([_][]const u8{ "bin", "sbin", "lib", "lib64", "usr", "etc", "opt" }) |name| {
+        try checkExecutionCancellation(cancellation);
+        if (findInputDirectoryEntry(reapi.DirectoryNode, directory.directories, name) == null and
+            findInputDirectoryEntry(reapi.SymlinkNode, directory.symlinks, name) == null) continue;
+        const target = try std.fmt.allocPrint(allocator, "workspace/{s}/{s}", .{ path, name });
+        defer allocator.free(target);
+        try work_root.symLink(io, target, name, .{ .is_directory = true });
+    }
 }
 
 fn stressCaseFromCommand(command: reapi.Command) []const u8 {
@@ -2404,6 +2478,86 @@ test "libc runtime platform property accepts pinned runtimes" {
     try std.testing.expectError(error.UnsupportedLibcRuntime, libcRuntimeFromPlatform(.{
         .properties = &.{.{ .name = "libc", .value = "glibc2.17" }},
     }));
+}
+
+test "input-rootfs rejects paths outside declared inputs and duplicate properties" {
+    for ([_][]const u8{ "/host", "../host", "root/../host", "root//fs", "root/.", "root\x00fs" }) |path| {
+        try std.testing.expectError(error.EscapingExecPath, inputRootfsFromPlatform(.{
+            .properties = &.{.{ .name = "input-rootfs", .value = path }},
+        }));
+    }
+    try std.testing.expectError(error.EmptyExecPath, inputRootfsFromPlatform(.{
+        .properties = &.{.{ .name = "input-rootfs", .value = "" }},
+    }));
+    try std.testing.expectError(error.DuplicateInputRootfs, inputRootfsFromPlatform(.{
+        .properties = &.{
+            .{ .name = "input-rootfs", .value = "a" },
+            .{ .name = "input-rootfs", .value = "b" },
+        },
+    }));
+}
+
+test "input-rootfs-env resolves only a unique declared command variable" {
+    const platform: reapi.Platform = .{ .properties = &.{.{ .name = "input-rootfs-env", .value = "RUNTIME" }} };
+    try std.testing.expectEqualStrings("bazel-out/runtime", (try resolveInputRootfs(platform, .{
+        .environment_variables = &.{.{ .name = "RUNTIME", .value = "bazel-out/runtime" }},
+    })).?);
+    try std.testing.expectError(error.MissingInputRootfsVariable, resolveInputRootfs(platform, .{}));
+    try std.testing.expectError(error.EscapingExecPath, resolveInputRootfs(platform, .{
+        .environment_variables = &.{.{ .name = "RUNTIME", .value = "../host" }},
+    }));
+    try std.testing.expectError(error.DuplicateInputRootfs, resolveInputRootfs(platform, .{
+        .environment_variables = &.{
+            .{ .name = "RUNTIME", .value = "one" },
+            .{ .name = "RUNTIME", .value = "two" },
+        },
+    }));
+    try std.testing.expectError(error.ConflictingRuntimeProperties, resolveInputRootfs(.{
+        .properties = &.{
+            .{ .name = "input-rootfs", .value = "literal" },
+            .{ .name = "input-rootfs-env", .value = "RUNTIME" },
+        },
+    }, .{}));
+}
+
+test "input-rootfs links CAS runtime directories but preserves executor-owned locations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work.close(std.testing.io);
+    try prepareChrootBaseDirs(std.testing.io, work);
+    try work.createDir(std.testing.io, "workspace", .default_dir);
+    const store = cas.Store.init(cas_dir);
+    const empty = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
+    var empty_hash: [64]u8 = undefined;
+    const rootfs = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{
+            .{ .name = "dev", .digest = empty.toReapi(&empty_hash) },
+            .{ .name = "etc", .digest = empty.toReapi(&empty_hash) },
+            .{ .name = "proc", .digest = empty.toReapi(&empty_hash) },
+            .{ .name = "tmp", .digest = empty.toReapi(&empty_hash) },
+            .{ .name = "usr", .digest = empty.toReapi(&empty_hash) },
+            .{ .name = "workspace", .digest = empty.toReapi(&empty_hash) },
+        },
+        .symlinks = &.{.{ .name = "bin", .target = "usr/bin" }},
+    });
+    var rootfs_hash: [64]u8 = undefined;
+    const root = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{.{ .name = "runtime", .digest = rootfs.toReapi(&rootfs_hash) }},
+        .symlinks = &.{.{ .name = "alias", .target = "runtime" }},
+    });
+    try std.testing.expectError(error.InputRootfsNotDirectory, prepareInputRootfs(std.testing.io, std.testing.allocator, store, root, work, "alias", null));
+    try std.testing.expectError(error.InputRootfsNotDirectory, prepareInputRootfs(std.testing.io, std.testing.allocator, store, root, work, "missing", null));
+    try prepareInputRootfs(std.testing.io, std.testing.allocator, store, root, work, "runtime", null);
+    var buffer: [1024]u8 = undefined;
+    const length = try work.readLink(std.testing.io, "bin", &buffer);
+    try std.testing.expectEqualStrings("workspace/runtime/bin", buffer[0..length]);
+    for ([_][]const u8{ "dev", "proc", "tmp", "workspace" }) |name| {
+        var directory = try work.openDir(std.testing.io, name, .{ .follow_symlinks = false });
+        directory.close(std.testing.io);
+    }
 }
 
 test "execution platform falls back to command platform" {

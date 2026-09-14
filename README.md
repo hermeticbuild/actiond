@@ -105,6 +105,29 @@ into a Linux toolchain automatically.
 
 ## Runtime Selection
 
+An action can supply its own runtime as a directory in its REAPI input tree:
+
+```python
+exec_properties = {"input-rootfs": "path/to/declared/runtime"}
+```
+
+When the path is determined during action analysis (for example a Bazel tree
+artifact), use `input-rootfs-env` instead, naming a declared command environment
+variable containing the path. The two properties are mutually exclusive; missing
+or duplicate variables fail. The environment value participates in the action
+digest just like other declared inputs.
+
+The path is relative to the input root and must traverse directory entries, not
+symlinks. actiond exposes its `bin`, `sbin`, `lib`, `lib64`, `usr`, `etc`, and
+`opt` entries at their usual absolute paths. These entries remain backed by the
+action's declared inputs; actiond does not download or unpack an image. Callers
+must package any OCI image into the input directory before execution.
+
+This replaces the packaged runtime and common `/etc` files for that action and
+cannot be combined with `libc` or `requires-bash`. `/dev`, `/proc`, `/tmp`,
+`/var/tmp`, and `/workspace` retain the executor's existing behavior. Networking,
+privilege restrictions, and seccomp remain unchanged.
+
 The embedded runtime image currently includes:
 
 - `glibc2.31`
