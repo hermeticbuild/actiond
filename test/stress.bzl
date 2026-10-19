@@ -94,6 +94,40 @@ stress_tree = rule(
     },
 )
 
+def _stress_untouched_tree_impl(ctx):
+    # The tool never receives the declared directory, so the action leaves it
+    # exactly as Bazel materialized it in the input root (empty).
+    out_dir = ctx.actions.declare_directory(ctx.label.name + ".tree")
+    out_file = ctx.actions.declare_file(ctx.label.name + ".manifest.txt")
+
+    args = ctx.actions.args()
+    _add_common_args(args, out_file.path, None, 0, ctx.files.srcs, [], False, False, False)
+    ctx.actions.run(
+        executable = ctx.executable.tool,
+        inputs = ctx.files.srcs,
+        outputs = [out_file, out_dir],
+        arguments = [args],
+        env = _stress_env(ctx),
+        execution_requirements = ctx.attr.execution_requirements,
+        mnemonic = "ActiondStressUntouchedTree",
+        progress_message = "Leaving stress tree untouched %{label}",
+    )
+    return DefaultInfo(files = depset([out_file, out_dir]))
+
+stress_untouched_tree = rule(
+    implementation = _stress_untouched_tree_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+        "stress_case": attr.string(),
+        "execution_requirements": attr.string_dict(),
+        "tool": attr.label(
+            allow_single_file = True,
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
 def _stress_symlinks_impl(ctx):
     out_file = ctx.actions.declare_file(ctx.label.name + ".target.txt")
     out_dir = ctx.actions.declare_directory(ctx.label.name + ".target.tree")
@@ -350,6 +384,15 @@ def stress_workload(name, tool):
         trees = [":filesystem_regression"],
     )
     stress_targets.append(":symlink_input_consumer")
+
+    stress_untouched_tree(
+        name = "untouched_output_dir_regression",
+        execution_requirements = {"libc": "glibc2.35"},
+        srcs = [":bare_inputs"],
+        stress_case = "untouched_output_dir_regression",
+        tool = tool,
+    )
+    stress_targets.append(":untouched_output_dir_regression")
 
     stress_tree(
         name = "shared_generated_tree",
