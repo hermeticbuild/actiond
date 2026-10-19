@@ -165,6 +165,17 @@ fn executionPlatform(action: reapi.Action, command: reapi.Command) ?reapi.Platfo
     return command.platform;
 }
 
+fn validateOsFamily(platform: ?reapi.Platform) !void {
+    const value = platform orelse return;
+    for (value.properties) |property| {
+        if (!std.mem.eql(u8, property.name, "OSFamily")) continue;
+        // The REAPI lexicon value is `linux`, but clients commonly send `Linux`.
+        if (property.value.len != 0 and !std.ascii.eqlIgnoreCase(property.value, "linux")) {
+            return error.UnsupportedOsFamily;
+        }
+    }
+}
+
 fn actionMutatesInputs(platform: ?reapi.Platform) bool {
     const value = platform orelse return false;
     for (value.properties) |property| {
@@ -238,6 +249,7 @@ pub fn executeDecodedActionWithOptions(
     try reserveDeclaredOutputs(&output_preflight, command);
     try checkExecutionCancellation(options.cancellation);
     const platform = executionPlatform(action, command);
+    try validateOsFamily(platform);
 
     const input_root_digest = try cas.Digest.fromReapi(action.input_root_digest orelse return error.MissingInputRootDigest);
     const actiondfs_mode: ActiondfsMode = if (actionMutatesInputs(platform))
@@ -2419,6 +2431,49 @@ test "execution platform falls back to command platform" {
         .{ .platform = .{ .properties = &.{.{ .name = "libc", .value = "glibc2.35" }} } },
     );
     try std.testing.expectEqualStrings("glibc2.39", action_platform.?.properties[0].value);
+}
+
+test "validateOsFamily accepts Linux and rejects other OS families" {
+    try validateOsFamily(null);
+    try validateOsFamily(.{});
+    try validateOsFamily(.{ .properties = &.{.{ .name = "OSFamily", .value = "linux" }} });
+    try validateOsFamily(.{ .properties = &.{.{ .name = "OSFamily", .value = "Linux" }} });
+    try validateOsFamily(.{ .properties = &.{.{ .name = "OSFamily", .value = "" }} });
+    try validateOsFamily(.{ .properties = &.{.{ .name = "libc", .value = "glibc2.35" }} });
+    try std.testing.expectError(error.UnsupportedOsFamily, validateOsFamily(.{
+        .properties = &.{.{ .name = "OSFamily", .value = "macos" }},
+    }));
+    try std.testing.expectError(error.UnsupportedOsFamily, validateOsFamily(.{
+        .properties = &.{.{ .name = "OSFamily", .value = "windows" }},
+    }));
+}
+
+test "executeDecodedActionWithOptions rejects non-Linux OSFamily before creating directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+
+    const command_bytes = try reapi.encodeAlloc(std.testing.allocator, reapi.Command{
+        .platform = .{ .properties = &.{.{ .name = "OSFamily", .value = "macos" }} },
+    });
+    defer std.testing.allocator.free(command_bytes);
+    const store = cas.Store.init(cas_dir);
+    const command_digest = try store.putBytes(std.testing.io, command_bytes);
+    var command_hash: [64]u8 = undefined;
+
+    try std.testing.expectError(error.UnsupportedOsFamily, executeDecodedActionWithOptions(
+        std.testing.io,
+        std.testing.allocator,
+        store,
+        work_dir,
+        cas.Digest.fromBytes("action"),
+        .{ .command_digest = command_digest.toReapi(&command_hash) },
+        .{},
+    ));
+    try std.testing.expectError(error.FileNotFound, work_dir.statFile(std.testing.io, "workspace", .{}));
 }
 
 test "actionMutatesInputs parses platform property" {

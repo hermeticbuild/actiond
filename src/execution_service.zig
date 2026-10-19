@@ -211,6 +211,10 @@ fn executionFailureStatus(err: anyerror) ?reapi.Status {
             .code = .internal,
             .message = "action sandbox setup failed",
         },
+        error.UnsupportedOsFamily => .{
+            .code = .failed_precondition,
+            .message = "actiond only executes Linux actions; the action platform requested a different OSFamily",
+        },
         else => null,
     };
 }
@@ -293,6 +297,7 @@ test "execution infrastructure failures become uncached completed operations" {
         .{ .err = error.ExecutionDeadlineExceeded, .code = .deadline_exceeded },
         .{ .err = error.ExecutionCancelled, .code = .cancelled },
         .{ .err = error.SandboxSetupFailed, .code = .internal },
+        .{ .err = error.UnsupportedOsFamily, .code = .failed_precondition },
     };
 
     for (cases) |case| {
