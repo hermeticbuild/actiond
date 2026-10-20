@@ -5,6 +5,7 @@ load("//tools:zig_embedded_assets.bzl", "zig_embedded_assets")
 zig_binary(
     name = "windows-actiond",
     linkopts = [
+        "-flto",
         "-lcomputecore",
         "-lntdll",
         "-lole32",
@@ -14,6 +15,10 @@ zig_binary(
     strip_debug_symbols = True,
     target_compatible_with = ["@platforms//os:windows"],
     visibility = ["//visibility:public"],
+    zigopts = [
+        "-flld",
+        "-flto",
+    ],
     deps = [
         ":embedded_assets",
         "//src:actiond",

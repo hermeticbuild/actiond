@@ -5,10 +5,15 @@ load("//tools:zig_embedded_qemu.bzl", "zig_embedded_qemu")
 
 zig_binary(
     name = "linux-actiond",
+    linkopts = ["-flto"],
     main = "main.zig",
     strip_debug_symbols = True,
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
+    zigopts = [
+        "-flld",
+        "-flto",
+    ],
     deps = [
         ":embedded_assets",
         ":embedded_qemu",
