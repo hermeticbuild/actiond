@@ -9,6 +9,8 @@ pseudo="${output}.pseudo"
 printf '%s\n' \
   "/common/root/etc/hosts F 0 0644 0 0 printf '127.0.0.1 localhost\\n::1 localhost ip6-localhost ip6-loopback\\n'" \
   "/common/root/etc/nsswitch.conf F 0 0644 0 0 printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n'" \
+  "/common/root/etc/passwd F 0 0644 0 0 printf 'root:x:0:0:root:/root:/bin/sh\\nnobody:x:65534:65534:nobody:/:/bin/sh\\n'" \
+  "/common/root/etc/group F 0 0644 0 0 printf 'root:x:0:\\nnogroup:x:65534:\\n'" \
   > "${pseudo}"
 
 append_runtime() {
