@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const action_runner = @import("action_runner.zig");
 
 pub const Error = error{
     MountFailed,
@@ -40,6 +41,10 @@ pub const cas_mount_fstype: [:0]const u8 = "ext4";
 pub const cas_format_cmdline_token = "actiond.format_cas=1";
 pub const cas_device_cmdline_prefix = "actiond.cas_device=";
 pub const cas_mkfs_path = "/sbin/mkfs.ext4";
+pub const cas_mount_data: [:0]const u8 = std.fmt.comptimePrint(
+    "errors=remount-ro,resuid={d}",
+    .{@as(action_runner.RunOptions, .{ .chroot_dir = "" }).sandbox_uid},
+);
 pub const cas_format_device = block_devices[0];
 const cas_mount_flags = std.os.linux.MS.NOSUID |
     std.os.linux.MS.NODEV |
@@ -209,13 +214,12 @@ fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !CasMountAtte
         else => return .unavailable,
     }
 
-    const data: [:0]const u8 = "errors=remount-ro";
     const rc = linux.mount(
         device.ptr,
         cas_mount_target.ptr,
         cas_mount_fstype.ptr,
         cas_mount_flags,
-        @intFromPtr(data.ptr),
+        @intFromPtr(cas_mount_data.ptr),
     );
     switch (linux.errno(rc)) {
         .SUCCESS => {
@@ -238,7 +242,7 @@ fn tryMountCasDevice(stderr: *std.Io.Writer, device: [:0]const u8) !CasMountAtte
 }
 
 fn formatCasDevice(io: std.Io, stderr: *std.Io.Writer, device: [:0]const u8) !void {
-    const argv = [_][]const u8{ cas_mkfs_path, "-F", "-q", "-t", "ext4", device };
+    const argv = [_][]const u8{ cas_mkfs_path, "-F", "-q", "-t", "ext4", "-m", "0", device };
 
     stderr.print("formatting new guest CAS image on {s}\n", .{device}) catch {};
     stderr.flush() catch {};
@@ -349,6 +353,7 @@ test "guest init mount plan stays minimal" {
     try std.testing.expectEqualStrings("/cas", cas_mount_target);
     try std.testing.expectEqualStrings("actiond.format_cas=1", cas_format_cmdline_token);
     try std.testing.expectEqualStrings("/sbin/mkfs.ext4", cas_mkfs_path);
+    try std.testing.expectEqualStrings("errors=remount-ro,resuid=65534", cas_mount_data);
     try std.testing.expectEqualStrings("/dev/vda", cas_format_device);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NOSUID) != 0);
     try std.testing.expect((cas_mount_flags & std.os.linux.MS.NODEV) != 0);
