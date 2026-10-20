@@ -3115,6 +3115,10 @@ static int actiondfs_open_stage_file(struct inode *inode,
 	if ((dir_file->stage_file || dir_file->stage_eof) &&
 	    dir_file->stage_generation == generation)
 		return 0;
+	if (dir_file->stage_file && !dir_file->stage_eof) {
+		dir_file->stage_generation = generation;
+		return 0;
+	}
 	if (dir_file->stage_file || dir_file->stage_eof)
 		actiondfs_reset_stage_file(dir_file);
 	dir_file->stage_generation = generation;

@@ -1096,6 +1096,34 @@ fn exerciseDirectoryIteration(io: std.Io, dir: std.Io.Dir) !void {
         try dir.deleteFile(io, name);
     }
 
+    try dir.createDirPath(io, "delete-during-iteration");
+    {
+        var deleting_dir = try dir.openDir(io, "delete-during-iteration", .{ .iterate = true });
+        defer deleting_dir.close(io);
+        const deletion_count = 1536;
+        for (0..deletion_count) |index| {
+            var name_buffer: [96]u8 = undefined;
+            const name = try std.fmt.bufPrint(
+                &name_buffer,
+                "delete-{d:0>4}-long-directory-entry-for-multiple-getdents-buffers.txt",
+                .{index},
+            );
+            try writeDefaultFile(io, deleting_dir, name, "");
+        }
+
+        var deleting = deleting_dir.iterate();
+        var deleted: usize = 0;
+        while (try deleting.next(io)) |entry| {
+            try deleting_dir.deleteFile(io, entry.name);
+            deleted += 1;
+        }
+        try requireFilesystem(
+            deleted == deletion_count,
+            "directory iteration skipped staged entries while deleting them",
+        );
+    }
+    try dir.deleteDir(io, "delete-during-iteration");
+
     try writeDefaultFile(io, dir, "created-after-rewind.txt", "created after the initial directory listing\n");
     try expectDirectoryEntry(io, dir, "created-after-rewind.txt", .file, true);
 
