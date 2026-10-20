@@ -1211,7 +1211,7 @@ fn exerciseSymlinks(
 
     for (inputs) |input| {
         if ((try root.statFile(io, input, .{})).kind != .file) continue;
-        const absolute_target = try std.fmt.allocPrint(allocator, "/workspace/{s}", .{input});
+        const absolute_target = try std.fmt.allocPrint(allocator, "/execroot/{s}", .{input});
         defer allocator.free(absolute_target);
         try dir.symLink(io, absolute_target, "absolute-input.link", .{});
         try expectSymlink(io, dir, "absolute-input.link", absolute_target);
