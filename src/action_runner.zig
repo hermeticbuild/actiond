@@ -648,6 +648,14 @@ fn forkAction(action: ForkAction) !std.os.linux.pid_t {
     childSyscallName(linux.chroot(action.chroot_dir.ptr), "chroot");
     childSyscallName(linux.chdir("/"), "chdir_root");
     childSyscallName(linux.mount("proc", "/proc", "proc", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, 0), "mount_proc");
+    const pseudo_terminal_mount_data: [:0]const u8 = "newinstance,ptmxmode=0666,mode=0620";
+    childSyscallName(linux.mount(
+        "devpts",
+        "/dev/pts",
+        "devpts",
+        linux.MS.NOSUID | linux.MS.NOEXEC,
+        @intFromPtr(pseudo_terminal_mount_data.ptr),
+    ), "mount_devpts");
     childDropPrivileges(action.sandbox_uid, action.sandbox_gid);
     childSyscallName(linux.chdir(action.cwd.ptr), "chdir");
     childInstallSocketFilter();
