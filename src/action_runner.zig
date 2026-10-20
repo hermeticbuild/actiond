@@ -45,7 +45,7 @@ inline fn runnerTimingNow(io: std.Io) std.Io.Timestamp {
 
 fn actionNamespaceFlags() usize {
     const linux = std.os.linux;
-    return linux.CLONE.NEWNS | linux.CLONE.NEWNET | linux.CLONE.NEWPID;
+    return linux.CLONE.NEWNS | linux.CLONE.NEWNET | linux.CLONE.NEWPID | linux.CLONE.NEWIPC;
 }
 
 fn actionCloneFlags() u32 {
@@ -1637,12 +1637,13 @@ test "ExecutionControl rejects a cancelled action" {
     try std.testing.expectError(error.ExecutionCancelled, execution_control.check(std.testing.io));
 }
 
-test "action clone flags isolate mounts, networking, and action process IDs" {
+test "action clone flags isolate mounts, networking, process IDs, and IPC" {
     const linux = std.os.linux;
     const flags = actionCloneFlags();
     try std.testing.expect((flags & linux.CLONE.NEWNS) != 0);
     try std.testing.expect((flags & linux.CLONE.NEWNET) != 0);
     try std.testing.expect((flags & linux.CLONE.NEWPID) != 0);
+    try std.testing.expect((flags & linux.CLONE.NEWIPC) != 0);
     try std.testing.expectEqual(@as(u32, @intFromEnum(linux.SIG.CHLD)), flags & linux.CSIGNAL);
 }
 
