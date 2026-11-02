@@ -44,7 +44,8 @@ pub fn execute(
             };
             if (cached_entry) |*entry| {
                 defer entry.deinit(allocator);
-                return try completedOperation(allocator, action_digest, entry.result, true);
+                if (entry.result.exit_code == 0)
+                    return try completedOperation(allocator, action_digest, entry.result, true);
             }
         }
     }
@@ -90,7 +91,7 @@ pub fn execute(
 
     var result = try action_executor.actionResultFromOutcomeOwned(allocator, outcome);
     defer result.deinit(allocator);
-    return try publishSuccessfulOperation(
+    return try publishOperation(
         io,
         allocator,
         result_store,
@@ -101,7 +102,7 @@ pub fn execute(
     );
 }
 
-fn publishSuccessfulOperation(
+fn publishOperation(
     io: std.Io,
     allocator: std.mem.Allocator,
     result_store: ?action_cache.Store,
@@ -110,7 +111,7 @@ fn publishSuccessfulOperation(
     do_not_cache: bool,
     options: action_executor.ExecuteOptions,
 ) !CompletedOperation {
-    if (!do_not_cache) {
+    if (!do_not_cache and result.exit_code == 0) {
         if (result_store) |store| {
             if (executionCancelled(options)) {
                 return try completedFailedOperation(
@@ -325,7 +326,7 @@ test "cancelled action results are not written to the ActionCache" {
     const store = action_cache.Store.init(tmp.dir);
     const digest = cas.Digest.fromBytes("cancelled action result");
     var cancellation = std.atomic.Value(bool).init(true);
-    var operation = try publishSuccessfulOperation(
+    var operation = try publishOperation(
         std.testing.io,
         std.testing.allocator,
         store,
@@ -345,4 +346,28 @@ test "cancelled action results are not written to the ActionCache" {
         error.FileNotFound,
         store.get(std.testing.io, std.testing.allocator, digest),
     );
+}
+
+test "failed action results are returned without entering the ActionCache" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = action_cache.Store.init(tmp.dir);
+    for ([_]i32{ 1, 127, 137 }) |exit_code| {
+        const digest = cas.Digest.fromBytes("failed action result");
+        var operation = try publishOperation(
+            std.testing.io,
+            std.testing.allocator,
+            store,
+            digest,
+            .{ .exit_code = exit_code },
+            false,
+            .{},
+        );
+        defer operation.deinit(std.testing.allocator);
+        var reader = protobuf.Reader.init(operation.operation.response.?.value);
+        const response = try reapi.ExecuteResponse.decode(&reader);
+        try std.testing.expectEqual(exit_code, response.result.?.exit_code);
+        try std.testing.expect(!response.cached_result);
+        try std.testing.expectError(error.FileNotFound, store.get(std.testing.io, std.testing.allocator, digest));
+    }
 }
