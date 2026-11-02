@@ -232,22 +232,11 @@ pub const Store = struct {
     }
 
     fn validateExistingBlob(self: Store, io: std.Io, digest: Digest) !void {
-        var path_buffer: [blob_path_len]u8 = undefined;
-        const path = blobSubPath(digest, &path_buffer);
-        const stat = self.root.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
-            error.IsDir,
-            error.NotDir,
-            => return error.FailedPrecondition,
-            else => |e| return e,
-        };
-        if (stat.kind != .file or stat.size != digest.size_bytes) return error.FailedPrecondition;
-    }
-
-    fn requireExistingBlob(self: Store, io: std.Io, digest: Digest) !void {
-        self.validateExistingBlob(io, digest) catch |err| switch (err) {
-            error.FileNotFound => return error.FailedPrecondition,
-            else => |e| return e,
-        };
+        var file = try self.openBlob(io, digest);
+        defer file.close(io);
+        // Interrupted writes may leave correctly sized but zero-filled blobs.
+        if (!(try digestFile(file, digest.size_bytes)).eql(digest))
+            return error.DigestMismatch;
     }
 
     pub fn putFilePromoteWithStat(
@@ -354,7 +343,7 @@ pub const Store = struct {
             putFileStatsAdd(&put_file_promote_existing, 1);
             return digest;
         } else |err| switch (err) {
-            error.FileNotFound => addElapsedNs(&put_file_promote_preexisting_check_ns, preexisting_start, io),
+            error.FileNotFound, error.InvalidDigestSize, error.DigestMismatch => addElapsedNs(&put_file_promote_preexisting_check_ns, preexisting_start, io),
             else => return err,
         }
 
@@ -383,8 +372,19 @@ pub const Store = struct {
                 const rename_ns = elapsedNsSince(rename_start, io);
                 putFileStatsAdd(&put_file_promote_rename_ns, rename_ns);
                 putFileStatsAdd(&put_file_promote_existing_ns, rename_ns);
+                self.validateExistingBlob(io, digest) catch |existing_err| switch (existing_err) {
+                    error.InvalidDigestSize, error.DigestMismatch => {
+                        // The source has been hashed and verified above. Replace the
+                        // invalid cache entry atomically, without exposing a gap.
+                        try src_dir.rename(src_path, self.root, final_path, io);
+                        return digest;
+                    },
+                    else => {
+                        setFdMode(src.handle, original_mode) catch {};
+                        return existing_err;
+                    },
+                };
                 setFdMode(src.handle, original_mode) catch {};
-                try self.requireExistingBlob(io, digest);
                 putFileStatsAdd(&put_file_promote_existing, 1);
                 return digest;
             },
@@ -585,7 +585,10 @@ pub const BlobWriter = struct {
                 self.closed = true;
                 self.store.root.renamePreserve(self.tempPath(), self.store.root, final_path, io) catch |err| switch (err) {
                     error.PathAlreadyExists, error.IsDir, error.NotDir => {
-                        try self.store.requireExistingBlob(io, digest);
+                        self.store.validateExistingBlob(io, digest) catch |existing_err| switch (existing_err) {
+                            error.InvalidDigestSize, error.DigestMismatch => try self.store.root.rename(self.tempPath(), self.store.root, final_path, io),
+                            else => return existing_err,
+                        };
                         self.store.root.deleteFile(io, self.tempPath()) catch {};
                     },
                     else => |e| return e,
@@ -594,7 +597,25 @@ pub const BlobWriter = struct {
             .anonymous_linux => {
                 if (comptime builtin.os.tag != .linux) unreachable;
                 publishAnonymousLinux(self.file.handle, self.store.root.handle, final_path) catch |err| switch (err) {
-                    error.PathAlreadyExists => try self.store.requireExistingBlob(io, digest),
+                    error.PathAlreadyExists => self.store.validateExistingBlob(io, digest) catch |existing_err| switch (existing_err) {
+                        error.InvalidDigestSize, error.DigestMismatch => {
+                            // Give the verified anonymous inode a temporary name, then
+                            // atomically replace the truncated cache entry.
+                            while (true) {
+                                const id = next_temp_id.fetchAdd(1, .monotonic);
+                                const path = try std.fmt.bufPrint(&self.temp_path_buffer, "{s}{d}", .{ temp_path_prefix, id });
+                                publishAnonymousLinux(self.file.handle, self.store.root.handle, path) catch |link_err| switch (link_err) {
+                                    error.PathAlreadyExists => continue,
+                                    else => return link_err,
+                                };
+                                self.temp_path_len = path.len;
+                                self.temp_kind = .named;
+                                break;
+                            }
+                            try self.store.root.rename(self.tempPath(), self.store.root, final_path, io);
+                        },
+                        else => return existing_err,
+                    },
                     else => |e| return e,
                 };
                 self.file.close(io);
@@ -1075,7 +1096,7 @@ test "Store writes known blobs atomically and ignores existing blob" {
     try std.testing.expectError(error.DigestMismatch, store.putKnownBytes(std.testing.io, digest, "jello"));
 }
 
-test "Store refuses to publish over a truncated existing CAS blob" {
+test "Store repairs a truncated existing CAS blob" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1092,12 +1113,11 @@ test "Store refuses to publish over a truncated existing CAS blob" {
         .data = "bad",
     });
 
-    try std.testing.expectError(
-        error.FailedPrecondition,
-        store.putKnownBytes(std.testing.io, digest, payload),
-    );
-    try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(std.testing.io, path, .{})).size);
-    try std.testing.expect(!try store.has(std.testing.io, digest));
+    try store.putKnownBytes(std.testing.io, digest, payload);
+    const actual = try store.readAlloc(std.testing.io, std.testing.allocator, digest);
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings(payload, actual);
+    try std.testing.expect(try store.has(std.testing.io, digest));
 }
 
 test "BlobWriter streams data into CAS" {
@@ -1381,4 +1401,82 @@ test "Store promotes same-filesystem files into CAS" {
         const staged_stat = try stage.statFile(std.testing.io, "out.txt", .{});
         try std.testing.expectEqual(@as(u64, "promote me".len), staged_stat.size);
     }
+}
+
+fn expectCorruptBlobRepair(named: bool, same_size: bool) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+    const payload = "a complete blob after a worker interruption";
+    const digest = Digest.fromBytes(payload);
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    try tmp.dir.createDirPath(std.testing.io, digestParentPath(path));
+    const corrupted = try tmp.dir.createFile(std.testing.io, path, .{});
+    if (same_size) try corrupted.setLength(std.testing.io, payload.len);
+    corrupted.close(std.testing.io);
+    try std.testing.expectEqual(same_size, try store.has(std.testing.io, digest));
+
+    var writer = if (named) BlobWriter{
+        .store = store,
+        .file = try tmp.dir.createFile(std.testing.io, temp_path_prefix ++ "test-repair", .{}),
+        .temp_kind = .named,
+        .temp_path_buffer = undefined,
+        .temp_path_len = (temp_path_prefix ++ "test-repair").len,
+        .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+    } else try store.beginBlobWriter(std.testing.io);
+    if (named) @memcpy(writer.temp_path_buffer[0..writer.temp_path_len], temp_path_prefix ++ "test-repair");
+    defer writer.deinit(std.testing.io);
+    try writer.writeAll(payload);
+    _ = try writer.finish(std.testing.io, digest);
+    const actual = try store.readAlloc(std.testing.io, std.testing.allocator, digest);
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings(payload, actual);
+}
+
+test "BlobWriter replaces a truncated CAS blob with verified bytes" {
+    try expectCorruptBlobRepair(false, false);
+}
+
+test "BlobWriter replaces a truncated CAS blob through the named fallback" {
+    try expectCorruptBlobRepair(true, false);
+}
+
+fn expectPromotedCorruptBlobRepair(same_size: bool) !void {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+    const payload = "verified promoted content";
+    const digest = Digest.fromBytes(payload);
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    try tmp.dir.createDirPath(std.testing.io, digestParentPath(path));
+    const truncated = try tmp.dir.createFile(std.testing.io, path, .{});
+    if (same_size) try truncated.setLength(std.testing.io, payload.len);
+    truncated.close(std.testing.io);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source", .data = payload });
+    const stat = try tmp.dir.statFile(std.testing.io, "source", .{});
+    _ = try store.putFilePromoteWithStat(std.testing.io, tmp.dir, "source", stat);
+    const actual = try store.readAlloc(std.testing.io, std.testing.allocator, digest);
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings(payload, actual);
+}
+
+test "BlobWriter replaces a same-size corrupted CAS blob" {
+    try expectCorruptBlobRepair(false, true);
+}
+
+test "BlobWriter replaces a same-size corrupted CAS blob through the named fallback" {
+    try expectCorruptBlobRepair(true, true);
+}
+
+test "putFilePromote replaces a truncated CAS blob" {
+    try expectPromotedCorruptBlobRepair(false);
+}
+
+test "putFilePromote replaces a same-size corrupted CAS blob" {
+    try expectPromotedCorruptBlobRepair(true);
 }
