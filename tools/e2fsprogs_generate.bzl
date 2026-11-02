@@ -1,20 +1,18 @@
 """Hermetic e2fsprogs source generation actions."""
 
-
 def _e2fsprogs_generate_impl(ctx):
     args = ctx.actions.args()
-    args.add(ctx.attr.mode)
-    args.add(ctx.outputs.out)
-    args.add(ctx.executable._gawk)
+    executable = ctx.executable._capture
     if ctx.attr.mode == "crc32c-table":
-        args.add(ctx.executable.crc32c_generator)
+        args.add_all(["-", ctx.outputs.out, ctx.executable.crc32c_generator])
     elif ctx.attr.mode == "error-table":
-        args.add(ctx.file.awk)
-        args.add(ctx.attr.output_function)
+        executable = ctx.executable._gawk
+        args.add_all(["-f", ctx.file.awk])
+        args.add("outfile=" + ctx.outputs.out.path)
+        args.add("outfn=" + ctx.attr.output_function)
         args.add(ctx.file.input)
     elif ctx.attr.mode == "default-profile":
-        args.add(ctx.file.awk)
-        args.add(ctx.file.input)
+        args.add_all([ctx.file.input, ctx.outputs.out, ctx.executable._gawk, "-f", ctx.file.awk])
     else:
         fail("unsupported e2fsprogs generation mode: %s" % ctx.attr.mode)
 
@@ -30,12 +28,11 @@ def _e2fsprogs_generate_impl(ctx):
 
     ctx.actions.run(
         arguments = [args],
-        executable = ctx.executable.runner,
+        executable = executable,
         inputs = inputs,
         outputs = [ctx.outputs.out],
         tools = tools,
     )
-
 
 e2fsprogs_generate = rule(
     implementation = _e2fsprogs_generate_impl,
@@ -51,6 +48,6 @@ e2fsprogs_generate = rule(
         "mode": attr.string(mandatory = True),
         "out": attr.output(mandatory = True),
         "output_function": attr.string(),
-        "runner": attr.label(cfg = "exec", executable = True, mandatory = True),
+        "_capture": attr.label(default = Label("//tools:capture"), cfg = "exec", executable = True),
     },
 )
