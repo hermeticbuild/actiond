@@ -49,7 +49,12 @@ pub const Machine = struct {
         if (options.cpu_count == 0 or options.cpu_count > max_vcpus or options.memory_mib == 0) return error.InvalidVmConfiguration;
 
         const accelerator = if (std.mem.eql(u8, options.target_arch, "x86_64")) "kvm,kernel-irqchip=on" else "kvm";
-        const cas_queue_count = @min(options.cpu_count, max_cas_queues);
+        // Multiple CAS queues can stall concurrent I/O with the embedded x86
+        // microvm. Keep disk I/O on one queue without limiting guest CPUs.
+        const cas_queue_count = if (std.mem.eql(u8, options.target_arch, "x86_64"))
+            1
+        else
+            @min(options.cpu_count, max_cas_queues);
         const guest_cid = options.guest_cid orelse try randomGuestCid(io);
         const memory = try std.fmt.allocPrint(allocator, "{d}M", .{options.memory_mib});
         defer allocator.free(memory);
