@@ -251,7 +251,7 @@ pub fn executeDecodedActionWithOptions(
     const platform = executionPlatform(action, command);
     try validateOsFamily(platform);
 
-    const input_root_digest = try cas.Digest.fromReapi(action.input_root_digest orelse return error.MissingInputRootDigest);
+    var input_root_digest = try cas.Digest.fromReapi(action.input_root_digest orelse return error.MissingInputRootDigest);
     const actiondfs_mode: ActiondfsMode = if (actionMutatesInputs(platform))
         .actiondfs_overlay
     else
@@ -267,6 +267,22 @@ pub fn executeDecodedActionWithOptions(
         if (actiondfs_mode == .actiondfs_strict) &input_output_directories else null,
         options.cancellation,
     );
+    // Empty directories Bazel pre-creates for declared outputs belong to the
+    // writable stage. Keeping them in the immutable lower tree prevents actions
+    // from removing and recreating their own outputs (for example, foreign_cc).
+    if (input_output_directories.items.len != 0) {
+        var validator = OutputParentValidator{
+            .io = io,
+            .allocator = allocator,
+            .store = store,
+            .root_digest = input_root_digest,
+            .cancellation = options.cancellation,
+        };
+        defer validator.deinit();
+        for (input_output_directories.items) |path| {
+            input_root_digest = try validator.omitEmptyOutputDirectory(input_root_digest, path);
+        }
+    }
     try checkExecutionCancellation(options.cancellation);
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2018,6 +2034,42 @@ const OutputParentValidator = struct {
         return &entry.value_ptr.directory;
     }
 
+    fn omitEmptyOutputDirectory(self: *OutputParentValidator, digest: cas.Digest, path: []const u8) anyerror!cas.Digest {
+        // Copy the descriptor: recursive cache lookups can move map entries,
+        // while the directory's owned arrays remain valid until deinit.
+        const directory = (try self.getDirectory(digest)).*;
+        const slash = std.mem.indexOfScalar(u8, path, '/');
+        const name = path[0 .. slash orelse path.len];
+        const child = findInputDirectoryEntry(reapi.DirectoryNode, directory.directories, name) orelse return digest;
+        const child_digest = try cas.Digest.fromReapi(child.digest orelse return error.MissingInputDirectoryDigest);
+        var replacement: ?cas.Digest = null;
+        if (slash) |index| {
+            replacement = try self.omitEmptyOutputDirectory(child_digest, path[index + 1 ..]);
+            if (std.meta.eql(replacement.?, child_digest)) return digest;
+        } else {
+            const output_directory = (try self.getDirectory(child_digest)).*;
+            if (output_directory.files.len != 0 or output_directory.directories.len != 0 or output_directory.symlinks.len != 0)
+                return digest;
+        }
+
+        var children: std.ArrayListUnmanaged(reapi.DirectoryNode) = .empty;
+        defer children.deinit(self.allocator);
+        var replacement_hash: [64]u8 = undefined;
+        for (directory.directories) |entry| {
+            if (!std.mem.eql(u8, entry.name, name)) {
+                try children.append(self.allocator, entry);
+            } else if (replacement) |new_digest| {
+                var updated = entry;
+                updated.digest = new_digest.toReapi(&replacement_hash);
+                try children.append(self.allocator, updated);
+            }
+        }
+        var rewritten = directory;
+        rewritten.directories = children.items;
+        try checkExecutionCancellation(self.cancellation);
+        return putProto(self.io, self.allocator, self.store, rewritten);
+    }
+
     // Rejects outputs whose parents are input files or symlinks, and reports
     // whether the output path itself is a directory in the input root.
     fn validate(self: *OutputParentValidator, path: []const u8) !bool {
@@ -2048,7 +2100,8 @@ const OutputParentValidator = struct {
 // directories (bazelbuild/bazel#15366). Strict actiondfs collects outputs from
 // the stage only, so an output directory the action never writes into would be
 // reported missing; mirror those input directories into the stage before
-// execution.
+// execution. Empty output directories are omitted from the immutable input
+// tree so the action can also remove and recreate them.
 fn prepareInputOutputDirectoriesWithCancellation(
     io: std.Io,
     stage_root: std.Io.Dir,
@@ -3663,6 +3716,50 @@ test "validateOutputParentsAgainstInputs reports output paths that are input dir
     );
     try std.testing.expectEqual(@as(usize, 1), input_output_directories.items.len);
     try std.testing.expectEqualStrings("pkg/tree", input_output_directories.items[0]);
+}
+
+test "declared empty output directories are removed from immutable inputs only" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cas_dir = try tmp.dir.createDirPathOpen(std.testing.io, "cas", .{});
+    defer cas_dir.close(std.testing.io);
+    const store = cas.Store.init(cas_dir);
+    const empty_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{});
+    const file_digest = try store.putBytes(std.testing.io, "input");
+    var file_hash: [64]u8 = undefined;
+    const source_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .files = &.{.{ .name = "input.txt", .digest = file_digest.toReapi(&file_hash) }},
+    });
+    var empty_hash: [64]u8 = undefined;
+    var source_hash: [64]u8 = undefined;
+    const pkg_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{
+            .{ .name = "keep", .digest = empty_digest.toReapi(&empty_hash) },
+            .{ .name = "source", .digest = source_digest.toReapi(&source_hash) },
+            .{ .name = "tree", .digest = empty_digest.toReapi(&empty_hash) },
+        },
+    });
+    var pkg_hash: [64]u8 = undefined;
+    const root_digest = try putProto(std.testing.io, std.testing.allocator, store, reapi.Directory{
+        .directories = &.{.{ .name = "pkg", .digest = pkg_digest.toReapi(&pkg_hash) }},
+    });
+    var validator = OutputParentValidator{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .store = store,
+        .root_digest = root_digest,
+    };
+    defer validator.deinit();
+    const rewritten = try validator.omitEmptyOutputDirectory(root_digest, "pkg/tree");
+    try std.testing.expect(!std.meta.eql(root_digest, rewritten));
+    validator.root_digest = rewritten;
+    try std.testing.expect(!try validator.validate("pkg/tree"));
+    try std.testing.expect(try validator.validate("pkg/keep"));
+    try std.testing.expect(try validator.validate("pkg/source"));
+    try std.testing.expect(std.meta.eql(rewritten, try validator.omitEmptyOutputDirectory(rewritten, "pkg/source")));
+    try std.testing.expect(std.meta.eql(rewritten, try validator.omitEmptyOutputDirectory(rewritten, "pkg/missing")));
+    validator.root_digest = root_digest;
+    try std.testing.expect(try validator.validate("pkg/tree"));
 }
 
 test "validateOutputParentsAgainstInputs ignores legacy output conflicts when output_paths is present" {
