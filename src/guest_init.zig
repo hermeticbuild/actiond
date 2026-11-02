@@ -3,6 +3,7 @@ const std = @import("std");
 
 pub const Error = error{
     MountFailed,
+    ResourceLimitFailed,
     UnsupportedHost,
 };
 
@@ -55,6 +56,7 @@ const CasMountAttempt = enum {
 
 pub fn run(io: std.Io) !void {
     if (comptime builtin.os.tag != .linux) return error.UnsupportedHost;
+    try configureOpenFileLimit();
 
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &buffer);
@@ -62,6 +64,12 @@ pub fn run(io: std.Io) !void {
 
     for (mounts) |mount_spec| {
         try mount(stderr, mount_spec);
+    }
+    // This is the VM's own device, never the host's /dev/kvm. Actions run
+    // without root privileges but may launch nested VMs when KVM is available.
+    switch (std.os.linux.errno(std.os.linux.chmod("/dev/kvm", 0o666))) {
+        .SUCCESS, .NOENT => {},
+        else => return error.DevicePermissionFailed,
     }
     var cmdline_buffer: [4096]u8 = undefined;
     const cmdline = std.Io.Dir.cwd().readFile(io, "/proc/cmdline", &cmdline_buffer) catch "";
@@ -73,6 +81,19 @@ pub fn run(io: std.Io) !void {
     stderr.flush() catch {};
 
     return std.process.replace(io, .{ .argv = &worker_argv });
+}
+
+// PID 1 inherits a 1024-file soft limit. Concurrent REAPI streams and CAS
+// operations need more descriptors; keep a larger inherited limit if provided.
+fn configureOpenFileLimit() !void {
+    var limit: std.os.linux.rlimit = undefined;
+    if (std.os.linux.errno(std.os.linux.getrlimit(.NOFILE, &limit)) != .SUCCESS)
+        return error.ResourceLimitFailed;
+    if (limit.cur >= 65_536) return;
+    limit.cur = 65_536;
+    limit.max = @max(limit.max, limit.cur);
+    if (std.os.linux.errno(std.os.linux.setrlimit(.NOFILE, &limit)) != .SUCCESS)
+        return error.ResourceLimitFailed;
 }
 
 fn mountCasStore(io: std.Io, stderr: *std.Io.Writer, format_if_needed: bool, cas_device: [:0]const u8) !void {

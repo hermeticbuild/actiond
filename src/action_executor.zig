@@ -80,6 +80,9 @@ pub const RuntimeMountCache = struct {
 };
 
 pub const ExecuteOptions = struct {
+    // VM workers may expose their guest-local KVM device for nested test VMs.
+    // Native host executors keep this disabled.
+    allow_kvm: bool = false,
     runtime_root_path: ?[]const u8 = null,
     cas_blob_root_path: ?[]const u8 = null,
     actiondfs_stage_root_path: ?[]const u8 = null,
@@ -361,7 +364,7 @@ pub fn executeDecodedActionWithOptions(
         return error.MissingRuntimeMountCache;
     }
     try checkExecutionCancellation(options.cancellation);
-    try appendDevNullMount(io, allocator, work_root, work_root_path, &bind_mounts);
+    try appendDevMounts(io, allocator, work_root, work_root_path, &bind_mounts, options.allow_kvm);
     try checkExecutionCancellation(options.cancellation);
 
     const input_fetch_completed_wall = timestampNow(io);
@@ -2176,26 +2179,38 @@ fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
     try chroot_root.createDirPath(io, "var/tmp");
 }
 
-fn appendDevNullMount(
+fn appendDevMounts(
     io: std.Io,
     allocator: std.mem.Allocator,
     chroot_dir: std.Io.Dir,
     chroot_path: []const u8,
     bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+    allow_kvm: bool,
 ) !void {
-    try chroot_dir.writeFile(io, .{
-        .sub_path = "dev/null",
-        .data = "",
-    });
-    const source = try allocator.dupeZ(u8, "/dev/null");
-    errdefer allocator.free(source);
-    const target = try std.fmt.allocPrintSentinel(allocator, "{s}/dev/null", .{chroot_path}, 0);
-    errdefer allocator.free(target);
-    try bind_mounts.append(allocator, .{
-        .source = source,
-        .target = target,
-        .read_only = false,
-    });
+    for ([_][]const u8{ "null", "zero", "kvm" }) |name| {
+        if (std.mem.eql(u8, name, "kvm")) {
+            if (!allow_kvm) continue;
+            // KVM may be unavailable on hosts without nested virtualization.
+            _ = std.Io.Dir.cwd().statFile(io, "/dev/kvm", .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+        }
+        var placeholder_buffer: [32]u8 = undefined;
+        try chroot_dir.writeFile(io, .{
+            .sub_path = try std.fmt.bufPrint(&placeholder_buffer, "dev/{s}", .{name}),
+            .data = "",
+        });
+        const source = try std.fmt.allocPrintSentinel(allocator, "/dev/{s}", .{name}, 0);
+        errdefer allocator.free(source);
+        const target = try std.fmt.allocPrintSentinel(allocator, "{s}/dev/{s}", .{ chroot_path, name }, 0);
+        errdefer allocator.free(target);
+        try bind_mounts.append(allocator, .{
+            .source = source,
+            .target = target,
+            .read_only = false,
+        });
+    }
 }
 
 fn isExecutable(stat: std.Io.Dir.Stat) bool {
@@ -2453,6 +2468,31 @@ fn putProto(
     const bytes = try reapi.encodeAlloc(allocator, value);
     defer allocator.free(bytes);
     return try store.putBytes(io, bytes);
+}
+
+test "action chroot provides null and zero devices" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareChrootBaseDirs(std.testing.io, tmp.dir);
+    var mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
+    defer {
+        for (mounts.items) |mount| {
+            std.testing.allocator.free(mount.source);
+            std.testing.allocator.free(mount.target);
+        }
+        mounts.deinit(std.testing.allocator);
+    }
+    try appendDevMounts(std.testing.io, std.testing.allocator, tmp.dir, "/action", &mounts, false);
+    try std.testing.expectEqual(@as(usize, 2), mounts.items.len);
+    for (mounts.items, [_][]const u8{ "null", "zero" }) |mount, name| {
+        var source_buffer: [32]u8 = undefined;
+        var target_buffer: [32]u8 = undefined;
+        var placeholder_buffer: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&source_buffer, "/dev/{s}", .{name}), mount.source);
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&target_buffer, "/action/dev/{s}", .{name}), mount.target);
+        try std.testing.expect(!mount.read_only);
+        _ = try tmp.dir.statFile(std.testing.io, try std.fmt.bufPrint(&placeholder_buffer, "dev/{s}", .{name}), .{});
+    }
 }
 
 test "libc runtime platform property accepts pinned runtimes" {

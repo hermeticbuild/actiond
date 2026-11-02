@@ -41,6 +41,7 @@ pub fn run(io: std.Io) !void {
     defer cas_presence_index.deinit(io, allocator);
 
     const execution_options = try action_executor.prepareExecuteOptions(io, allocator, cas.Store.initReady(cas_dir), .{
+        .allow_kvm = true,
         .runtime_root_path = "/runtimes",
         .cas_blob_root_path = guest_cas_blob_root_path,
         .actiondfs_stage_root_path = guest_actiondfs_stage_root_path,
