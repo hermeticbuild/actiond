@@ -747,6 +747,30 @@ fn createParentDirs(io: std.Io, root: std.Io.Dir, path: []const u8) !void {
     try root.createDirPath(io, path[0..slash]);
 }
 
+fn exerciseUnixSocket(io: std.Io, root: std.Io.Dir) !void {
+    if (@import("builtin").os.tag != .linux) return;
+    const linux = std.os.linux;
+    const socket_name = "actiond-fs-regression.sock";
+    var addr: linux.sockaddr.un = .{ .path = @splat(0) };
+    @memcpy(addr.path[0..socket_name.len], socket_name);
+    const server_rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    try requireFilesystem(linux.errno(server_rc) == .SUCCESS, "creating Unix socket failed");
+    const server: i32 = @intCast(server_rc);
+    defer _ = linux.close(server);
+    try requireFilesystem(linux.errno(linux.bind(server, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) == .SUCCESS, "binding pathname Unix socket failed");
+    defer root.deleteFile(io, socket_name) catch {};
+    try expectDirectoryEntry(io, root, socket_name, .unix_domain_socket, true);
+    try requireFilesystem(linux.errno(linux.listen(server, 1)) == .SUCCESS, "listening on Unix socket failed");
+    const client_rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    try requireFilesystem(linux.errno(client_rc) == .SUCCESS, "creating Unix client failed");
+    const client: i32 = @intCast(client_rc);
+    defer _ = linux.close(client);
+    try requireFilesystem(linux.errno(linux.connect(client, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) == .SUCCESS, "connecting to pathname Unix socket failed");
+    const accepted = linux.accept(server, null, null);
+    try requireFilesystem(linux.errno(accepted) == .SUCCESS, "accepting Unix socket failed");
+    _ = linux.close(@intCast(accepted));
+}
+
 fn exerciseFilesystem(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -758,6 +782,7 @@ fn exerciseFilesystem(
         return filesystemFailure("filesystem output path did not include an output parent");
     var iterable_root = try root.openDir(io, ".", .{ .iterate = true });
     defer iterable_root.close(io);
+    try exerciseUnixSocket(io, iterable_root);
     try requireSandboxOwnership(
         iterable_root.handle,
         "staged workspace root did not preserve backing filesystem ownership",
@@ -780,6 +805,7 @@ fn exerciseFilesystem(
     try exerciseFileMetadata(io, dir);
     try exerciseDirectoryIteration(io, dir);
     try exerciseLinkCounts(io, dir);
+    try exerciseLargeSparseFile(io, dir);
     try exerciseSymlinks(io, allocator, root, dir, inputs);
     try exerciseImmutableInputAuthorization(io, allocator, root, inputs);
     try syncDirectory(dir);
@@ -1128,7 +1154,53 @@ fn expectDirectoryEntry(
     try requireFilesystem(found == expected_present, "rewound directory listing did not reflect a mutation");
 }
 
+// Reopening a disk image must retain large-file support in the backing open.
+// Keep the regression sparse and remove it before uploading action outputs.
+fn exerciseLargeSparseFile(io: std.Io, dir: std.Io.Dir) !void {
+    const size: u64 = 5 * 1024 * 1024 * 1024;
+    {
+        var file = try dir.createFile(io, "large-sparse.img", .{ .read = true });
+        defer file.close(io);
+        try file.setLength(io, size);
+    }
+    defer dir.deleteFile(io, "large-sparse.img") catch {};
+    var file = try dir.openFile(io, "large-sparse.img", .{ .mode = .read_write });
+    defer file.close(io);
+    try requireFilesystem((try file.stat(io)).size == size, "reopening a sparse disk image lost its size");
+    try file.writePositionalAll(io, "X", size - 1);
+    var tail: [1]u8 = undefined;
+    try requireFilesystem(try file.readPositionalAll(io, &tail, size - 1) == 1 and tail[0] == 'X', "large-file positional I/O failed");
+}
+
 fn exerciseLinkCounts(io: std.Io, dir: std.Io.Dir) !void {
+    var linked = try dir.createFile(io, "hardlink-original.txt", .{ .read = true });
+    defer linked.close(io);
+    try linked.writeStreamingAll(io, "linked payload\n");
+    const linked_inode = (try linked.stat(io)).inode;
+    try dir.hardLink("hardlink-original.txt", dir, "hardlink-alias.txt", io, .{});
+    try requireFilesystem((try linked.stat(io)).nlink == 2, "hard link did not increment the shared inode link count");
+    try requireFilesystem((try dir.statFile(io, "hardlink-alias.txt", .{})).inode == linked_inode, "hard link created a different inode");
+    try dir.deleteFile(io, "hardlink-original.txt");
+    try requireFilesystem((try linked.stat(io)).nlink == 1, "unlinking one hard link did not preserve the other link");
+    {
+        var alias = try dir.openFile(io, "hardlink-alias.txt", .{ .mode = .read_write });
+        defer alias.close(io);
+        try alias.writeStreamingAll(io, "shared payload\n");
+    }
+    var linked_buffer: [32]u8 = undefined;
+    const linked_size = try linked.readPositionalAll(io, &linked_buffer, 0);
+    try requireFilesystem(std.mem.eql(u8, linked_buffer[0..linked_size], "shared payload\n"), "writing a hard link did not update the original open file");
+    try dir.hardLink("hardlink-alias.txt", dir, "hardlink-last.txt", io, .{});
+    var replacement = try dir.createFile(io, "hardlink-replacement.txt", .{ .read = true });
+    defer replacement.close(io);
+    try dir.rename("hardlink-replacement.txt", dir, "hardlink-alias.txt", io);
+    try requireFilesystem((try linked.stat(io)).nlink == 1, "rename replacement removed the remaining hard link");
+    try dir.rename("hardlink-last.txt", dir, "hardlink-renamed.txt", io);
+    try requireFilesystem((try dir.statFile(io, "hardlink-renamed.txt", .{})).inode == linked_inode, "renaming a hard link changed its inode");
+    try dir.deleteFile(io, "hardlink-renamed.txt");
+    try requireFilesystem((try linked.stat(io)).nlink == 0, "unlinking the last hard link did not clear the open file link count");
+    try dir.deleteFile(io, "hardlink-alias.txt");
+
     var unlinked = try dir.createFile(io, "unlink-open.txt", .{ .read = true });
     defer unlinked.close(io);
     try requireFilesystem((try unlinked.stat(io)).nlink == 1, "new staged file did not report one link");
@@ -1258,6 +1330,12 @@ fn exerciseImmutableInputAuthorization(
         if ((try root.statFile(io, input, .{})).kind != .file) continue;
         var file = try root.openFile(io, input, .{});
         defer file.close(io);
+        if (root.hardLink(input, root, "immutable-hardlink-rejected", io, .{})) |_| {
+            return filesystemFailure("hard link unexpectedly exposed an immutable input");
+        } else |err| switch (err) {
+            error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => {},
+            else => return err,
+        }
         switch (std.os.linux.errno(linux.fchmod(file.handle, 0o600))) {
             .PERM, .ACCES, .ROFS => {},
             .SUCCESS => return filesystemFailure("chmod unexpectedly changed an immutable input"),

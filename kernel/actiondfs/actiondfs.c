@@ -606,6 +606,7 @@ out_drop_write:
 	return err;
 }
 
+/* Returns a borrowed path, held by sbi and the directory node. */
 static int actiondfs_ensure_stage_parent_path(struct actiondfs_sb_info *sbi,
 					      struct actiondfs_node *node,
 					      struct path *path)
@@ -1167,7 +1168,7 @@ static struct file *actiondfs_open_backing_cas_blob(struct actiondfs_sb_info *sb
 		}
 
 		open_start = actiondfs_stat_time_start();
-		file = backing_file_open(user_path, O_RDONLY, &real_path,
+		file = backing_file_open(user_path, O_RDONLY | O_LARGEFILE, &real_path,
 					 current_cred());
 		actiondfs_stat_add_elapsed(ACTIONDFS_STAT_BLOB_OPEN_BACKING_FILE_NS,
 					   open_start);
@@ -1226,7 +1227,8 @@ static struct file *actiondfs_open_staged_backing(struct actiondfs_sb_info *sbi,
 	}
 
 	phase_start = actiondfs_stat_time_start();
-	file = backing_file_open(file_user_path(actiondfs_file), flags,
+	/* Kernel backing opens bypass the syscall's force_o_largefile(). */
+	file = backing_file_open(file_user_path(actiondfs_file), flags | O_LARGEFILE,
 				 &real_path, current_cred());
 	actiondfs_stat_add_elapsed(ACTIONDFS_STAT_STAGE_BACKING_OPEN_FILE_NS,
 				   phase_start);
@@ -2301,12 +2303,17 @@ static void actiondfs_init_inode(struct inode *inode,
 		inode->i_fop = &actiondfs_dir_fops;
 		inode->i_opflags |= IOP_LOOKUP;
 		set_nlink(inode, 2);
+	} else if (S_ISFIFO(node->mode) || S_ISSOCK(node->mode)) {
+		init_special_inode(inode, node->mode, 0);
+		inode->i_op = &actiondfs_file_iops;
 	} else {
 		inode->i_op = &actiondfs_file_iops;
 		inode->i_fop = &actiondfs_file_fops;
 		inode->i_opflags |= IOP_NOFOLLOW;
 		i_size_write(inode, node->size);
 	}
+	if (node->origin == ACTIONDFS_NODE_STAGED && node->stage_dentry)
+		set_nlink(inode, READ_ONCE(d_inode(node->stage_dentry)->i_nlink));
 	inode->i_opflags |= IOP_FASTPERM;
 }
 
@@ -2456,6 +2463,8 @@ static struct inode *actiondfs_lookup_staged_inode(struct inode *dir,
 		if (err)
 			goto out_error;
 		mode = S_IFLNK | 0777;
+	} else if (S_ISFIFO(mode) || S_ISSOCK(mode)) {
+		/* Action-local IPC nodes live only in the writable stage. */
 	} else {
 		goto out_negative;
 	}
@@ -2637,6 +2646,10 @@ static int actiondfs_create_staged_child(struct inode *dir,
 				  d_inode(parent_path.dentry), real_dentry,
 				  target);
 		inode_unlock(d_inode(parent_path.dentry));
+	} else if (S_ISFIFO(mode) || S_ISSOCK(mode)) {
+		err = vfs_mknod(mnt_idmap(parent_path.mnt),
+				d_inode(parent_path.dentry), real_dentry, mode, 0);
+		inode_unlock(d_inode(parent_path.dentry));
 	} else {
 		err = vfs_create(mnt_idmap(parent_path.mnt),
 				 d_inode(parent_path.dentry), real_dentry,
@@ -2674,6 +2687,17 @@ static int actiondfs_create(struct mnt_idmap *idmap, struct inode *dir,
 	actiondfs_stat_inc(err ? ACTIONDFS_STAT_STAGE_CREATE_FAILURES :
 			  ACTIONDFS_STAT_STAGE_CREATE_SUCCESS);
 	return err;
+}
+
+static int actiondfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+			  struct dentry *dentry, umode_t mode, dev_t dev)
+{
+	if (!actiondfs_sbi(dir->i_sb)->stage_path.dentry)
+		return -EROFS;
+	/* Device nodes must never expose guest devices to an action. */
+	if (!S_ISFIFO(mode) && !S_ISSOCK(mode))
+		return -EPERM;
+	return actiondfs_create_staged_child(dir, dentry, mode, NULL, false);
 }
 
 static int actiondfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
@@ -2734,15 +2758,68 @@ static int actiondfs_remove_staged_child(struct inode *dir,
 	}
 	actiondfs_stage_unlock_child(&parent_path, real_dentry);
 	if (!err) {
-		clear_nlink(inode);
-		if (directory)
+		if (directory) {
+			clear_nlink(inode);
 			drop_nlink(dir);
+		} else {
+			drop_nlink(inode);
+		}
 		actiondfs_note_stage_change(parent);
 	}
 out_drop_write:
 	mnt_drop_write(parent_path.mnt);
 out_put_path:
 	path_put(&parent_path);
+	return err;
+}
+
+static int actiondfs_link(struct dentry *old_dentry, struct inode *dir,
+			  struct dentry *dentry)
+{
+	struct inode *inode = d_inode(old_dentry);
+	struct actiondfs_node *node = inode->i_private;
+	struct actiondfs_node *parent = dir->i_private;
+	struct actiondfs_sb_info *sbi = actiondfs_sbi(dir->i_sb);
+	struct path parent_path;
+	struct dentry *real_old;
+	struct dentry *real_new;
+	int err;
+
+	/* Never expose a writable alias of an immutable CAS input. */
+	if (node->origin != ACTIONDFS_NODE_STAGED)
+		return -EROFS;
+	/* Use the held inode's dentry, even after another alias was unlinked. */
+	real_old = READ_ONCE(node->stage_dentry);
+	if (!real_old)
+		return -ENOENT;
+	dget(real_old);
+	err = actiondfs_ensure_stage_parent_path(sbi, parent, &parent_path);
+	if (err)
+		goto out_put_old;
+	err = mnt_want_write(parent_path.mnt);
+	if (err)
+		goto out_put_old;
+	err = actiondfs_stage_lookup_child(&parent_path, dentry->d_name.name,
+					   dentry->d_name.len, &real_new);
+	if (err)
+		goto out_drop_write;
+	if (d_inode(real_new))
+		err = -EEXIST;
+	else
+		err = vfs_link(real_old, mnt_idmap(parent_path.mnt),
+				 d_inode(parent_path.dentry), real_new, NULL);
+	actiondfs_stage_unlock_child(&parent_path, real_new);
+	if (!err) {
+		inc_nlink(inode);
+		inode_set_ctime_current(inode);
+		ihold(inode);
+		d_instantiate(dentry, inode);
+		actiondfs_note_stage_change(parent);
+	}
+out_drop_write:
+	mnt_drop_write(parent_path.mnt);
+out_put_old:
+	dput(real_old);
 	return err;
 }
 
@@ -2870,8 +2947,12 @@ static int actiondfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	rd.flags = flags;
 	err = vfs_rename(&rd);
 	if (!err) {
-		if (new_node)
-			clear_nlink(d_inode(new_dentry));
+		if (new_node && new_node != old_node) {
+			if (S_ISDIR(new_node->mode))
+				clear_nlink(d_inode(new_dentry));
+			else
+				drop_nlink(d_inode(new_dentry));
+		}
 		if (S_ISDIR(old_node->mode)) {
 			if (old_dir != new_dir) {
 				drop_nlink(old_dir);
@@ -3351,6 +3432,8 @@ static const struct file_operations actiondfs_file_fops = {
 static const struct inode_operations actiondfs_dir_iops = {
 	.lookup = actiondfs_lookup,
 	.create = actiondfs_create,
+	.mknod = actiondfs_mknod,
+	.link = actiondfs_link,
 	.symlink = actiondfs_symlink,
 	.mkdir = actiondfs_mkdir,
 	.unlink = actiondfs_unlink,
