@@ -162,13 +162,28 @@ use_repo(
 glibc_deb_runtime = use_repo_rule("//runtimes:glibc_runtime_repo.bzl", "glibc_deb_runtime")
 shell_deb_runtime = use_repo_rule("//runtimes:shell_runtime_repo.bzl", "shell_deb_runtime")
 
+# Each glibc runtime also carries libgcc-s1, libstdc++6 and zlib1g from the same Ubuntu
+# release, so common prebuilt toolchains run: OpenJDK's launcher (libjli.so) and libzip.so
+# link the system libz, and C++ tools such as rules_java's ijar/singlejar link
+# libstdc++/libgcc_s.
+
 glibc_deb_runtime(
     name = "glibc_2_31_aarch64",
     arch = "aarch64",
     interpreters = ["/lib/ld-linux-aarch64.so.1"],
     libc = "glibc2.31",
-    sha256s = ["4ff60d84ad78f3aa598297dc6966549fa6489f57599f197562ad91547f388da0"],
-    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_arm64.deb"],
+    sha256s = [
+        "4ff60d84ad78f3aa598297dc6966549fa6489f57599f197562ad91547f388da0",
+        "9638c0a04a540175e34314f51bc3c5709859c6f7690cb16f2deccbf8f5f1ecc6",
+        "622193725b4cd8775dd7a42d7532e6e8f06ccb0095bd0fbf70776242cd8342f3",
+        "2c5f4ba1539a6126f0f04a07bcf2dd920c9505eb4afc7aefcec6f27d0a397578",
+    ],
+    urls = [
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-10/libgcc-s1_10.5.0-1ubuntu1~20.04_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-10/libstdc++6_10.5.0-1ubuntu1~20.04_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu1.5_arm64.deb",
+    ],
 )
 
 shell_deb_runtime(
@@ -200,8 +215,18 @@ glibc_deb_runtime(
     arch = "x86_64",
     interpreters = ["/lib64/ld-linux-x86-64.so.2"],
     libc = "glibc2.31",
-    sha256s = ["1b2281aac4935dfea1f89dfc19e445fdbb45303202af60679ccb8bf035f081a0"],
-    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_amd64.deb"],
+    sha256s = [
+        "1b2281aac4935dfea1f89dfc19e445fdbb45303202af60679ccb8bf035f081a0",
+        "4aa7b9c9f3225df65a750ae0ff5c890fc6108c82a609b3c5abd45d211838bf3c",
+        "7f9222342d3551d063bf651319ec397c39278eeeb9ab5950ae0e8c28ef0af431",
+        "bf67018f5303466eb468680b637a5d3f3bb17b9d44decf3d82d40b35babcd3e0",
+    ],
+    urls = [
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.31-0ubuntu9.18_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-10/libgcc-s1_10.5.0-1ubuntu1~20.04_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-10/libstdc++6_10.5.0-1ubuntu1~20.04_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu1.5_amd64.deb",
+    ],
 )
 
 glibc_deb_runtime(
@@ -209,8 +234,18 @@ glibc_deb_runtime(
     arch = "aarch64",
     interpreters = ["/lib/ld-linux-aarch64.so.1"],
     libc = "glibc2.35",
-    sha256s = ["39268442551926cf1234a382cd0b2748d9e1db709cac1747d07bbff4b0d76a35"],
-    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb"],
+    sha256s = [
+        "39268442551926cf1234a382cd0b2748d9e1db709cac1747d07bbff4b0d76a35",
+        "46626e1af6b159061e055f843654ee1f0f1e65fa280331ed47ee76ba1b1f6045",
+        "59d244119e6129c7e9c0897491c0e210e925d15881b2dedcf8965ceb4fbf1aa3",
+        "cfd99d1ca41e710fdd3f68bfdc4d36dd24e14377656764f00b215b89cf6976e8",
+    ],
+    urls = [
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_arm64.deb",
+    ],
 )
 
 glibc_deb_runtime(
@@ -218,8 +253,18 @@ glibc_deb_runtime(
     arch = "x86_64",
     interpreters = ["/lib64/ld-linux-x86-64.so.2"],
     libc = "glibc2.35",
-    sha256s = ["48f29742cb2096895e932c6708dfebb498e1e96f5cb09955edae42beb6f01dfa"],
-    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_amd64.deb"],
+    sha256s = [
+        "48f29742cb2096895e932c6708dfebb498e1e96f5cb09955edae42beb6f01dfa",
+        "d383e642d83263147f7b4b69fb92cf1036e5246c6be3accf10b77f986684589a",
+        "29ef3d289b272704b75141906c8f683db0f2bdb0942061366691333bfb289bdc",
+        "9dc17e51a1be2d9ed63b7b84ef0e4e29c5abe6f1bc62cb03e7181483cce8a2f2",
+    ],
+    urls = [
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.35-0ubuntu3.13_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb",
+    ],
 )
 
 glibc_deb_runtime(
@@ -227,8 +272,18 @@ glibc_deb_runtime(
     arch = "aarch64",
     interpreters = ["/lib/ld-linux-aarch64.so.1"],
     libc = "glibc2.39",
-    sha256s = ["7d25b6ffc4df6deefd1a48efff5792d6a6bd89ac064a2a8b88e796d3d533e095"],
-    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb"],
+    sha256s = [
+        "7d25b6ffc4df6deefd1a48efff5792d6a6bd89ac064a2a8b88e796d3d533e095",
+        "5b191f79ad985a9a653dbba45214619f729f9178a9bdf92f7c68db06c50d070b",
+        "f84a05ac45a6884109b6527e911081a38263b89e042fc94a338cf975f61a330c",
+        "cbe3d39ec32d3cc27c021ae4af11e7c67bdf9d700d573207e0941d4038056278",
+    ],
+    urls = [
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.1_arm64.deb",
+    ],
 )
 
 glibc_deb_runtime(
@@ -236,6 +291,16 @@ glibc_deb_runtime(
     arch = "x86_64",
     interpreters = ["/lib64/ld-linux-x86-64.so.2"],
     libc = "glibc2.39",
-    sha256s = ["955644e8bc2930a9bf8eea5e4c2237c8a118c1e2ac2845b993b6f7f35eefd293"],
-    urls = ["https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_amd64.deb"],
+    sha256s = [
+        "955644e8bc2930a9bf8eea5e4c2237c8a118c1e2ac2845b993b6f7f35eefd293",
+        "aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd",
+        "a51f8de7829211db961a31f02158058ad1a95f92ac6d0a5dff6350e2821c54c0",
+        "7074b6a2f6367a10d280c00a1cb02e74277709180bab4f2491a2f355ab2d6c20",
+    ],
+    urls = [
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.7_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_amd64.deb",
+        "https://snapshot.ubuntu.com/ubuntu/20260614T000000Z/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.1_amd64.deb",
+    ],
 )
