@@ -361,7 +361,7 @@ pub fn executeDecodedActionWithOptions(
         return error.MissingRuntimeMountCache;
     }
     try checkExecutionCancellation(options.cancellation);
-    try appendDevNullMount(io, allocator, work_root, work_root_path, &bind_mounts);
+    try appendDevNodeMounts(io, allocator, work_root, work_root_path, &bind_mounts);
     try checkExecutionCancellation(options.cancellation);
 
     const input_fetch_completed_wall = timestampNow(io);
@@ -2176,20 +2176,39 @@ fn prepareChrootBaseDirs(io: std.Io, chroot_root: std.Io.Dir) !void {
     try chroot_root.createDirPath(io, "var/tmp");
 }
 
-fn appendDevNullMount(
+// Device nodes bound into every action chroot. The random devices matter for the JVM: without
+// /dev/random, SecureRandom seeding falls back to ThreadedSeedGenerator, which stalls ~8s.
+const action_dev_nodes = [_][]const u8{ "null", "zero", "random", "urandom" };
+
+fn appendDevNodeMounts(
     io: std.Io,
     allocator: std.mem.Allocator,
     chroot_dir: std.Io.Dir,
     chroot_path: []const u8,
     bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
 ) !void {
+    for (action_dev_nodes) |name| {
+        try appendDevNodeMount(io, allocator, chroot_dir, chroot_path, name, bind_mounts);
+    }
+}
+
+fn appendDevNodeMount(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    chroot_dir: std.Io.Dir,
+    chroot_path: []const u8,
+    name: []const u8,
+    bind_mounts: *std.ArrayListUnmanaged(action_runner.BindMount),
+) !void {
+    var sub_path_buffer: [32]u8 = undefined;
+    const sub_path = try std.fmt.bufPrint(&sub_path_buffer, "dev/{s}", .{name});
     try chroot_dir.writeFile(io, .{
-        .sub_path = "dev/null",
+        .sub_path = sub_path,
         .data = "",
     });
-    const source = try allocator.dupeZ(u8, "/dev/null");
+    const source = try std.fmt.allocPrintSentinel(allocator, "/dev/{s}", .{name}, 0);
     errdefer allocator.free(source);
-    const target = try std.fmt.allocPrintSentinel(allocator, "{s}/dev/null", .{chroot_path}, 0);
+    const target = try std.fmt.allocPrintSentinel(allocator, "{s}/dev/{s}", .{ chroot_path, name }, 0);
     errdefer allocator.free(target);
     try bind_mounts.append(allocator, .{
         .source = source,
@@ -3804,4 +3823,39 @@ test "prepareChrootBaseDirs creates temporary directories" {
     try prepareChrootBaseDirs(std.testing.io, work_dir);
     try work_dir.access(std.testing.io, "tmp", .{});
     try work_dir.access(std.testing.io, "var/tmp", .{});
+}
+
+test "appendDevNodeMounts binds null, zero, random and urandom into the chroot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var work_dir = try tmp.dir.createDirPathOpen(std.testing.io, "work", .{});
+    defer work_dir.close(std.testing.io);
+    try prepareChrootBaseDirs(std.testing.io, work_dir);
+
+    const allocator = std.testing.allocator;
+    var bind_mounts: std.ArrayListUnmanaged(action_runner.BindMount) = .empty;
+    defer {
+        for (bind_mounts.items) |mount| {
+            allocator.free(mount.source);
+            allocator.free(mount.target);
+        }
+        bind_mounts.deinit(allocator);
+    }
+
+    try appendDevNodeMounts(std.testing.io, allocator, work_dir, "/chroot", &bind_mounts);
+
+    const expected = [_][]const u8{ "null", "zero", "random", "urandom" };
+    try std.testing.expectEqual(expected.len, bind_mounts.items.len);
+    for (expected, bind_mounts.items) |name, mount| {
+        const source = try std.fmt.allocPrint(allocator, "/dev/{s}", .{name});
+        defer allocator.free(source);
+        const target = try std.fmt.allocPrint(allocator, "/chroot/dev/{s}", .{name});
+        defer allocator.free(target);
+        try std.testing.expectEqualStrings(source, mount.source);
+        try std.testing.expectEqualStrings(target, mount.target);
+        try std.testing.expect(!mount.read_only);
+        // The bind target must exist as a file before the mount.
+        try work_dir.access(std.testing.io, source[1..], .{});
+    }
 }
