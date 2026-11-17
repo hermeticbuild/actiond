@@ -59,7 +59,13 @@ pub const Machine = struct {
         defer allocator.free(vsock_device);
         const cas_drive = try driveArg(allocator, "cas", options.cas_image_path, false, .none, .io_uring);
         defer allocator.free(cas_drive);
-        const cas_device = try std.fmt.allocPrint(allocator, "virtio-blk-device,drive=cas,iothread=cas-io,num-queues={d}", .{cas_queue_count});
+        // The CAS disk has no IOThread. An IOThread completes requests outside the BQL and raises
+        // the virtio-mmio interrupt line there, while a vCPU thread handles the guest's
+        // InterruptACK under the BQL. A completion between the ACK's status clear and its line
+        // update leaves the line high. The guest sees virtio-mmio interrupts as edge-triggered
+        // (x86 microvm with acpi=off, aarch64 virt device tree), so a line that stays high never
+        // interrupts again, and every CAS request hangs.
+        const cas_device = try std.fmt.allocPrint(allocator, "virtio-blk-device,drive=cas,num-queues={d}", .{cas_queue_count});
         defer allocator.free(cas_device);
         const runtime_drive = try driveArg(allocator, "runtimes", options.runtime_image_path, true, .writeback, .threads);
         defer allocator.free(runtime_drive);
@@ -104,8 +110,6 @@ pub const Machine = struct {
             kernel_append,
             "-device",
             vsock_device,
-            "-object",
-            "iothread,id=cas-io",
             "-drive",
             cas_drive,
             "-device",

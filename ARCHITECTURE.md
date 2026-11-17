@@ -62,8 +62,9 @@ kernel boot on ARM64 does not require firmware. `linux-actiond` expands every
 frame into a sealed memfd, then executes QEMU with `execveat`. Only the
 persistent guest-owned CAS image is stored under `--root`. QEMU uses KVM and
 host CPU passthrough. The persistent CAS image uses `cache=none`,
-`aio=io_uring`, one IOThread, and one
-virtio-blk queue per vCPU up to four queues.
+`aio=io_uring`, and one virtio-blk queue per vCPU up to four queues. It has no
+IOThread: virtio-mmio interrupts are edge-triggered in the guest, and an
+IOThread can leave the interrupt line asserted, which stops all CAS I/O.
 
 `linux-actiond-guest` lives in the initramfs. It runs as guest init, mounts the
 minimal guest filesystems, mounts `/cas` and `/runtimes`, then execs itself as
